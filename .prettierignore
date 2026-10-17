@@ -1,0 +1,8 @@
+dist/
+node_modules/
+src/generated/
+skills/
+LICENSE
+package-lock.json
+*.md
+contracts/openapi.json

@@ -1,0 +1,67 @@
+{
+  "name": "pidgen",
+  "version": "0.1.0-alpha.1",
+  "description": "Command-line client and agent skills for Pidgen",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pidgen-ai/pidgen-cli.git"
+  },
+  "homepage": "https://github.com/pidgen-ai/pidgen-cli#readme",
+  "bugs": {
+    "url": "https://github.com/pidgen-ai/pidgen-cli/issues"
+  },
+  "type": "module",
+  "bin": {
+    "pidgen": "dist/pidgen.js"
+  },
+  "files": [
+    "dist",
+    "skills",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:contract": "vitest run --config vitest.contract.config.ts",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "typecheck": "tsc --noEmit",
+    "contract:generate": "openapi-typescript contracts/openapi.json -o src/generated/api.d.ts",
+    "contract:pull": "node scripts/contract-pull.mjs",
+    "release:check": "node scripts/release-check.mjs",
+    "api:coverage": "node scripts/api-coverage.mjs",
+    "docs:check": "node scripts/docs-bundle.mjs check",
+    "docs:pack": "node scripts/docs-bundle.mjs pack",
+    "prepublishOnly": "npm run release:check"
+  },
+  "dependencies": {
+    "@sigstore/bundle": "^5.0.0",
+    "@sigstore/protobuf-specs": "^0.5.2",
+    "@sigstore/tuf": "^5.0.0",
+    "@sigstore/verify": "^4.1.2",
+    "commander": "^15.0.0",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@stoplight/prism-cli": "^5.15.11",
+    "@types/node": "^24.19.0",
+    "eslint": "^10.11.0",
+    "openapi-typescript": "^7.13.0",
+    "prettier": "^3.9.9",
+    "tsup": "^8.5.1",
+    "typescript": "~5.9",
+    "typescript-eslint": "^8.70.1",
+    "vitest": "^5.0.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,2 @@
+Error: no matching signatures: none of the expected identities matched what was in the certificate, got subjects [https://github.com/example-org/other-worker/.github/workflows/release.yml@refs/tags/v1.0.0] with issuer https://issuer.test.example
+main.go:74: error during command execution: no matching signatures: none of the expected identities matched what was in the certificate, got subjects [https://github.com/example-org/other-worker/.github/workflows/release.yml@refs/tags/v1.0.0] with issuer https://issuer.test.example

@@ -1,0 +1,17 @@
+[
+  {
+    "critical": {
+      "identity": {
+        "docker-reference": "registry.test.example/example-org/worker"
+      },
+      "image": {
+        "docker-manifest-digest": "sha256:925955a225a5c7e39cfcc41964a065a7945e7c22a1d27d11976ea928e8c0b4c3"
+      },
+      "type": "cosign container image signature"
+    },
+    "optional": {
+      "Issuer": "https://issuer.test.example",
+      "Subject": "https://github.com/example-org/example-worker/.github/workflows/release.yml@refs/tags/v1.0.0"
+    }
+  }
+]

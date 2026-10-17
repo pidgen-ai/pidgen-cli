@@ -1,0 +1,41 @@
+[
+  {
+    "Id": "4f1c2b9a8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a",
+    "Created": "2026-01-01T00:00:00.000000000Z",
+    "Path": "pidgen-worker",
+    "Args": [],
+    "State": {
+      "Status": "running",
+      "Running": true,
+      "Paused": false,
+      "Restarting": false,
+      "OOMKilled": false,
+      "Dead": false,
+      "Pid": 4242,
+      "ExitCode": 0,
+      "Error": "",
+      "StartedAt": "2026-01-01T00:00:01.000000000Z",
+      "FinishedAt": "0001-01-01T00:00:00Z"
+    },
+    "Image": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "Name": "/pidgen-worker",
+    "Mounts": [
+      {
+        "Type": "volume",
+        "Name": "pidgen-worker-home",
+        "Source": "/var/lib/docker/volumes/pidgen-worker-home/_data",
+        "Destination": "/pidgen",
+        "Driver": "local",
+        "Mode": "z",
+        "RW": true,
+        "Propagation": ""
+      }
+    ],
+    "Config": {
+      "Hostname": "4f1c2b9a8d7e",
+      "Env": ["PIDGEN_HOME=/pidgen"],
+      "Image": "registry.example.com/example-org/worker@sha256:925955a225a5c7e39cfcc41964a065a7945e7c22a1d27d11976ea928e8c0b4c3",
+      "Labels": {}
+    }
+  }
+]

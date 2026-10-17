@@ -1,0 +1,139 @@
+name: Release
+
+# Publishes the `pidgen` package to npm when a version tag, v<package.json version>, is pushed. A
+# release publishes under the `latest` dist-tag and a prerelease under its prerelease id, so
+# 0.1.0-alpha.2 publishes under `alpha`. Until the first release, a prerelease takes `latest` too,
+# so `pidgen` and `pidgen@alpha` install the same version; once `latest` is a release, prereleases
+# leave it alone.
+#
+# Requirements, set up once:
+#   - The NPM_TOKEN repository secret: a granular access token from npmjs.com with
+#     "Read and write" permission on the `pidgen` package (or on new packages for the first
+#     release) and "Bypass 2FA" enabled, since no person is present to answer a prompt.
+#   - package.json `repository.url` names this GitHub repository; npm refuses provenance
+#     when it does not match the workflow's repository.
+#
+# After publishing, the job packs docs/ into the docs bundle pidgen-cli-docs-<version>.tar.gz
+# (`npm run docs:pack`) and attaches it to the tag's GitHub release, creating the release when it
+# does not exist yet, so docs.pidgen.ai can render the docs of exactly the release people install.
+#
+# Provenance (`--provenance`) links the published tarball to this workflow run, so anyone
+# can verify the package was built here from the tagged commit. Nothing is ever published
+# from a workstation: `prepublishOnly` runs the release check, and this job is the only
+# place `npm publish` runs.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # required for npm provenance
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # attach the docs bundle to the GitHub release
+      id-token: write # required for npm provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - run: npm ci
+
+      - name: The tag matches package.json
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json version ${version}"
+            exit 1
+          fi
+
+      - name: package.json names this repository
+        run: |
+          url="$(node -p "(require('./package.json').repository || {}).url || ''")"
+          case "$url" in
+            *"github.com/${GITHUB_REPOSITORY}"*) ;;
+            *)
+              echo "::error::package.json repository.url must point at https://github.com/${GITHUB_REPOSITORY} for npm provenance (found '${url}')"
+              exit 1
+              ;;
+          esac
+
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - name: Contract tests against a Prism mock server
+        run: npm run test:contract
+      - name: Docs meet the docs bundle contract
+        run: npm run docs:check
+      - run: npm run build
+      - run: node dist/pidgen.js --version
+
+      - name: Generated API types match the committed contract
+        run: |
+          npm run contract:generate
+          git diff --exit-code -- src/generated || {
+            echo "::error::src/generated/api.d.ts is stale: run npm run contract:generate and commit it"
+            exit 1
+          }
+
+      - name: Package contents
+        run: npm pack --dry-run
+
+      # A prerelease (0.1.0-alpha.1) publishes under its identifier (alpha); the next step decides
+      # whether it takes latest too.
+      - name: Publish
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          case "$version" in
+            *-*) tag="$(echo "${version#*-}" | cut -d. -f1)" ;;
+            *) tag=latest ;;
+          esac
+          npm publish --provenance --access public --tag "$tag"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Until the first release, latest follows the newest prerelease, so `npm install -g pidgen` and
+      # `pidgen@alpha` install the same version. A release on latest is never replaced by one.
+      - name: Point latest at this prerelease while there is no release
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          name="$(node -p "require('./package.json').name")"
+          case "$version" in
+            *-*) ;;
+            *) echo "${version} is a release, published as latest"; exit 0 ;;
+          esac
+          latest="$(npm view "$name" dist-tags.latest 2>/dev/null || true)"
+          case "$latest" in
+            "" | *-*) npm dist-tag add "${name}@${version}" latest ;;
+            *) echo "latest is the release ${latest}; ${version} keeps its own dist-tag only" ;;
+          esac
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Pack the docs bundle
+        run: npm run docs:pack
+
+      # A prerelease (0.1.0-alpha.1) is marked as one on GitHub too.
+      - name: Attach the docs bundle to the GitHub release
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            case "$version" in
+              *-*) prerelease=--prerelease ;;
+              *) prerelease= ;;
+            esac
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
+              --notes "pidgen ${version}: see CHANGELOG.md." $prerelease
+          fi
+          gh release upload "$GITHUB_REF_NAME" "pidgen-cli-docs-${version}.tar.gz" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

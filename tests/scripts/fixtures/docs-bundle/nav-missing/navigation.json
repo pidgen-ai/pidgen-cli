@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "title": "Guides",
+      "pages": [{ "title": "First page", "path": "first.md" }]
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "mediaType": "application/vnd.dev.sigstore.trustedroot+json;version=0.1",
+  "tlogs": [
+    {
+      "baseUrl": "https://rekor.test.example",
+      "hashAlgorithm": "SHA2_256",
+      "publicKey": {
+        "rawBytes": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEGFxzb7wWDnm3lFZFSUJqLRHYnnzYkf7M/5nUuPcCtmE8wi3hkZtwD5v37cl3AFRnXP+xZ5o4xBIJfdmtC41KlA==",
+        "keyDetails": "PKIX_ECDSA_P256_SHA_256",
+        "validFor": {
+          "start": "2025-01-01T00:00:00.000Z"
+        }
+      },
+      "logId": {
+        "keyId": "1ky3cegyeS2yM2C7l7h0qTFJF99lSW+HDzraIWJM4z4="
+      }
+    }
+  ],
+  "certificateAuthorities": [
+    {
+      "subject": {
+        "organization": "Example Test Sigstore",
+        "commonName": "test-fulcio"
+      },
+      "uri": "https://fulcio.test.example",
+      "certChain": {
+        "certificates": [
+          {
+            "rawBytes": "MIIBrjCCAVWgAwIBAgIQAQGfBGKO1KEDxsZea5MKujAKBggqhkjOPQQDAjA2MR4wHAYDVQQKDBVFeGFtcGxlIFRlc3QgU2lnc3RvcmUxFDASBgNVBAMMC3Rlc3QtZnVsY2lvMB4XDTI1MDEwMTAwMDAwMFoXDTM1MDEwMTAwMDAwMFowNjEeMBwGA1UECgwVRXhhbXBsZSBUZXN0IFNpZ3N0b3JlMRQwEgYDVQQDDAt0ZXN0LWZ1bGNpbzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABEcBY4QCrS8P/qrdKKjTqQWSe0oPVXM+xJhFE2tBXidalvlCawRd3Jw/pw3GweHeXXyN+C8bMFKzRq04DefgJy6jRTBDMA4GA1UdDwEB/wQEAwIBBjASBgNVHRMBAf8ECDAGAQH/AgEBMB0GA1UdDgQWBBQP0Luqnie68Ps7xWLUktiLatRsHjAKBggqhkjOPQQDAgNHADBEAiASuv0ii59c4FPlGjAoUhW3y4OV2GacQ5wIPyWYH95WbgIgXNYpuviVxbqbobQvc9YJft+Uw0q85stIOaE/6y3wHAk="
+          }
+        ]
+      },
+      "validFor": {
+        "start": "2025-01-01T00:00:00.000Z"
+      }
+    }
+  ],
+  "ctlogs": [
+    {
+      "baseUrl": "https://ctlog.test.example",
+      "hashAlgorithm": "SHA2_256",
+      "publicKey": {
+        "rawBytes": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEQGMUIo9mcqlUhqCBx39yrpvHiBTjxexmOmTEnLKJBrAbw1XqInaa6aYhk0B4rFuTLUwWZj4giQToHtc2Jv23xw==",
+        "keyDetails": "PKIX_ECDSA_P256_SHA_256",
+        "validFor": {
+          "start": "2025-01-01T00:00:00.000Z"
+        }
+      },
+      "logId": {
+        "keyId": "hX4PGmiFhXUR+gbooEmVcdhzgQ9LBac34Y0yabCUwOE="
+      }
+    }
+  ],
+  "timestampAuthorities": []
+}

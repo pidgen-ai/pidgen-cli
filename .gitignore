@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+
+# Local build and environment files, never committed
+*.tgz
+pidgen-*-docs-*.tar.gz
+*.env
+
+# Local-only agent skills (third-party licences; not shipped)
+.claude/skills/codebase-design/

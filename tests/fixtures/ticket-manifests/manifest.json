@@ -1,0 +1,35 @@
+{
+  "schema_version": "pidgen.ticket-manifest.v1",
+  "project_id": "EXAMPLE",
+  "promote": false,
+  "summary": "Split the board fix into an API filter and the board read.",
+  "root": {
+    "title": "Board shows every active ticket",
+    "objective": "An active ticket appears in its lane however many newer tickets exist.",
+    "estimated_complexity": 3,
+    "scope_boundaries": "In: the board population read. Out: lane derivation.",
+    "acceptance_criteria": [
+      {
+        "ref": "older-visible",
+        "statement": "An active ticket with 100 newer tickets appears in its lane."
+      }
+    ],
+    "success_metrics": [{ "name": "Hidden active tickets", "target": "0" }]
+  },
+  "children": [
+    {
+      "ref": "api-filter",
+      "title": "Ticket list accepts several stages",
+      "objective": "The ticket list filters by several stages at once.",
+      "estimated_complexity": 2,
+      "acceptance_criteria": [{ "statement": "A list request with two stages returns both." }]
+    },
+    {
+      "ref": "board-read",
+      "title": "Board reads its population by stage",
+      "objective": "The board reads active tickets by stage instead of the newest 100.",
+      "acceptance_criteria": [{ "statement": "The board requests active stages only." }]
+    }
+  ],
+  "edges": [{ "source": "api-filter", "target": "board-read" }]
+}

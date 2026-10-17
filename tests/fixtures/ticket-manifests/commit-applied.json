@@ -1,0 +1,32 @@
+{
+  "status": "ok",
+  "meta": null,
+  "data": {
+    "command_id": "cmd-manifest-1",
+    "status": "applied",
+    "status_url": "https://pidgen.example.com/api/v1/ticket-manifests/applications/cmd-manifest-1",
+    "root": {
+      "ref": "root",
+      "ticket_id": "tkt-example-50",
+      "ticket_key": "EXAMPLE-50",
+      "plan_item_id": null
+    },
+    "children": [
+      {
+        "ref": "api-filter",
+        "ticket_id": "tkt-example-51",
+        "ticket_key": "EXAMPLE-51",
+        "plan_item_id": "item-example-51"
+      },
+      {
+        "ref": "board-read",
+        "ticket_id": "tkt-example-52",
+        "ticket_key": "EXAMPLE-52",
+        "plan_item_id": "item-example-52"
+      }
+    ],
+    "promoted": false,
+    "materialized_plan_digest": "sha256:plan-example",
+    "execution_admission_digest": null
+  }
+}

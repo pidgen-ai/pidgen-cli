@@ -1,0 +1,307 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Pidgen public API (contract test fixture)",
+    "version": "0.0.0-fixture",
+    "description": "A small, representative stand-in for the public API used by the contract tests: a list route, a detail route, a preview/apply pair with its status route, and the shared error shape. Not the real document; see contracts/openapi.json."
+  },
+  "servers": [{ "url": "https://pidgen.example.com" }],
+  "paths": {
+    "/api/v1/projects": {
+      "get": {
+        "operationId": "listProjects",
+        "summary": "List projects",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+          },
+          { "name": "cursor", "in": "query", "required": false, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of projects",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status", "data"],
+                  "properties": {
+                    "status": { "const": "ok" },
+                    "data": {
+                      "type": "object",
+                      "required": ["items", "next_cursor"],
+                      "properties": {
+                        "items": {
+                          "type": "array",
+                          "items": { "$ref": "#/components/schemas/Project" }
+                        },
+                        "next_cursor": { "type": ["string", "null"] }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "status": "ok",
+                  "data": {
+                    "items": [
+                      {
+                        "project_id": "proj-example",
+                        "name": "Example project",
+                        "account_id": "ACC-EXAMPLE"
+                      }
+                    ],
+                    "next_cursor": null
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/projects/{project_id}": {
+      "get": {
+        "operationId": "getProject",
+        "summary": "Show a project",
+        "parameters": [
+          { "name": "project_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "The project",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status", "data"],
+                  "properties": {
+                    "status": { "const": "ok" },
+                    "data": { "$ref": "#/components/schemas/Project" }
+                  }
+                },
+                "example": {
+                  "status": "ok",
+                  "data": {
+                    "project_id": "proj-example",
+                    "name": "Example project",
+                    "account_id": "ACC-EXAMPLE"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such project",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorBody" },
+                "example": {
+                  "detail": { "code": "PROJECT_NOT_FOUND", "message": "No project proj-missing." }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tickets/{ticket_id}/retry/preview": {
+      "post": {
+        "operationId": "previewTicketRetry",
+        "summary": "Preview retrying a ticket",
+        "parameters": [
+          { "name": "ticket_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "The plan the apply would carry out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status", "data"],
+                  "properties": {
+                    "status": { "const": "ok" },
+                    "data": {
+                      "type": "object",
+                      "required": ["preview_digest", "required_acknowledgements", "plan"],
+                      "properties": {
+                        "preview_digest": { "type": "string" },
+                        "required_acknowledgements": {
+                          "type": "array",
+                          "items": { "type": "string" }
+                        },
+                        "plan": { "type": "object" }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "status": "ok",
+                  "data": {
+                    "preview_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "required_acknowledgements": [],
+                    "plan": { "ticket_id": "PIDGEN-4", "action": "retry" }
+                  }
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/tickets/{ticket_id}/retry/apply": {
+      "post": {
+        "operationId": "applyTicketRetry",
+        "summary": "Apply a previewed ticket retry",
+        "parameters": [
+          { "name": "ticket_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["preview_digest", "idempotency_key", "acknowledgements"],
+                "properties": {
+                  "preview_digest": { "type": "string" },
+                  "idempotency_key": { "type": "string" },
+                  "acknowledgements": { "type": "array", "items": { "type": "string" } },
+                  "reason": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted; poll the status route until it settles",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status", "data"],
+                  "properties": {
+                    "status": { "const": "ok" },
+                    "data": {
+                      "type": "object",
+                      "required": ["request_id", "status"],
+                      "properties": {
+                        "request_id": { "type": "string" },
+                        "status": { "enum": ["pending", "running", "applied", "failed"] }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "status": "ok",
+                  "data": { "request_id": "req-example", "status": "pending" }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The plan changed since the preview",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorBody" },
+                "example": {
+                  "detail": {
+                    "code": "PREVIEW_STALE",
+                    "message": "The plan changed since it was previewed. Preview again."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/requests/{request_id}": {
+      "get": {
+        "operationId": "getRequestStatus",
+        "summary": "Status of an accepted apply",
+        "parameters": [
+          { "name": "request_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request's current status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status", "data"],
+                  "properties": {
+                    "status": { "const": "ok" },
+                    "data": {
+                      "type": "object",
+                      "required": ["request_id", "status"],
+                      "properties": {
+                        "request_id": { "type": "string" },
+                        "status": { "enum": ["pending", "running", "applied", "failed"] },
+                        "run_id": { "type": ["string", "null"] }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "status": "ok",
+                  "data": {
+                    "request_id": "req-example",
+                    "status": "applied",
+                    "run_id": "run-example"
+                  }
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Project": {
+        "type": "object",
+        "required": ["project_id", "name", "account_id"],
+        "properties": {
+          "project_id": { "type": "string" },
+          "name": { "type": "string" },
+          "account_id": { "type": "string" }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "required": ["detail"],
+        "properties": {
+          "detail": {
+            "type": "object",
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "type": "string" },
+              "message": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "An error with its code",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorBody" },
+            "example": { "detail": { "code": "NOT_FOUND", "message": "Not found." } }
+          }
+        }
+      }
+    }
+  }
+}

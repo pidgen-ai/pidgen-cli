@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "title": "Getting started",
+      "pages": [
+        { "title": "Get started with Pidgen", "path": "getting-started.md" },
+        { "title": "Install agent skills", "path": "install-skills.md" },
+        { "title": "Install and connect a worker", "path": "install-worker.md" },
+        { "title": "Troubleshooting", "path": "troubleshooting.md" }
+      ]
+    },
+    {
+      "title": "Guides",
+      "pages": [
+        { "title": "Authentication and Accounts", "path": "authentication.md" },
+        { "title": "Preview and apply", "path": "preview-and-apply.md" },
+        { "title": "Planning work in cohorts", "path": "planning-cohorts.md" },
+        { "title": "Architecture", "path": "architecture.md" }
+      ]
+    },
+    {
+      "title": "Reference",
+      "pages": [
+        { "title": "Commands", "path": "commands.md" },
+        { "title": "Agent skills", "path": "skills.md" },
+        { "title": "Workers", "path": "workers.md" },
+        { "title": "Output and exit codes", "path": "output-and-exit-codes.md" },
+        { "title": "API compatibility", "path": "api-compatibility.md" }
+      ]
+    }
+  ]
+}

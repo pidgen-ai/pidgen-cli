@@ -1,0 +1,68 @@
+{
+  "status": "ok",
+  "meta": null,
+  "data": {
+    "preview_digest": "sha256:manifest-preview-blocked",
+    "required_acknowledgements": [],
+    "committable": false,
+    "promotable": false,
+    "findings": [
+      {
+        "code": "UNKNOWN_WORKFLOW_TYPE",
+        "blocks": "commit",
+        "subject": "board-read",
+        "path": "/children/1/workflow_type",
+        "message": "No workflow type named implementaton is registered.",
+        "detail": { "allowed": ["implementation", "investigation"] }
+      },
+      {
+        "code": "MANIFEST_EDGE_CYCLE",
+        "blocks": "commit",
+        "subject": "manifest",
+        "path": "/edges/1",
+        "message": "The blocks edges form a cycle.",
+        "detail": { "cycle": ["api-filter", "board-read", "api-filter"] }
+      },
+      {
+        "code": "CRITERION_REF_DUPLICATE",
+        "blocks": "commit",
+        "subject": "root/older-visible",
+        "path": "/root/acceptance_criteria/1/ref",
+        "message": "The criterion ref older-visible repeats within the ticket.",
+        "detail": {}
+      },
+      {
+        "code": "TICKET_READINESS_SCOPE_MISSING",
+        "blocks": "none",
+        "subject": "api-filter",
+        "path": "/children/0/scope_boundaries",
+        "message": "Stating scope_boundaries would earn 10 points.",
+        "detail": { "earned": 0, "available": 10 }
+      }
+    ],
+    "plan": {
+      "project_id": "proj-example",
+      "epic_id": null,
+      "effective_merge_policy": "manual",
+      "merge_policy_source": "project",
+      "promote": false,
+      "root": {
+        "ref": "root",
+        "title": "Board shows every active ticket",
+        "workflow_type": "implementation",
+        "team_member_id": "AGENT-EXAMPLE",
+        "agent_source": "project_default",
+        "criteria": [],
+        "readiness": {
+          "score": 65,
+          "threshold": 60,
+          "ready": true,
+          "reason": "ready",
+          "components": []
+        }
+      },
+      "children": [],
+      "edges": []
+    }
+  }
+}

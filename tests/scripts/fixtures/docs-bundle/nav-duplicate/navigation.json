@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "title": "Guides",
+      "pages": [
+        { "title": "First page", "path": "first.md" },
+        { "title": "Second page", "path": "second.md" }
+      ]
+    },
+    {
+      "title": "Reference",
+      "pages": [{ "title": "Second page again", "path": "second.md" }]
+    }
+  ]
+}

@@ -1,0 +1,107 @@
+{
+  "status": "ok",
+  "meta": null,
+  "data": {
+    "preview_digest": "sha256:manifest-preview-1",
+    "required_acknowledgements": [],
+    "committable": true,
+    "promotable": false,
+    "findings": [
+      {
+        "code": "TICKET_COMPLEXITY_REQUIRED",
+        "blocks": "promotion",
+        "subject": "board-read",
+        "path": "/children/1/estimated_complexity",
+        "message": "Set estimated_complexity; a ticket without one never runs.",
+        "detail": {}
+      },
+      {
+        "code": "TICKET_READINESS_CONTEXT_ARTIFACTS_DEFICIT",
+        "blocks": "none",
+        "subject": "root",
+        "path": "/root/context_artifacts",
+        "message": "3 more context artifacts would earn 15 points.",
+        "detail": { "earned": 0, "available": 15 }
+      },
+      {
+        "code": "AGENT_UNASSIGNED",
+        "blocks": "none",
+        "subject": "api-filter",
+        "path": "/children/0/team_member_id",
+        "message": "The ticket resolves to the Account's Unassigned Agent.",
+        "detail": {}
+      },
+      {
+        "code": "TICKET_READINESS_CRITERIA_DEFICIT",
+        "blocks": "none",
+        "subject": "root",
+        "path": "/root/acceptance_criteria",
+        "message": "2 more criteria would earn 20 points.",
+        "detail": { "earned": 10, "available": 30 }
+      }
+    ],
+    "plan": {
+      "project_id": "proj-example",
+      "epic_id": null,
+      "effective_merge_policy": "manual",
+      "merge_policy_source": "project",
+      "promote": false,
+      "root": {
+        "ref": "root",
+        "title": "Board shows every active ticket",
+        "workflow_type": "implementation",
+        "team_member_id": "AGENT-EXAMPLE",
+        "agent_source": "project_default",
+        "criteria": [{ "ref": "older-visible", "id": "older-visible" }],
+        "readiness": {
+          "score": 65,
+          "threshold": 60,
+          "ready": true,
+          "reason": "ready",
+          "components": [
+            { "component": "criteria", "earned": 10, "available": 30 },
+            { "component": "must_criteria", "earned": 5, "available": 20 },
+            { "component": "scope", "earned": 10, "available": 10 },
+            { "component": "success_metrics", "earned": 10, "available": 10 },
+            { "component": "context_artifacts", "earned": 0, "available": 15 },
+            { "component": "open_questions", "earned": 0, "available": 0 },
+            { "component": "stage", "earned": 0, "available": 15 }
+          ]
+        }
+      },
+      "children": [
+        {
+          "ref": "api-filter",
+          "title": "Ticket list accepts several stages",
+          "workflow_type": "implementation",
+          "team_member_id": "AGENT-UNASSIGNED",
+          "agent_source": "unassigned",
+          "criteria": [{ "ref": "ac-1", "id": "AC-0123456789ab" }],
+          "readiness": {
+            "score": 30,
+            "threshold": 60,
+            "ready": false,
+            "reason": "Quality score 30.0 < 60",
+            "components": []
+          }
+        },
+        {
+          "ref": "board-read",
+          "title": "Board reads its population by stage",
+          "workflow_type": "implementation",
+          "team_member_id": "AGENT-EXAMPLE",
+          "agent_source": "project_default",
+          "criteria": [{ "ref": "ac-1", "id": "AC-ba9876543210" }],
+          "readiness": {
+            "score": 30,
+            "threshold": 60,
+            "ready": false,
+            "reason": "estimated_complexity is required",
+            "components": []
+          }
+        }
+      ],
+      "edges": [{ "source": "api-filter", "target": "board-read", "dep_type": "blocks" }]
+    }
+  }
+}
