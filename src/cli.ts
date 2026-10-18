@@ -114,6 +114,7 @@ async function execute(
       render(success(result.data, { ...meta, ...result.meta }), input.global.format, {
         ...presentationContext(ctx, spec.path),
         ...result.presentation,
+        ...(result.human !== undefined ? { human: result.human } : {}),
       }),
     );
     return ExitCode.Ok;
@@ -129,7 +130,12 @@ function emit(
   meta = emptyMeta(),
   command?: readonly string[],
 ): ExitCode {
-  ctx.io.stdout(render(failure(error, meta), format, presentationContext(ctx, command)));
+  ctx.io.stdout(
+    render(failure(error, meta), format, {
+      ...presentationContext(ctx, command),
+      ...(error.human !== undefined ? { human: error.human } : {}),
+    }),
+  );
   return error.exitCode;
 }
 

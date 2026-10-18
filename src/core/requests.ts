@@ -17,6 +17,11 @@ import type { components } from "../generated/api.js";
  */
 
 export type Request = components["schemas"]["Request"];
+/**
+ * A Request as the commands print it: named by its key (`REQ-{n}`) in `id`, and its duplicate by
+ * its key in `duplicate_of`, never by the internal `conv-` id unless the server has no key for it.
+ */
+export type ShownRequest = Omit<Request, "request_key" | "duplicate_of_key">;
 export type RequestSubmitRequest = components["schemas"]["RequestSubmitRequest"];
 export type RequestReceived = components["schemas"]["RequestReceived"];
 export type RequestAttachment = components["schemas"]["RequestAttachment"];
@@ -214,9 +219,12 @@ export function validateRequestBody(route: RequestRoute, body: unknown): void {
   validateBody(PUBLIC_API_DOCUMENT, route.method, route.path, body);
 }
 
-/** The `<request>` argument every command on one Request takes. */
+/**
+ * The `<request>` argument every command on one Request takes: its key, `REQ-{n}`. The server
+ * resolves it inside the Account; the CLI sends it as given.
+ */
 export function requestArgument(command: Command): Command {
-  return command.argument("<request>", "the request: its id, conv-…");
+  return command.argument("<request>", "the request: its key, e.g. REQ-12");
 }
 
 /** The `<request>` argument as one checked, percent-encoded path segment. */
@@ -224,9 +232,18 @@ export function requestSegment(args: string[]): string {
   return pathSegment("request", args[0]);
 }
 
-/** The Request's page on the server: `<server>/requests/<id>`. */
-export function requestUrl(server: string, id: string): string {
-  return `${server.replace(/\/+$/, "")}/requests/${encodeURIComponent(id)}`;
+/** How a Request is named to people: its key (`REQ-{n}`), or its id only when it has no key. */
+export function requestName(request: Pick<Request, "id" | "request_key">): string {
+  return request.request_key ?? request.id;
+}
+
+/**
+ * The Request's page on the server: `<server>/requests/<key>?account=<account>`, without the
+ * Account when none is selected.
+ */
+export function requestUrl(server: string, key: string, account: string | null = null): string {
+  const page = `${server.replace(/\/+$/, "")}/requests/${encodeURIComponent(key)}`;
+  return account === null ? page : `${page}?account=${encodeURIComponent(account)}`;
 }
 
 /**
@@ -271,13 +288,44 @@ export function integerOption(
   return number;
 }
 
-/** A Request with its requester's contact left out when the server withholds it (null). */
-export function presentRequest(request: Request): Request {
-  if (request.requester === null || request.requester.contact !== null) return request;
+/**
+ * A Request as the commands print it: named by its key in `id` and its duplicate by its key in
+ * `duplicate_of` (the ids only when the server has no key), and its requester's contact left out
+ * when the server withholds it (null). A promoted Request's Ticket keeps its `ticket_key`.
+ */
+export function presentRequest(request: Request): ShownRequest {
+  const { request_key: key, duplicate_of_key: duplicateKey, ...rest } = request;
+  const shown: ShownRequest = {
+    ...rest,
+    id: key ?? request.id,
+    duplicate_of: duplicateKey ?? request.duplicate_of,
+  };
+  if (request.requester === null || request.requester.contact !== null) return shown;
   // The contact is withheld from this caller: say nothing rather than null.
   const requester: Partial<NonNullable<Request["requester"]>> = { ...request.requester };
   delete requester.contact;
-  return { ...request, requester: requester as Request["requester"] };
+  return { ...shown, requester: requester as Request["requester"] };
+}
+
+/**
+ * An intent answer as the intent commands print it: an object carrying `request_key` names its
+ * request by that key in `request_id` and `conversation_id` (the ids only when the key is null),
+ * and a nested `request` likewise. Anything else is returned as is.
+ */
+export function presentIntent<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((item: unknown) => presentIntent(item)) as T;
+  if (!isRecord(value)) return value;
+  const { request_key: own, ...shown } = value as Record<string, unknown>;
+  const inner = value["request"];
+  // A clarification names the same request at its top and in `request`; either key names both.
+  const key = own ?? (isRecord(inner) ? inner["request_key"] : undefined);
+  if (isRecord(inner)) shown["request"] = presentIntent(inner);
+  if (typeof key === "string") {
+    for (const field of ["request_id", "conversation_id"]) {
+      if (typeof shown[field] === "string") shown[field] = key;
+    }
+  }
+  return shown as T;
 }
 
 /**
@@ -307,10 +355,16 @@ export async function triageRequest(
     { body: sent },
   );
   const request = (isRecord(data["request"]) ? data["request"] : data) as Request;
-  const answer =
-    request === data
-      ? presentRequest(request)
-      : { state: request.state, ...data, request: presentRequest(request) };
+  if (request === data) return { data: presentRequest(request), meta: session.meta(response) };
+  const answer: Record<string, unknown> = {
+    state: request.state,
+    ...data,
+    request: presentRequest(request),
+  };
+  // A promotion names its Ticket by key beside its id, as the promoted Request does.
+  if ("ticket_id" in data && request.promoted?.kind === "ticket") {
+    answer["ticket_key"] = request.promoted.ticket_key;
+  }
   return { data: answer, meta: session.meta(response) };
 }
 

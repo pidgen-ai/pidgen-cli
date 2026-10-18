@@ -70,10 +70,16 @@ export function acceptedSeries(list: WorkerReleaseList): string[] {
   return list.releases.map((release) => release.series);
 }
 
-/** The series a worker version belongs to: `2.10.3` and `2.10.3.dev4` are both `2.10`. */
+/**
+ * The series a worker version belongs to: `2.10.3`, `2.10.3.dev4` and `2.10.0b1` are all `2.10`.
+ */
 export function seriesOf(version: string): string {
-  const [major = "", minor = ""] = version.split(".");
-  return `${major}.${minor}`;
+  const match = /^(\d+)\.(\d+)/.exec(version);
+  if (match === null) {
+    const [major = "", minor = ""] = version.split(".");
+    return `${major}.${minor}`;
+  }
+  return `${match[1]}.${match[2]}`;
 }
 
 /**
@@ -100,16 +106,26 @@ export function selectSeries(list: WorkerReleaseList, version?: string): WorkerR
   );
 }
 
+/** Where a pre-release phase sorts: a development build first, then alpha, beta, candidate. */
+const PRE_RELEASE_RANK = { a: 1, b: 2, rc: 3 } as const;
+const FINAL_RANK = 4;
+
 /**
- * Orders two worker versions: numeric parts first (`2.10.0` after `2.9.4`), then a development
- * build before its release (`2.10.0.dev3` before `2.10.0`) and a lower `.devN` before a higher one.
+ * Orders two worker versions as PEP 440 does: numeric parts first (`2.10.0` after `2.9.4`), then
+ * a release's development builds, alphas, betas and candidates before it
+ * (`2.10.0.dev3` < `2.10.0a1` < `2.10.0b1` < `2.10.0rc1` < `2.10.0`), each by its number, and a
+ * pre-release's own development builds before it (`2.10.0b1.dev2` < `2.10.0b1`).
  */
 export function compareVersions(a: string, b: string): number {
   const parse = (version: string) => {
-    const match = /^(\d+(?:\.\d+)*)(?:[.-]?(?:dev|rc|a|b)\.?(\d+))?/.exec(version);
+    const match = /^(\d+(?:\.\d+)*)(?:[.-]?(a|b|rc)\.?(\d+))?(?:[.-]?dev\.?(\d+))?/.exec(version);
     const parts = (match?.[1] ?? "").split(".").map((part) => Number.parseInt(part, 10) || 0);
-    const pre = match?.[2] === undefined ? null : Number.parseInt(match[2], 10);
-    return { parts, pre };
+    const phase = match?.[2] as keyof typeof PRE_RELEASE_RANK | undefined;
+    const dev = match?.[4] === undefined ? null : Number.parseInt(match[4], 10);
+    const rank = phase !== undefined ? PRE_RELEASE_RANK[phase] : dev !== null ? 0 : FINAL_RANK;
+    const pre = phase === undefined ? 0 : Number.parseInt(match?.[3] ?? "0", 10);
+    // A development build sorts before the version it builds towards.
+    return { parts, key: [rank, pre, dev === null ? 1 : 0, dev ?? 0] };
   };
   const left = parse(a);
   const right = parse(b);
@@ -117,10 +133,11 @@ export function compareVersions(a: string, b: string): number {
     const difference = (left.parts[index] ?? 0) - (right.parts[index] ?? 0);
     if (difference !== 0) return Math.sign(difference);
   }
-  if (left.pre === right.pre) return 0;
-  if (left.pre === null) return 1;
-  if (right.pre === null) return -1;
-  return Math.sign(left.pre - right.pre);
+  for (let index = 0; index < left.key.length; index++) {
+    const difference = (left.key[index] ?? 0) - (right.key[index] ?? 0);
+    if (difference !== 0) return Math.sign(difference);
+  }
+  return 0;
 }
 
 export type UpdateReason = "protocol_unsupported" | "protocol_outdated" | "newer_available";

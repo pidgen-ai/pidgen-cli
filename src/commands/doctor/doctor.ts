@@ -35,6 +35,9 @@ export type { CheckStatus, DoctorCheck } from "../../core/doctor.js";
 /** The oldest Node.js this CLI runs on: package.json's `engines.node`. */
 export const MINIMUM_NODE = { major: 22, minor: 12 } as const;
 
+/** The oldest git the worker's coding agents work with. */
+export const MINIMUM_GIT = { major: 2, minor: 25 } as const;
+
 /** Where to get each tool a check may find missing. */
 export const FIXES = {
   node: "https://nodejs.org/en/download",
@@ -43,12 +46,15 @@ export const FIXES = {
   uv: "https://docs.astral.sh/uv/getting-started/installation/",
   docker: "https://docs.docker.com/get-started/get-docker/",
   cosign: "https://docs.sigstore.dev/cosign/system_config/installation/",
+  /** git on macOS comes with the Command Line Tools. */
+  gitMacos: "xcode-select --install",
+  gitLinux: "install git with your package manager",
 } as const;
 
 /**
  * `pidgen doctor`: diagnoses this machine and its connection to Pidgen before anything is changed,
  * and works with nothing configured and no worker installed. `data.checks` is, in order:
- * `node` (the Node.js version), `server` (`GET /health` answers as Pidgen and accepts this CLI's
+ * `node` (the Node.js version), `git` (on `PATH`, 2.25 or later), `server` (`GET /health` answers as Pidgen and accepts this CLI's
  * API version), `credential` (`GET /me` accepts the credential; the Account's role, the token kind
  * and scopes, and whether it may enroll workers), `runtime` (`uv` for the wheel runtime; `docker`
  * and `cosign` for the container runtime), then the checks the server's worker release list gives,
@@ -91,6 +97,7 @@ export async function doctorChecks(
       : null;
   const checks: DoctorCheck[] = [
     nodeCheck(process.versions.node),
+    gitCheck(await findGit(ctx), ctx.workerRuntime.platform),
     connection.server,
     connection.credential,
     await runtimeCheck(ctx),
@@ -114,6 +121,68 @@ export function nodeCheck(version: string): DoctorCheck {
         `Node.js ${version} is older than ${minimum}, the oldest this CLI supports.`,
         FIXES.node,
       );
+}
+
+/** git as found on `PATH`: where, and the version `git --version` printed (`null`: unreadable). */
+export interface FoundGit {
+  path: string;
+  version: string | null;
+}
+
+/**
+ * The `git` check: git on `PATH`, 2.25 or later. The fix is the platform's way to install it: the
+ * Command Line Tools on macOS, the package manager elsewhere.
+ */
+export function gitCheck(git: FoundGit | null, platform: NodeJS.Platform): DoctorCheck {
+  const fix = platform === "darwin" ? FIXES.gitMacos : FIXES.gitLinux;
+  const minimum = `${MINIMUM_GIT.major}.${MINIMUM_GIT.minor}`;
+  if (git === null) return check("git", "fail", "git is not on PATH.", fix);
+  if (git.version === null) {
+    return check("git", "fail", `${git.path} did not report a git version.`, fix);
+  }
+  const [major = 0, minor = 0] = git.version.split(".").map((part) => Number.parseInt(part, 10));
+  const supported =
+    major > MINIMUM_GIT.major || (major === MINIMUM_GIT.major && minor >= MINIMUM_GIT.minor);
+  return supported
+    ? check(
+        "git",
+        "ok",
+        `git ${git.version} at ${git.path} (the worker needs ${minimum} or later).`,
+      )
+    : check(
+        "git",
+        "fail",
+        `git ${git.version} at ${git.path} is older than ${minimum}, the oldest the worker supports.`,
+        fix,
+      );
+}
+
+/** git on `PATH` and its version, from `git --version`; `null` when it is not on `PATH`. */
+async function findGit(ctx: RunContext): Promise<FoundGit | null> {
+  const path = await findOnPath(ctx, "git", ctx.workerRuntime);
+  if (path === null) return null;
+  const output = await new Promise<string | null>((resolveOutput) => {
+    let child;
+    try {
+      child = ctx.workerRuntime.spawn(path, ["--version"], {
+        cwd: ctx.cwd,
+        env: ctx.env,
+        stdio: ["ignore", "pipe", "ignore"],
+        shell: false,
+      });
+    } catch {
+      resolveOutput(null);
+      return;
+    }
+    const chunks: Buffer[] = [];
+    child.stdout?.on("data", (chunk: string | Buffer) => chunks.push(Buffer.from(chunk)));
+    child.once("error", () => resolveOutput(null));
+    child.once("close", (code: number | null) =>
+      resolveOutput(code === 0 ? Buffer.concat(chunks).toString("utf8") : null),
+    );
+  });
+  const version = output === null ? null : (/(\d+\.\d+(?:\.\d+)?)/.exec(output)?.[1] ?? null);
+  return { path, version };
 }
 
 interface Connection {

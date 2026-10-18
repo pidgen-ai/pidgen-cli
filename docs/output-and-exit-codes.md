@@ -61,13 +61,17 @@ including differing operations or the reason it could not be checked. Diagnostic
 passed, warning, failed and skipped checks separately, with each check's supplied fix below.
 
 Human failures retain `error <code>: <message>` and show supplied details: failed checks and fixes,
-blocking manifest findings, startup logs, rollback/restart information, and setup's equivalent
-scriptable commands when a terminal is required. Commands remain copyable at narrow widths.
+blocking manifest findings, startup logs and rollback/restart information. Setup is the exception:
+it draws its own failure block, and without a terminal it lists the equivalent scriptable
+commands. Commands remain copyable at narrow widths.
 Use `--format json` for the unchanged structured error and metadata.
 
-Help, no-argument help and version remain text even with `--format json`. Setup's step commands,
-questions and progress stay on standard error; its final step results use the selected stdout
-format. Authentication verification instructions and CLI-owned worker progress also keep their
+Help, no-argument help and version remain text even with `--format json`. Setup's questions and
+progress stay on standard error. In human output, setup has its own rendering: a successful run
+ends with `└  Done in <m> min <s> s` and a summary card on standard output instead of its step
+results, and a failure is the one `■` block setup draws on standard error, with nothing more on
+standard output (no `error <code>:` line or details). With `--format json` its envelope is
+unchanged. Authentication verification instructions and CLI-owned worker progress also keep their
 established streams. Foreground worker execution continues to inherit the worker's streams and
 exit status.
 
@@ -189,9 +193,9 @@ string (the message), or a `{"detail": [ … ]}` validation list (`error.details
 | Code | Meaning | Typical `error.code` |
 |---|---|---|
 | 0 | Success | — |
-| 1 | Unexpected error (a bug, an unexpected server response, failed diagnostics, a failing worker install, update, uninstall or enrollment, or an immediately exiting worker) | `CLI_INTERNAL`, `UNEXPECTED_RESPONSE`, `NOT_PIDGEN`, `DOCTOR_FAILED`, `WORKER_EXITED`, `INSTALL_FAILED`, `ENROLL_FAILED`, `INSTALL_RECORD_INVALID`, `DOWNLOAD_FAILED`, `UPDATE_ROLLED_BACK`, `ROLLBACK_FAILED`, `UNINSTALL_FAILED`, `DOCKER_FAILED` |
-| 2 | Usage error: bad flags, invalid input file, a path outside the public API, an unavailable local worker or worker runtime (including a Docker daemon that cannot be reached), a missing worker `worker enroll` was not told to install, or `pidgen setup` without a terminal | `CLI_USAGE`, `INPUT_INVALID`, `PATH_NOT_PUBLIC`, `WORKER_NOT_FOUND`, `UNSUPPORTED_PLATFORM`, `INSTALL_CONFIRMATION_REQUIRED`, `COSIGN_NOT_FOUND`, `RUNTIME_UNAVAILABLE`, `TERMINAL_REQUIRED` |
-| 3 | Not authenticated, or not authorized | `AUTH_REQUIRED`, `TOKEN_EXPIRED`, `TOKEN_INVALID`, `FORBIDDEN`, `ACCOUNT_MISMATCH`, `ENROLL_NOT_PERMITTED` |
+| 1 | Unexpected error (a bug, an unexpected server response, failed diagnostics, a failing worker install, update, uninstall or enrollment, or an immediately exiting worker) | `CLI_INTERNAL`, `UNEXPECTED_RESPONSE`, `NOT_PIDGEN`, `DOCTOR_FAILED`, `WORKER_EXITED`, `INSTALL_FAILED`, `ENROLL_FAILED`, `INSTALL_RECORD_INVALID`, `DOWNLOAD_FAILED`, `UPDATE_ROLLED_BACK`, `ROLLBACK_FAILED`, `UNINSTALL_FAILED`, `DOCKER_FAILED`, `CAPACITY_REFUSED`, `CAPACITY_FAILED` |
+| 2 | Usage error: bad flags, invalid input file, a path outside the public API, an unavailable local worker or worker runtime (including a Docker daemon that cannot be reached), a missing worker `worker enroll` was not told to install, `pidgen setup` without a terminal, cancelled with Ctrl-C at a question, or stopped by a declined licence | `CLI_USAGE`, `INPUT_INVALID`, `PATH_NOT_PUBLIC`, `WORKER_NOT_FOUND`, `UNSUPPORTED_PLATFORM`, `INSTALL_CONFIRMATION_REQUIRED`, `COSIGN_NOT_FOUND`, `RUNTIME_UNAVAILABLE`, `TERMINAL_REQUIRED`, `SETUP_CANCELLED`, `AGENT_NOT_FOUND`, `AGENT_REQUIRED` |
+| 3 | Not authenticated, or not authorized | `AUTH_REQUIRED`, `TOKEN_EXPIRED`, `TOKEN_INVALID`, `FORBIDDEN`, `ACCOUNT_MISMATCH`, `ENROLL_NOT_PERMITTED`, `AGENT_NOT_SIGNED_IN` |
 | 4 | Not found | `NOT_FOUND`, `CREDENTIAL_NOT_FOUND`, `WORKER_NOT_RUNNING`, `WORKER_NOT_INSTALLED`, `INSTRUCTION_NOT_FOUND`, and resource-specific codes |
 | 5 | Domain refusal or conflict | server codes such as `ACTIVE_ATTEMPT_EXISTS`, `REOPEN_NOT_JUSTIFIED`, `REQUEST_WITHDRAW_FORBIDDEN`, `REQUEST_ALREADY_CREATED`, `SUBMISSION_KEY_REUSED`, `STEP_SETTLED`, `RUN_PAUSED`, `RUN_HELD`, `INSTRUCTION_ALREADY_DELIVERED`, `DELIVERY_IN_FLIGHT`, `PUBLICATION_RESULT_UNKNOWN`; `WORKER_ALREADY_RUNNING`, `PROVENANCE_INVALID`, `RELEASE_UNSUPPORTED`, `PURGE_REFUSED` |
 | 6 | A preview digest or acknowledgement is required | `DIGEST_REQUIRED`, `ACKNOWLEDGEMENT_REQUIRED`, `PREVIEW_STALE` |
@@ -202,7 +206,7 @@ A preview that succeeds exits 0, even when applying it will need acknowledgement
 `data.required_acknowledgements` says which.
 
 A failed `pidgen setup` step keeps the failing command's own code and exit code; `error.details`
-adds `step`, `command`, `error`, `fix` and `steps` ([Commands](commands.md#setup)).
+adds `step`, `command`, `error`, `fix`, `steps` and `setup_log` ([Commands](commands.md#setup)).
 
 `pidgen worker start` may also return the worker's exit code, including 128 plus the signal number when
 the worker exits because of a signal.
@@ -218,6 +222,10 @@ These do not print an envelope:
 
 A failure before the handoff uses the selected output format. Help and version remain text
 regardless of `--format`.
+
+When whatever reads standard output or standard error closes it early, as `pidgen … | head -1`
+does, the CLI stops writing to it and exits with the command's own exit code; the reader keeps
+what it read before it closed.
 
 ## Stability
 

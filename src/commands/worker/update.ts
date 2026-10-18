@@ -9,21 +9,27 @@ import {
   noInstallRecord,
   readInstallRecord,
   removeKeptArtifact,
+  retireSharedInstall,
   writeInstallRecord,
   type InstallRecord,
   licenceNotice,
   type RunRecord,
   type WorkerAdapter,
 } from "../../core/worker-install.js";
-import { packageIndex, resolveRelease } from "../../core/worker-index.js";
+import { renderLifecycle } from "../../core/lifecycle-human.js";
+import { packageIndex, resolveRelease, resolveUpdate, trackOf } from "../../core/worker-index.js";
 import { readWorkerReleases, selectSeries } from "../../core/worker-releases.js";
 import { optionalVersion } from "./install.js";
 
 /**
- * `pidgen worker update [--version <version>] [--restart] [--test]`: installs the newest release of
- * the server's `current` series, or `--version`, in the recorded form with the same verification
- * as `worker install`, and updates the install record. `--test`, or an install that came from
- * TestPyPI, looks there for rehearsals. Nothing updates on its own.
+ * `pidgen worker update [--version <version>] [--restart] [--test]`: installs `--version`, or else
+ * the newest release of the server's `current` series on the installed version's track when it is
+ * newer than the installed one (`resolveUpdate`: final releases, and pre-releases too while a
+ * pre-release is installed; never an older release), in the recorded form with the same
+ * verification as `worker install`, and updates the install record. `--test`, or an install that
+ * came from TestPyPI, looks there for rehearsals. Nothing updates on its own. When nothing is
+ * newer it installs nothing and, in a terminal, says the installed version is the newest on its
+ * track.
  *
  * A worker started with `--detach` (or its container) keeps running the old version unless
  * `--restart` is given: then it is stopped after the install and started again with the same
@@ -55,20 +61,27 @@ export const workerUpdate: CommandSpec = {
     const { list, meta } = await readWorkerReleases(ctx, global);
     const series = selectSeries(list, version);
     const index = packageIndex(options["test"] === true || previous.index === "testpypi");
-    const release = await resolveRelease(ctx, series, index, version);
+    // Without --version, only a newer release on the installed version's track: never backwards.
+    const release =
+      version !== undefined
+        ? await resolveRelease(ctx, series, index, version)
+        : await resolveUpdate(ctx, series, index, previous.version);
     const adapter = adapterFor(ctx, previous.form);
-    if (previous.version === release.version) {
+    if (release === null || previous.version === release.version) {
       const { running } = await adapter.status();
-      return {
-        data: {
-          ...previous,
-          updated: false,
-          previous_version: previous.version,
-          running,
-          restarted: false,
-        },
-        meta,
+      const data = {
+        ...previous,
+        updated: false,
+        previous_version: previous.version,
+        running,
+        restarted: false,
       };
+      if (release !== null) return { data, meta };
+      const newest = `pidgen-worker ${previous.version} is already the newest on its track: ${trackOf(previous.version, index, series.series)}.`;
+      const human = renderLifecycle("worker update", data, ctx.io.stdoutColumns, undefined, [
+        newest,
+      ]);
+      return { data, meta, ...(human !== undefined ? { human } : {}) };
     }
 
     await adapter.prerequisite();
@@ -79,6 +92,7 @@ export const workerUpdate: CommandSpec = {
     const local = await adapter.status();
     if (!restart || !local.running || local.record === null) {
       await dropSuperseded(previous, installed);
+      await retireSharedInstall(ctx, previous, local);
       return {
         data: {
           ...installed,
@@ -101,6 +115,8 @@ export const workerUpdate: CommandSpec = {
       return await rollBack(ctx, adapter, previous, installed, args, error);
     }
     await dropSuperseded(previous, installed);
+    // Nothing runs from the previous install now.
+    await retireSharedInstall(ctx, previous, null);
     return {
       data: {
         ...installed,
@@ -165,7 +181,10 @@ async function rollBack(
       },
     );
   }
-  await writeInstallRecord(ctx, previous);
+  // The wheel was reinstalled into the worker home's tool environment, where the new one was.
+  const restored: InstallRecord =
+    previous.form === "wheel" ? { ...previous, location: installed.location } : previous;
+  await writeInstallRecord(ctx, restored);
   if (previous.file !== installed.file) await removeKeptArtifact(installed);
 
   let worker: RunRecord | null = null;
@@ -184,7 +203,7 @@ async function rollBack(
     ExitCode.Unexpected,
     {
       ...attempt,
-      record: previous,
+      record: restored,
       running: worker !== null,
       worker,
       ...(restartError !== null ? { restart_error: restartError } : {}),

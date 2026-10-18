@@ -2,6 +2,246 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.2
+
+The second alpha, published to npm under `alpha` and `latest`. Its focus is `pidgen setup`: one
+action at a time from a fresh machine to a running worker, with the worker installed in its own
+environment, a setup log, `--verbose`, a summary card at the end, and the worker's licence linked
+before it is installed. `pidgen worker update` now follows a beta's pre-release track and never
+moves backwards.
+
+### Worker update never moves backwards and follows a beta's track
+
+- `pidgen worker update` without `--version` no longer installs the server's newest final release
+  whenever it differs from the installed one. It installs only a release newer than the installed
+  version, by PEP 440 order: on a final release, a newer final release of the server's current
+  series (pre-releases are ignored); on a pre-release installed with `--version` (`2.11.1b1`), a
+  newer pre-release or final release of the series, the newest winning (`2.11.1b2`, then
+  `2.11.1rc1`, then `2.11.1`). Once a final release is installed, later updates follow final
+  releases only. A machine on `2.11.1b1` is no longer moved back to `2.11.0`.
+- When nothing is newer, update installs nothing, prints no licence notice, exits 0 with
+  `updated: false` and the install record, and in a terminal says the installed version is already
+  the newest on its track. The JSON envelope's shape is unchanged.
+- `--version` still installs exactly the release it names, older releases included.
+- `pidgen setup`'s re-run menu offers *Update the worker to <version>* by the same rule, so a
+  machine on a beta is offered the next beta and never an older release.
+
+### The worker's licence is linked before it is installed
+
+- `pidgen setup`'s install question now links the full text of the Pidgen Worker End-User Licence
+  Agreement under the line that names it:
+  `Read it: https://pidgen.ai/legal/eula`. With `--accept-licence` the screen still shows the one
+  answered line; the setup log records the licence's lines under the question either way.
+- The licence notice `pidgen worker install` and `pidgen worker update` print on standard error
+  ends with the same `Read it: https://pidgen.ai/legal/eula` line. Standard output and the JSON
+  envelope are unchanged.
+
+### A closed pipe no longer crashes the CLI
+
+- When whatever reads the CLI's standard output or standard error closes it early (for example
+  `pidgen worker status --format json | head -c 100`, or a pipe into a program that is not
+  installed), the CLI no longer crashes with an unhandled `EPIPE` and a Node.js stack trace. It
+  stops writing and exits with the command's own exit code.
+
+### Setup accepts the caps pidgen-worker 2.11 saves
+
+- `pidgen setup` no longer stops at `enroll` with `CAPACITY_FAILED` ("exited with status 0") when
+  `pidgen-worker capacity set` succeeds. pidgen-worker 2.11 prints the file's path and digest before
+  its `saved` line, and setup read only the first line. Exit 0 with a `saved`, `saved (…)`,
+  `saved, apply pending` or `saved; …` line anywhere in the output is now success; `saved (…)` is
+  what the worker prints when the values were already set.
+
+### Setup ends with a summary card, fails in one block, and asks what to do on a re-run
+
+- **A summary card.** In a terminal, a successful `pidgen setup` ends with
+  `└  Done in <m> min <s> s` and a card on standard output: the Account (by name, with your email),
+  the worker's name, version and state, each coding agent's sessions, the commands to manage it
+  (`pidgen worker status`, `pidgen worker stop`, `pidgen setup`), and the one next thing to do. The
+  `Setup complete.` / `Steps (N displayed)` rendering of `data` is gone. With `--format json` the
+  envelope is unchanged and the frame ends with the `└  Done in` line on standard error.
+- **A failure is one block.** A failed step shows one `■` block: what failed and why, the one fix,
+  the setup log's path and `Run pidgen setup again to continue from here.`, with nothing more: no
+  `error <code>:` line, no `Details:`, no repeated message. Declining uv now prints five lines after
+  the question instead of about sixty. The JSON envelope keeps every field.
+- **Re-running a finished setup asks what to do.** `◇  Already set up · <Account> · <agents> ·
+  pidgen-worker <version> · running`, then *Check everything and stop*, *Change coding agents or
+  sessions*, or, when the server's current release is newer, *Update the worker to <version>*
+  (`pidgen worker update --restart`). A part-done machine collapses what is done into one
+  `◇  Already done · …` line and continues.
+- **A credential that cannot enroll stops at sign-in.** Setup stops before anything is installed
+  with `ENROLL_NOT_PERMITTED` (exit 3) at the `sign-in` step, naming the roles that can (an Owner
+  or Administrator) and the Personal API Token sign-in command.
+- **The sign-in block leads with the link.** `◆  Sign in to Pidgen`, then the link that carries the
+  code (`verification_uri_complete`), then the address and the code, and a spinner until you
+  approve.
+
+### Setup shows only the action: the setup log, spinners and --verbose
+
+- **Only the current action on screen.** While `pidgen setup` runs, the screen no longer shows the
+  `$ pidgen …` lines or the output of uv, npm, uv's installer or the worker. Each task is a spinner
+  that collapses to one line, such as `◇  pidgen-worker 2.11.0 installed and verified`,
+  `◇  Enrolled as sams-laptop in Acme`, `◇  Worker running and connected to Pidgen` and
+  `◇  Worker checks passed`; sign-in collapses to
+  `◇  Signed in as <email> · <Account> · <Role>`, and each signed-in coding agent to
+  `◇  <agent> signed in`.
+- **The machine check is one line.** `◇  This machine is ready · Linux · Node.js 24.16 · git 2.43`;
+  the checks a later step fixes, and the container runtime's `cosign` warning, go only to the log.
+- **The setup log.** Each run writes `~/.pidgen/logs/setup-<start time>.log` (mode 0600) with the
+  CLI and Node.js versions, the server, the flags, each step's start, end and result, every command
+  and its full output, each question and answer, and every error in full. It never holds a token,
+  enrollment token or other credential (they are written as `[redacted]`). Setup keeps the newest
+  ten. A failed step's `error.details` adds `setup_log`, its path; a failing command's own `log` is kept.
+- **`--verbose`** shows each task's commands and their output under it as it runs, and keeps them
+  after it succeeds.
+- **A failing task keeps its last ten lines.** Without `--verbose`, a task that fails keeps the last
+  ten lines of its own output from this run on screen under its `■` line, each once, then the
+  log's path.
+
+### Setup asks its questions with clack: checkboxes, choices, sessions as a number
+
+- **Prompts, not typed numbers.** Every question `pidgen setup` asks is a clack prompt answered with
+  the arrow keys, space and Enter, drawn in clack's frame (`┌  Pidgen setup`). The
+  `Step N of 8  <title>` headers and the `done` / `skipped — …` result lines are gone; each answered
+  question collapses to one `◇` line, such as `◇  Coding agents · Claude Code, Codex`, and an
+  answer a flag gave in advance is shown the same way with `(from --sessions)` and the like.
+  `@clack/prompts` and `@clack/core` are new runtime dependencies, pinned exactly and loaded with a
+  dynamic import only by setup, so no other command starts slower.
+- **Coding agents are checkboxes.** Agents on `PATH` start ticked; a missing one is labelled
+  `not installed · setup installs it with npm`, and ticking it installs it with no second
+  question. Pi is shown, disabled, when it is on `PATH`. Confirming none keeps the question open
+  with `Choose at least one.`
+- **Sessions are a number.** Each chosen agent's question is
+  `<agent>: how many sessions should run at once?`, a choice of numbers with plan hints (Claude
+  Code 1, 2, 4; Codex 1, 2, 3) plus *Custom…*, a whole number from 1. It starts on the lowest, or
+  on the worker's current cap on a re-run. New `--sessions <agent>=<n>` (repeatable) answers it in
+  advance; `--plan` still does; both for one agent is `CLI_USAGE`. `data.steps`' `capacity.plans`
+  now lists only the agents `--plan` answered for.
+- **One install question.** `Install pidgen-worker <version> and accept its licence?`, with one
+  line naming the licence, replaces the runtime question (setup offers only the wheel, so nothing
+  is asked) and the licence notice, which setup no longer prints. New `--accept-licence` answers
+  it; declining stops with `SETUP_CANCELLED` (exit 2): the worker wasn't installed.
+- **Ctrl-C cancels cleanly.** Ctrl-C at any question stops setup with
+  `Setup cancelled. Everything before this is kept.`, `SETUP_CANCELLED`, exit 2.
+- **Failures name the step without a number.** A failed step's message is
+  `Setup stopped at <title>…` and ends with ``Run `pidgen setup` again to continue from here.``
+- **Skill contract change.** `pidgen-setup-worker` leads with `--sessions` for sizing agents and
+  describes the prompts, `--accept-licence` and `SETUP_CANCELLED`.
+
+### The worker is installed in its own environment, and the CLI runs the worker it installed
+
+- **Its own uv environment.** `pidgen worker install --runtime wheel` (and so `pidgen setup` and
+  `pidgen worker enroll --install`) runs `uv tool install` with `UV_TOOL_DIR` and
+  `UV_TOOL_BIN_DIR` under the worker home (`~/.pidgen/worker/tools`, `~/.pidgen/worker/bin`), so it
+  never replaces the `pidgen-worker` in uv's shared tool slot, whether another install put it there
+  or a worker is running from it. uv's shared tool directory and `~/.local/bin` are left untouched.
+  The install record's `location` is `~/.pidgen/worker/bin/pidgen-worker`.
+- **The recorded worker runs.** Every `pidgen worker` command and setup run the `pidgen-worker` the
+  install record names; `PIDGEN_WORKER_BIN` still wins, and `PATH` is searched only when there is
+  no record. A recorded worker that is missing is `WORKER_NOT_FOUND` with its path in
+  `error.details.location`, never another one on `PATH`. `pidgen-worker` is no longer on `PATH` by
+  name after an install: run `~/.pidgen/worker/bin/pidgen-worker`, or put that directory on `PATH`.
+- **Earlier installs keep working.** A record an earlier CLI made (in uv's shared slot) is still
+  run. `pidgen worker update` installs into the new environment and moves the record there, then
+  removes the earlier tool unless a worker is running from it or the slot now holds another
+  install's. `pidgen worker uninstall` removes only what the record names.
+- **Setup leaves another `pidgen-worker` alone.** When uv's shared slot holds a `pidgen-worker` the
+  install record does not name, setup says so in one `▲` warning line and leaves it in place.
+
+### Setup decides enrollment from this machine and never starts a worker without a credential
+
+- **Enrolled means this install's credential.** `pidgen setup` skips the enrollment only when this
+  install's worker home (`$PIDGEN_HOME` or `~/.pidgen`) has a `worker.env` with
+  `PIDGEN_NODE_TOKEN` for the configured server and `GET /workers` lists its host id unrevoked. A
+  worker listed under this host's name that is not this install's is no longer adopted: setup says
+  so and asks for a name, defaulting to the next free one (`<host>-2`, then `-3`). A Personal API
+  Token, which cannot read the list, leaves the home's credential to decide.
+- **The name is the worker's host id.** Setup runs `pidgen worker enroll --label <name> --
+  --host-id <name>`, so `--label` names both the enrollment and the worker; a `--label` the
+  Account already lists stops with `CLI_USAGE` (exit 2). `data.steps` reports the name as the
+  `enroll` step's `host_id`.
+- **A removed worker is enrolled again only on request.** When the Account lists this home's
+  worker as revoked, setup asks whether to enroll it again (default yes); declining stops with
+  `SETUP_CANCELLED` (exit 2).
+- **No credential, no start.** Setup never runs `pidgen worker start` when the worker home holds no
+  credential; it stops with `ENROLL_FAILED` (exit 1) and asks for a report with
+  `pidgen feedback --kind not-working`.
+
+### Setup sizes each coding agent from its plan
+
+- **`pidgen setup` asks each chosen agent's plan.** Its `capacity` step turns the answer into the
+  agent's concurrent-session cap and prints it: Claude Code Pro 1, Max 5x 2, Max 20x 4, API key,
+  Team or Enterprise 2, Not sure 1; Codex Plus 1, Pro 3, Business or Enterprise 2, API key 2, Not
+  sure 1. `--plan <agent>=<plan>` (repeatable, such as `--plan claude=max-5x`) answers in advance.
+  `data.steps` reports `plans` and `caps`.
+- **The caps are applied after enrollment.** The `enroll` step runs
+  `pidgen-worker capacity set <agent> --max <cap>` for each chosen agent, `--max 0` for each other
+  harness, and `pidgen-worker capacity set prompts --min 1 --max <sum>`; a refused edit stops it
+  with `CAPACITY_REFUSED` (exit 1) and the worker's message. A re-run on an enrolled worker applies
+  the caps of that run again without enrolling again.
+- **The guides describe the eight steps.** docs/install-worker.md, docs/getting-started.md and the
+  `pidgen-setup-worker` skill cover `--agent`, `--plan`, `pidgen worker login`, the plan table, and
+  changing a cap later with `pidgen-worker capacity set`.
+
+### Setup chooses, installs and signs in to coding agents
+
+- **`pidgen setup` asks which coding agents the worker runs.** Its `agents` step lists Claude Code
+  and Codex with the ones on `PATH` pre-checked (Pi is shown when found, never installed);
+  `--agent claude` and `--agent codex` (repeatable) answer in advance. Nothing chosen stops with
+  `AGENT_REQUIRED` and a fix naming `--agent`. A missing harness no longer stops the check step.
+- **A chosen agent that is missing is installed on request**, with
+  `npm install -g @anthropic-ai/claude-code` or `npm install -g @openai/codex`. When npm may not
+  write its global directory (EACCES), setup prints the command to run and looks on `PATH` again
+  once you press Enter; declining stops with `AGENT_NOT_FOUND` and the command as its fix.
+- **`pidgen worker login claude|codex`** runs the agent's own login with the terminal
+  (`claude auth login`; `codex login --device-auth`), then its status command, and returns
+  `{harness, login}` with `ready`, `not_ready` (exit 3, `AGENT_NOT_SIGNED_IN`) or `unknown`. Setup's
+  `agent-login` step asks each chosen agent's status first and signs in only to those not ready.
+
+### Numbered setup steps, a git check, and uv installed on request
+
+- **`pidgen setup` shows eight numbered steps.** Each prints `Step N of 8  <title>` on standard
+  error and a result line: `done`, `failed`, or `skipped — <reason>`. A successful run ends with
+  `Done in <m> min <s> s` and the next action. `data.steps` adds the ids `agents`, `agent-login`
+  and `capacity` between `sign-in` and `runtime`.
+- **A failed step says where to continue.** Its message names the step and its fix and ends with
+  ``Run `pidgen setup` again to continue from step N.``; `error.details.fix` ends the same way.
+- **`pidgen doctor` checks git.** The `git` check, after `node`, fails when git is missing or older
+  than 2.25, with `xcode-select --install` on macOS and "install git with your package manager" on
+  Linux. `pidgen setup`'s check step runs it too.
+- **Setup offers to install uv.** With uv missing, the check step asks `Install uv now?`; yes runs
+  `curl -LsSf https://astral.sh/uv/install.sh | sh` and uses the uv it installed (from
+  `~/.local/bin` until `PATH` has it); no stops with `RUNTIME_UNAVAILABLE` and that command as the
+  fix.
+- **The worker runs on a uv-managed Python.** The wheel installs with
+  `uv tool install --python 3.12 --python-preference only-managed`, so a system Python, such as a
+  python.org build on macOS without CA certificates, is never picked.
+
+### Requests are named by their REQ key
+
+- **`pidgen request` and `pidgen intent` print a Request's key, `REQ-{n}`, never its internal
+  `conv-` id.** `request list`, `show` and every triage write print the key in `id` (and a
+  duplicate's original by key in `duplicate_of`); the intent commands print it in
+  `conversation_id` and `request_id`. The internal id appears only for a Request the server has
+  not keyed. `request submit` prints the key and its page, `/requests/REQ-{n}?account=<account>`.
+- **Every `<request>` and `<conversation>` argument takes the key**, sent to the server as given.
+- **A promoted Request names its Ticket by `ticket_key`**, and `request promote` answers
+  `ticket_key` beside `ticket_id`.
+- The committed `contracts/openapi.json` states `request_key` and `duplicate_of_key` on `Request`,
+  `ticket_key` on `RequestPromoted`, and `request_key` on the intent answers that name a request.
+- Skills: `pidgen-triage-requests` and `pidgen-file-ticket` pass and report the `REQ-{n}` key.
+
+### Worker pre-releases install from PyPI when named
+
+- **`--version` installs an alpha, beta or release candidate from PyPI.** `pidgen setup`,
+  `pidgen worker install` and `pidgen worker update` accept `--version X.Y.ZaN`, `X.Y.ZbN` or
+  `X.Y.ZrcN`, verified like any release. Without `--version` they still take only final releases.
+  Before, a pre-release on PyPI could not be installed at all, even by name.
+- **A series with only pre-releases says so.** Its `RELEASE_UNSUPPORTED` names the newest
+  pre-release in the message and in `error.details.pre_release` (`null` otherwise), the version
+  `--version` would install.
+- **Versions order as PEP 440 does:** development builds, then alphas, betas and release
+  candidates, then the release. Before, `2.11.0a1`, `2.11.0b1` and `2.11.0rc1` ranked equal.
+
 ## 0.1.0-alpha.1
 
 The first published release, an alpha, published to npm under the `alpha` dist-tag. Nothing was

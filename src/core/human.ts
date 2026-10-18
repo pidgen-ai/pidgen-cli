@@ -10,6 +10,8 @@ export interface PresentationContext {
   responseStatus?: number;
   /** Observation time for human subscription quota ages, outside JSON data. */
   now?: number;
+  /** The command's own rendering for a terminal, used in place of the generic one. */
+  human?: string;
 }
 
 /** Shared fallback; command presentations can specialize without modifying JSON results. */

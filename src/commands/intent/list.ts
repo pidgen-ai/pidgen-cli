@@ -1,5 +1,6 @@
 import { Option, type Command } from "commander";
 import { readAllPages } from "../../core/read.js";
+import { presentIntent } from "../../core/requests.js";
 import type { CommandSpec } from "../../core/registry.js";
 import type { components } from "../../generated/api.js";
 import { filterValue } from "../ticket/list.js";
@@ -22,7 +23,8 @@ export const REQUEST_LIST_STATES = [
  * `pidgen ticket list`. `--project` is sent as `project_id` and `--state` as `state`; without
  * `--state` the request carries none and the server lists the requests waiting on answers
  * (`clarifying`). An unknown state, an empty `--project`, or an argument is a usage error (exit
- * code 2) and sends nothing. The route needs a server that publishes durable requests; a server
+ * code 2) and sends nothing. Each request is named by its key (`REQ-{n}`) in `request_id`, and by
+ * its id only when it has none. The route needs a server that publishes durable requests; a server
  * without it answers 404 (exit code 4). See docs/commands.md, "intent".
  */
 export const intentList: CommandSpec = {
@@ -38,9 +40,10 @@ export const intentList: CommandSpec = {
       );
   },
   async run(ctx, { options, global }) {
-    return readAllPages<IntakeRequest>(ctx, global, "/intents", {
+    const result = await readAllPages<IntakeRequest>(ctx, global, "/intents", {
       project_id: filterValue("--project", options["project"]),
       state: options["state"] as (typeof REQUEST_LIST_STATES)[number] | undefined,
     });
+    return { ...result, data: presentIntent(result.data) };
   },
 };

@@ -1,7 +1,7 @@
 import { homedir, hostname } from "node:os";
-import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import type { OutputFormat } from "./envelope.js";
+import { clackPrompter, type Prompter } from "./prompter.js";
 import {
   cosignRunner,
   sigstorePublicGoodTrust,
@@ -20,6 +20,12 @@ export interface Io {
   stdoutIsTTY: boolean;
   /** Available output width when stdout is a terminal. */
   stdoutColumns?: number;
+  /**
+   * When true, the commands the CLI runs have their output piped and written to `stderr()`, line
+   * by line, instead of sharing the CLI's standard error. `pidgen setup` sets it on the context it
+   * runs commands with, so their output goes to its log and stays off the screen.
+   */
+  pipeChildren?: boolean;
 }
 
 /**
@@ -60,11 +66,12 @@ export interface RunContext {
    */
   cosign: CosignRunner;
   /**
-   * Asks a person a question on the terminal and returns the answer as typed, trimmed. `null` when
-   * standard input or standard error is not a terminal, so a command can never wait on a question
-   * nobody can answer. Only `pidgen setup`, the CLI's one interactive command, uses it.
+   * Opens the prompter that asks a person questions on the terminal (clack's prompts, loaded only
+   * when this is called). `null` when standard input or standard error is not a terminal, so a
+   * command can never wait on a question nobody can answer. Only `pidgen setup`, the CLI's one
+   * interactive command, uses it.
    */
-  ask: ((question: string) => Promise<string>) | null;
+  prompter: (() => Promise<Prompter>) | null;
   /**
    * This machine's host name. `pidgen worker status` looks for the worker with this host id in the
    * App Service's list unless `--host` names another.
@@ -78,6 +85,17 @@ export interface GlobalOptions {
   account?: string;
   format: OutputFormat;
   timeoutSeconds: number;
+}
+
+/**
+ * Lets whatever reads the CLI's output close it early, as `pidgen … | head -1` does: an `EPIPE` on
+ * the stream is ignored, so the command finishes and exits with its own code instead of crashing
+ * with a stack trace. Any other error on the stream is thrown as before.
+ */
+export function ignoreClosedPipe(stream: NodeJS.EventEmitter): void {
+  stream.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code !== "EPIPE") throw error;
+  });
 }
 
 export function defaultContext(): RunContext {
@@ -107,16 +125,10 @@ export function defaultContext(): RunContext {
     provenanceTrust: (cacheDir) => sigstorePublicGoodTrust({ cacheDir }),
     docker: dockerRunner({ env: process.env, homeDir: home, cwd: process.cwd() }),
     cosign: cosignRunner(process.env),
-    ask: process.stdin.isTTY === true && process.stderr.isTTY === true ? askOnTerminal : null,
+    prompter:
+      process.stdin.isTTY === true && process.stderr.isTTY === true
+        ? () => clackPrompter({ input: process.stdin, output: process.stderr })
+        : null,
     hostName: hostname(),
   };
-}
-
-async function askOnTerminal(question: string): Promise<string> {
-  const terminal = createInterface({ input: process.stdin, output: process.stderr });
-  try {
-    return (await terminal.question(question)).trim();
-  } finally {
-    terminal.close();
-  }
 }

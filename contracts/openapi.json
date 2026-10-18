@@ -3293,8 +3293,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Conversation Id"
-            }
+              "title": "Conversation Id",
+              "description": "The request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           }
         ],
         "responses": {
@@ -3356,8 +3358,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Conversation Id"
-            }
+              "title": "Conversation Id",
+              "description": "The request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           }
         ],
         "requestBody": {
@@ -3449,8 +3453,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Conversation Id"
-            }
+              "title": "Conversation Id",
+              "description": "The request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           }
         ],
         "requestBody": {
@@ -3542,8 +3548,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Conversation Id"
-            }
+              "title": "Conversation Id",
+              "description": "The request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           }
         ],
         "requestBody": {
@@ -3635,8 +3643,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Conversation Id"
-            }
+              "title": "Conversation Id",
+              "description": "The request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           }
         ],
         "requestBody": {
@@ -6597,8 +6607,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Request Id"
-            }
+              "title": "Request Id",
+              "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           }
         ],
         "responses": {
@@ -6658,8 +6670,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Request Id"
-            }
+              "title": "Request Id",
+              "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           }
         ],
         "requestBody": {
@@ -6751,8 +6765,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Request Id"
-            }
+              "title": "Request Id",
+              "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           }
         ],
         "requestBody": {
@@ -6844,8 +6860,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Request Id"
-            }
+              "title": "Request Id",
+              "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           }
         ],
         "requestBody": {
@@ -6937,8 +6955,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Request Id"
-            }
+              "title": "Request Id",
+              "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           }
         ],
         "requestBody": {
@@ -7030,8 +7050,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Request Id"
-            }
+              "title": "Request Id",
+              "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           }
         ],
         "requestBody": {
@@ -7123,8 +7145,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Request Id"
-            }
+              "title": "Request Id",
+              "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           }
         ],
         "requestBody": {
@@ -7216,8 +7240,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Request Id"
-            }
+              "title": "Request Id",
+              "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           },
           {
             "name": "attachment_id",
@@ -7289,8 +7315,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Request Id"
-            }
+              "title": "Request Id",
+              "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           }
         ],
         "requestBody": {
@@ -7382,8 +7410,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Request Id"
-            }
+              "title": "Request Id",
+              "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           }
         ],
         "requestBody": {
@@ -7475,8 +7505,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Request Id"
-            }
+              "title": "Request Id",
+              "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           }
         ],
         "requestBody": {
@@ -7568,8 +7600,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Request Id"
-            }
+              "title": "Request Id",
+              "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           }
         ],
         "requestBody": {
@@ -7671,8 +7705,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Request Id"
-            }
+              "title": "Request Id",
+              "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           }
         ],
         "requestBody": {
@@ -7764,8 +7800,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Request Id"
-            }
+              "title": "Request Id",
+              "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           }
         ],
         "requestBody": {
@@ -7857,8 +7895,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Request Id"
-            }
+              "title": "Request Id",
+              "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           }
         ],
         "requestBody": {
@@ -7950,8 +7990,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Request Id"
-            }
+              "title": "Request Id",
+              "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
+            },
+            "description": "The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first."
           }
         ],
         "responses": {
@@ -32709,6 +32751,18 @@
             "title": "Request Id",
             "description": "The request's id; also its `conversation_id`."
           },
+          "request_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Key",
+            "description": "The request's public key in its Account, `REQ-{n}`, or null when it has none; every /api/v1/intents/{conversation_id} path takes it."
+          },
           "project_id": {
             "type": "string",
             "title": "Project Id",
@@ -32900,6 +32954,7 @@
         "type": "object",
         "required": [
           "request_id",
+          "request_key",
           "project_id",
           "title",
           "text",
@@ -33070,6 +33125,18 @@
             "title": "Request Id",
             "description": "The request's id; the same as `conversation_id`."
           },
+          "request_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Key",
+            "description": "The request's public key in its Account, `REQ-{n}`, or null when it has none; every /api/v1/intents/{conversation_id} path takes it."
+          },
           "request": {
             "$ref": "#/components/schemas/IntakeRequest",
             "description": "The request, with its structured questions and what the caller may do."
@@ -33084,6 +33151,7 @@
           "conversation_id",
           "questions",
           "request_id",
+          "request_key",
           "request"
         ],
         "title": "IntentClarification",
@@ -33167,6 +33235,18 @@
             "title": "Request Id",
             "description": "The request the Ticket was created from; read it at GET /api/v1/intents/{request_id}."
           },
+          "request_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Key",
+            "description": "The request's public key in its Account, `REQ-{n}`, or null when it has none; every /api/v1/intents/{conversation_id} path takes it."
+          },
           "assumptions_recorded": {
             "type": "integer",
             "title": "Assumptions Recorded",
@@ -33186,6 +33266,7 @@
           "refinement_command_id",
           "command_error",
           "request_id",
+          "request_key",
           "assumptions_recorded"
         ],
         "title": "IntentCreated",
@@ -41091,7 +41172,19 @@
           "id": {
             "type": "string",
             "title": "Id",
-            "description": "The Request's id (`conv-…`); its page is /requests/{id}."
+            "description": "The Request's internal id (`conv-…`). Show customers `request_key` instead; every /api/v1/requests/{request_id} path takes either."
+          },
+          "request_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Key",
+            "description": "The Request's public key in its Account, `REQ-{n}`, or null for a Request the server has not keyed. Its page is /requests/{request_key}?account={id}."
           },
           "state": {
             "type": "string",
@@ -41298,6 +41391,18 @@
             "title": "Duplicate Of",
             "description": "The surviving Request when it was closed as a duplicate, or null."
           },
+          "duplicate_of_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duplicate Of Key",
+            "description": "The surviving Request's key (`REQ-{n}`) when it was closed as a duplicate, or null."
+          },
           "promoted": {
             "anyOf": [
               {
@@ -41330,6 +41435,7 @@
         "type": "object",
         "required": [
           "id",
+          "request_key",
           "state",
           "waiting_on_requester",
           "kind",
@@ -41349,6 +41455,7 @@
           "close_reason",
           "close_note",
           "duplicate_of",
+          "duplicate_of_key",
           "promoted",
           "version",
           "created_at",
@@ -41561,6 +41668,18 @@
             "title": "Request Id",
             "description": "The request."
           },
+          "request_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Key",
+            "description": "The request's public key in its Account, `REQ-{n}`, or null when it has none; every /api/v1/intents/{conversation_id} path takes it."
+          },
           "action": {
             "$ref": "#/components/schemas/ActionKind",
             "description": "The executed action."
@@ -41577,6 +41696,7 @@
           "status",
           "status_url",
           "request_id",
+          "request_key",
           "action",
           "disposition_code"
         ],
@@ -42625,6 +42745,18 @@
             "title": "Id",
             "description": "The Ticket's or Idea's id."
           },
+          "ticket_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ticket Key",
+            "description": "The Ticket's key, e.g. PIDGEN-12, when it became a Ticket; null for an Idea or a Ticket with no key."
+          },
           "stage": {
             "anyOf": [
               {
@@ -42642,6 +42774,7 @@
         "required": [
           "kind",
           "id",
+          "ticket_key",
           "stage"
         ],
         "title": "RequestPromoted",

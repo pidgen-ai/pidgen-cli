@@ -8,7 +8,7 @@ import { ExitCode } from "../../src/core/exit-codes.js";
 import { NOUNS } from "../../src/core/registry.js";
 import { REQUEST_REFUSALS } from "../../src/core/requests.js";
 import { envelope, jsonResponse, testContext, type TestContext } from "../support/context.js";
-import { publishedIssues } from "../support/published.js";
+import { PUBLISHED, publishedIssues } from "../support/published.js";
 
 // The pidgen request commands with a fake fetch answering fixtures shaped by the published document
 // contracts/openapi.json: routes, request bodies, data, refusals and usage errors. The document
@@ -54,6 +54,7 @@ type Request = Record<string, unknown> & { id: string; state: string; version: n
 function request(overrides: Partial<Request> = {}): Request {
   return {
     id: "conv-example-1",
+    request_key: "REQ-7",
     state: "new",
     waiting_on_requester: false,
     kind: "bug",
@@ -78,6 +79,7 @@ function request(overrides: Partial<Request> = {}): Request {
     close_reason: null,
     close_note: null,
     duplicate_of: null,
+    duplicate_of_key: null,
     promoted: null,
     version: 3,
     created_at: "2026-10-14T09:00:00Z",
@@ -87,6 +89,22 @@ function request(overrides: Partial<Request> = {}): Request {
 }
 
 const REQUEST = request();
+
+/**
+ * The Request as the commands print it: named by its key (REQ-n) in `id`, never by its conv- id,
+ * and its duplicate by `duplicate_of_key`; the id only when the server has no key for it.
+ */
+function shown(value: Request): Record<string, unknown> {
+  const {
+    request_key: key,
+    duplicate_of_key: duplicateKey,
+    ...rest
+  } = value as Request & {
+    request_key?: string | null;
+    duplicate_of_key?: string | null;
+  };
+  return { ...rest, id: key ?? value.id, duplicate_of: duplicateKey ?? value["duplicate_of"] };
+}
 const TIMELINE = [
   {
     id: "00000000-0000-4000-8000-0000000000e1",
@@ -187,7 +205,12 @@ function byRoute(overrides: Partial<Record<string, () => Response>> = {}) {
         return ok({
           request: request({
             state: "promoted",
-            promoted: { kind: "ticket", id: "TKT-example", stage: "refining" },
+            promoted: {
+              kind: "ticket",
+              id: "TKT-example",
+              ticket_key: "ALPHA-12",
+              stage: "refining",
+            },
             version: 4,
           }),
           ticket_id: "TKT-example",
@@ -232,7 +255,53 @@ async function file(ctx: TestContext, name: string, content: string): Promise<st
 describe("the Request fixtures", () => {
   it("match the published schemas", () => {
     expect(issues("Request", REQUEST)).toEqual([]);
+    expect(REQUEST.id).not.toBe(REQUEST["request_key"]);
     for (const entry of TIMELINE) expect(issues("RequestTimelineEntry", entry)).toEqual([]);
+  });
+});
+
+describe("the committed contract", () => {
+  // AC-0cc2eefd1446: contracts/openapi.json states the public keys beside the ids.
+  it("states request_key on Request and ticket_key on RequestPromoted, required and nullable", () => {
+    const { schemas } = (
+      PUBLISHED as unknown as {
+        components: {
+          schemas: Record<string, { properties: Record<string, unknown>; required: string[] }>;
+        };
+      }
+    ).components;
+    const nullableString = { anyOf: [{ type: "string" }, { type: "null" }] };
+    for (const [schema, field] of [
+      ["Request", "request_key"],
+      ["Request", "duplicate_of_key"],
+      ["RequestPromoted", "ticket_key"],
+      ["IntakeRequest", "request_key"],
+      ["IntentClarification", "request_key"],
+      ["IntentCreated", "request_key"],
+    ] as const) {
+      expect(schemas[schema]?.properties[field], `${schema}.${field}`).toMatchObject(
+        nullableString,
+      );
+      expect(schemas[schema]?.required, `${schema}.required`).toContain(field);
+    }
+    expect(issues("Request", { ...REQUEST, request_key: undefined })).not.toEqual([]);
+    expect(issues("Request", { ...REQUEST, request_key: null })).toEqual([]);
+  });
+
+  it("states that every Request and intent path takes the key or the id", () => {
+    const paths = PUBLISHED.paths as Record<string, Record<string, unknown>>;
+    const templated = Object.entries(paths).filter(([path]) =>
+      /^\/api\/v1\/(?:requests\/\{request_id\}|intents\/\{conversation_id\})/.test(path),
+    );
+    expect(templated.length).toBeGreaterThan(10);
+    for (const [path, item] of templated) {
+      for (const operation of Object.values(item)) {
+        const params = (operation as { parameters?: { name: string; description?: string }[] })
+          .parameters;
+        const param = params?.find((p) => p.name === "request_id" || p.name === "conversation_id");
+        expect(param?.description, path).toMatch(/REQ-/);
+      }
+    }
   });
 });
 
@@ -287,13 +356,73 @@ describe("pidgen request submit", () => {
       error: null,
       data: {
         outcome: "created",
-        url: `${SERVER}/requests/conv-example-1`,
-        request: { id: "conv-example-1", state: "new" },
+        url: `${SERVER}/requests/REQ-7?account=ACC-EXAMPLE`,
+        request: { id: "REQ-7", state: "new" },
         entry_id: "00000000-0000-4000-8000-0000000000e1",
         occurrence_id: null,
         attachments: [],
       },
       meta: { account: "ACC-EXAMPLE", request_id: "req_fake_ok" },
+    });
+    // AC-383f46bd9d8e: the customer sees the key and its page, never the conv- id.
+    expect(JSON.stringify(body.data)).not.toContain("conv-");
+  });
+
+  it("prints the REQ key and its page URL on a terminal", async () => {
+    const { ctx } = await setup();
+    ctx.out.length = 0;
+    const code = await runCli(
+      [
+        "request",
+        "submit",
+        "--kind",
+        "question",
+        "--title",
+        "How do I export?",
+        "--body",
+        "Where is export?",
+        "--format",
+        "table",
+      ],
+      ctx,
+    );
+    expect(code).toBe(ExitCode.Ok);
+    const output = ctx.out.join("");
+    expect(output).toContain("REQ-7");
+    expect(output).toContain(`${SERVER}/requests/REQ-7?account=ACC-EXAMPLE`);
+    expect(output).not.toContain("conv-");
+  });
+
+  it("falls back to the id only when the server has no key for the Request", async () => {
+    const { ctx } = await setup(
+      byRoute({
+        "POST /requests": () =>
+          ok(
+            {
+              request: request({ request_key: null }),
+              outcome: "created",
+              entry_id: "00000000-0000-4000-8000-0000000000e1",
+              occurrence_id: null,
+            },
+            201,
+          ),
+      }),
+    );
+    const { code, body } = await run(
+      ctx,
+      "request",
+      "submit",
+      "--kind",
+      "question",
+      "--title",
+      "t",
+      "--body",
+      "b",
+    );
+    expect(code).toBe(ExitCode.Ok);
+    expect(body.data).toMatchObject({
+      url: `${SERVER}/requests/conv-example-1?account=ACC-EXAMPLE`,
+      request: { id: "conv-example-1" },
     });
   });
 
@@ -425,8 +554,8 @@ describe("pidgen request submit", () => {
       expect(code, JSON.stringify(body.error)).toBe(ExitCode.Ok);
       expect(calls.map((call) => `${call.method} ${call.url.pathname}`)).toEqual([
         "POST /api/v1/requests",
-        "POST /api/v1/requests/conv-example-1/attachments",
-        "POST /api/v1/requests/conv-example-1/attachments",
+        "POST /api/v1/requests/REQ-7/attachments",
+        "POST /api/v1/requests/REQ-7/attachments",
       ]);
       const forms = calls.slice(1).map((call) => call.form!);
       const id = entryId ?? occurrenceId;
@@ -441,7 +570,7 @@ describe("pidgen request submit", () => {
       expect(await files[1]?.text()).toBe("TypeError: x is undefined\n");
       expect(body.data).toMatchObject({
         outcome,
-        url: `${SERVER}/requests/conv-example-1`,
+        url: `${SERVER}/requests/REQ-7?account=ACC-EXAMPLE`,
         attachments: [
           { id: "00000000-0000-4000-8000-0000000000a9" },
           { id: "00000000-0000-4000-8000-0000000000a9" },
@@ -494,9 +623,9 @@ describe("pidgen request submit", () => {
     expect(body.error).toMatchObject({
       code: "FILE_TOO_LARGE",
       details: {
-        request: "conv-example-1",
+        request: "REQ-7",
         outcome: "created",
-        url: `${SERVER}/requests/conv-example-1`,
+        url: `${SERVER}/requests/REQ-7?account=ACC-EXAMPLE`,
         file: "big.bin",
         uploaded: [],
       },
@@ -541,7 +670,9 @@ describe("pidgen request submit", () => {
 
 describe("pidgen request list", () => {
   it("sends the filters and follows every page", async () => {
-    const page = Array.from({ length: 100 }, (_, i) => request({ id: `conv-example-${i}` }));
+    const page = Array.from({ length: 100 }, (_, i) =>
+      request({ id: `conv-example-${i}`, request_key: `REQ-${i + 100}` }),
+    );
     const { ctx, calls } = await setup((call) =>
       call.url.searchParams.get("page") === "1"
         ? ok(page, 200, { page: 1, per_page: 100, total: 101 })
@@ -564,6 +695,12 @@ describe("pidgen request list", () => {
     );
     expect(code, JSON.stringify(body.error)).toBe(ExitCode.Ok);
     expect((body.data as unknown[]).length).toBe(101);
+    // AC-f4be06dc291f: each Request is named by its key, never by its conv- id.
+    expect((body.data as Request[]).map((row) => row.id).slice(0, 2)).toEqual([
+      "REQ-100",
+      "REQ-101",
+    ]);
+    expect(JSON.stringify(body.data)).not.toContain("conv-");
     expect(calls).toHaveLength(2);
     for (const [index, call] of calls.entries()) {
       expect(call.method).toBe("GET");
@@ -585,9 +722,26 @@ describe("pidgen request list", () => {
     const { ctx, calls } = await setup();
     const { code, body } = await run(ctx, "request", "list", "--page", "3", "--per-page", "20");
     expect(code).toBe(ExitCode.Ok);
-    expect(body.data).toEqual([REQUEST]);
+    expect(body.data).toEqual([shown(REQUEST)]);
     expect(calls).toHaveLength(1);
     expect(Object.fromEntries(calls[0]!.url.searchParams)).toEqual({ page: "3", per_page: "20" });
+  });
+
+  it("prints the key in the id column, and the id only for a Request with no key", async () => {
+    const { ctx } = await setup(() =>
+      ok([REQUEST, request({ id: "conv-example-2", request_key: null, title: "Old" })], 200, {
+        page: 1,
+        per_page: 100,
+      }),
+    );
+    const { code, body } = await run(ctx, "request", "list");
+    expect(code).toBe(ExitCode.Ok);
+    expect((body.data as Request[]).map((row) => row.id)).toEqual(["REQ-7", "conv-example-2"]);
+    ctx.out.length = 0;
+    expect(await runCli(["request", "list", "--format", "table"], ctx)).toBe(ExitCode.Ok);
+    const output = ctx.out.join("");
+    expect(output).toContain("REQ-7");
+    expect(output).not.toContain("conv-example-1");
   });
 
   it("an answer that does not match the published document is UNEXPECTED_RESPONSE", async () => {
@@ -616,13 +770,16 @@ describe("pidgen request list", () => {
 describe("pidgen request show", () => {
   it("prints the Request, its requester with contact, and its timeline with attachments", async () => {
     const { ctx, calls } = await setup();
-    const { code, body } = await run(ctx, "request", "show", "conv-example-1");
+    const { code, body } = await run(ctx, "request", "show", "REQ-7");
     expect(code, JSON.stringify(body.error)).toBe(ExitCode.Ok);
+    // AC-9e98ff737e88: the key goes to the API path as given.
     expect(calls.map((call) => `${call.method} ${call.url.pathname}`)).toEqual([
-      "GET /api/v1/requests/conv-example-1",
-      "GET /api/v1/requests/conv-example-1/timeline",
+      "GET /api/v1/requests/REQ-7",
+      "GET /api/v1/requests/REQ-7/timeline",
     ]);
-    expect(body.data).toEqual({ request: REQUEST, timeline: TIMELINE });
+    // AC-f4be06dc291f: the Request is named by its key, never by its conv- id.
+    expect(body.data).toEqual({ request: shown(REQUEST), timeline: TIMELINE });
+    expect(JSON.stringify(body.data)).not.toContain("conv-");
     const data = body.data as { request: Request; timeline: typeof TIMELINE };
     expect(data.request["requester"]).toEqual({ name: "Sam Example", contact: "sam@example.com" });
     expect(data.timeline[0]?.files[0]).toMatchObject({ name: "screen.png" });
@@ -647,7 +804,48 @@ describe("pidgen request show", () => {
     const { ctx } = await setup(byRoute({ "GET /requests/{id}": () => ok(anonymous) }));
     const { code, body } = await run(ctx, "request", "show", "conv-example-1");
     expect(code, JSON.stringify(body.error)).toBe(ExitCode.Ok);
-    expect((body.data as { request: Request }).request).toEqual(anonymous);
+    expect((body.data as { request: Request }).request).toEqual(shown(anonymous));
+  });
+
+  it("names a duplicate by its key", async () => {
+    const closed = request({
+      state: "closed",
+      close_reason: "duplicate",
+      duplicate_of: "conv-example-0",
+      duplicate_of_key: "REQ-3",
+    });
+    expect(issues("Request", closed)).toEqual([]);
+    const { ctx } = await setup(byRoute({ "GET /requests/{id}": () => ok(closed) }));
+    const { code, body } = await run(ctx, "request", "show", "REQ-7");
+    expect(code).toBe(ExitCode.Ok);
+    expect((body.data as { request: Request }).request).toMatchObject({
+      id: "REQ-7",
+      duplicate_of: "REQ-3",
+    });
+    expect(JSON.stringify(body.data)).not.toContain("conv-");
+  });
+
+  // AC-058145ce5424: a promoted Request's Ticket is named by its key.
+  it("names a promoted Request's Ticket by ticket_key", async () => {
+    const promoted = request({
+      state: "promoted",
+      promoted: { kind: "ticket", id: "TKT-example", ticket_key: "ALPHA-12", stage: "refining" },
+    });
+    expect(issues("Request", promoted)).toEqual([]);
+    const { ctx } = await setup(byRoute({ "GET /requests/{id}": () => ok(promoted) }));
+    const { code, body } = await run(ctx, "request", "show", "REQ-7");
+    expect(code).toBe(ExitCode.Ok);
+    expect((body.data as { request: Request }).request["promoted"]).toMatchObject({
+      kind: "ticket",
+      ticket_key: "ALPHA-12",
+      stage: "refining",
+    });
+    ctx.out.length = 0;
+    expect(await runCli(["request", "show", "REQ-7", "--format", "table"], ctx)).toBe(ExitCode.Ok);
+    const output = ctx.out.join("");
+    expect(output).toMatch(/Ticket key: ALPHA-12/);
+    expect(output).toContain("Id: REQ-7");
+    expect(output).not.toContain("conv-");
   });
 
   it("an unknown request exits 4 with REQUEST_NOT_FOUND and its sentence", async () => {
@@ -673,51 +871,51 @@ describe("pidgen request show", () => {
 
 describe("pidgen request triage", () => {
   it.each([
-    [["request", "acknowledge", "conv-example-1"], "acknowledge", { version: 3 }, "acknowledged"],
+    [["request", "acknowledge", "REQ-7"], "acknowledge", { version: 3 }, "acknowledged"],
     [
-      ["request", "reply", "conv-example-1", "--text", "Thanks, looking."],
+      ["request", "reply", "REQ-7", "--text", "Thanks, looking."],
       "reply",
       { version: 3, text: "Thanks, looking." },
       "new",
     ],
     [
-      ["request", "reply", "conv-example-1", "--text", "Which browser?", "--ask"],
+      ["request", "reply", "REQ-7", "--text", "Which browser?", "--ask"],
       "ask",
       { version: 3, text: "Which browser?" },
       "acknowledged",
     ],
     [
-      ["request", "accept", "conv-example-1", "--priority", "P2", "--unknown", "steps", "actual"],
+      ["request", "accept", "REQ-7", "--priority", "P2", "--unknown", "steps", "actual"],
       "accept",
       { version: 3, priority: "P2", unknown: ["steps", "actual"] },
       "accepted",
     ],
-    [["request", "accept", "conv-example-1"], "accept", { version: 3 }, "accepted"],
+    [["request", "accept", "REQ-7"], "accept", { version: 3 }, "accepted"],
     [
-      ["request", "close", "conv-example-1", "--reason", "other", "--note", "Not ours."],
+      ["request", "close", "REQ-7", "--reason", "other", "--note", "Not ours."],
       "close",
       { version: 3, reason: "other", note: "Not ours." },
       "closed",
     ],
     [
-      ["request", "close", "conv-example-1", "--reason", "duplicate", "--duplicate-of", "conv-0"],
+      ["request", "close", "REQ-7", "--reason", "duplicate", "--duplicate-of", "REQ-3"],
       "close",
-      { version: 3, reason: "duplicate", duplicate_of: "conv-0" },
+      { version: 3, reason: "duplicate", duplicate_of: "REQ-3" },
       "closed",
     ],
     [
-      ["request", "promote", "conv-example-1", "--project", "proj-example-a"],
+      ["request", "promote", "REQ-7", "--project", "proj-example-a"],
       "promote",
       { version: 3, project_id: "proj-example-a" },
       "promoted",
     ],
     // Without --project the Ticket goes to the Project the request targets.
-    [["request", "promote", "conv-example-1"], "promote", { version: 3 }, "promoted"],
+    [["request", "promote", "REQ-7"], "promote", { version: 3 }, "promoted"],
     [
       [
         "request",
         "promote",
-        "conv-example-1",
+        "REQ-7",
         "--project",
         "ALPHA",
         "--workflow-type",
@@ -735,14 +933,20 @@ describe("pidgen request triage", () => {
       const { code, body } = await run(ctx, ...argv);
       expect(code, JSON.stringify(body.error)).toBe(ExitCode.Ok);
       expect(calls.map((call) => `${call.method} ${call.url.pathname}`)).toEqual([
-        "GET /api/v1/requests/conv-example-1",
-        `POST /api/v1/requests/conv-example-1/${action}`,
+        "GET /api/v1/requests/REQ-7",
+        `POST /api/v1/requests/REQ-7/${action}`,
       ]);
       expect(calls[1]?.body).toEqual(sent);
       const data = body.data as Record<string, unknown> & { request?: Request };
       expect(data["state"]).toBe(state);
       expect((data.request ?? data)["state"]).toBe(state);
-      if (action === "promote") expect(data["ticket_id"]).toBe("TKT-example");
+      if (action === "promote") {
+        expect(data["ticket_id"]).toBe("TKT-example");
+        expect(data["ticket_key"]).toBe("ALPHA-12");
+      }
+      // AC-f4be06dc291f: the answer names the Request by its key.
+      expect((data.request ?? data)["id"]).toBe("REQ-7");
+      expect(JSON.stringify(data)).not.toContain("conv-");
       if (action === "reply") expect(data["entry_id"]).toBe("00000000-0000-4000-8000-0000000000e3");
     },
   );
@@ -893,7 +1097,7 @@ it.each([40, 80, 120])("resource presentation: request list at %s columns", asyn
   ctx.err.length = 0;
   expect(await runCli([...argv, "--format", "table"], ctx)).toBe(ExitCode.Ok);
   const output = ctx.out.join("");
-  for (const value of ["Requests (1 displayed)", REQUEST.id, REQUEST.title, "new"])
+  for (const value of ["Requests (1 displayed)", "REQ-7", REQUEST.title, "new"])
     expect(output).toContain(value);
   expect(calls).toEqual(previousCalls);
   expect(ctx.err).toEqual(previousErrors);
@@ -904,7 +1108,7 @@ it.each([40, 80, 120])("resource presentation: request list at %s columns", asyn
 it.each([40, 80, 120])("resource presentation: request show at %s columns", async (columns) => {
   const { ctx, calls } = await setup();
   ctx.io.stdoutColumns = columns;
-  const argv = ["request", "show", REQUEST.id];
+  const argv = ["request", "show", "REQ-7"];
   expect(await runCli([...argv, "--format", "json"], ctx)).toBe(ExitCode.Ok);
   const json = envelope(ctx);
   const previousCalls = [...calls];
@@ -935,8 +1139,8 @@ it.each([40, 80, 120])(
     const json = await expectMutationParity(
       ctx,
       calls,
-      ["request", "promote", REQUEST.id, "--project", "ALPHA"],
-      ["request promote", "TKT-example", "promoted", "refining"],
+      ["request", "promote", "REQ-7", "--project", "ALPHA"],
+      ["request promote", "ALPHA-12", "promoted", "refining"],
     );
     expect(json.ok).toBe(true);
     expect(calls).toHaveLength(2);

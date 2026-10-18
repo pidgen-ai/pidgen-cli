@@ -1,8 +1,11 @@
+import { EventEmitter } from "node:events";
 import { chmod, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
+import type { ChildProcess } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { runCli } from "../../src/cli.js";
-import { FIXES, nodeCheck } from "../../src/commands/doctor/doctor.js";
+import { FIXES, gitCheck, nodeCheck } from "../../src/commands/doctor/doctor.js";
 import { configPath, saveConfig, type Config } from "../../src/core/config.js";
 import type { RunContext } from "../../src/core/context.js";
 import { ExitCode } from "../../src/core/exit-codes.js";
@@ -127,17 +130,43 @@ function server(calls: string[], answers: Answers = {}): RunContext["fetch"] {
   };
 }
 
-/** A runtime on which exactly `tools` are executables in BIN. */
+/** What the fake `git --version` prints by default. */
+const GIT_VERSION = "git version 2.43.0\n";
+
+/** A child process that prints `output` on standard output and exits 0. */
+function fakeChild(output: string): ChildProcess {
+  const child = new EventEmitter() as ChildProcess;
+  const stdout = new PassThrough();
+  Object.defineProperty(child, "stdout", { value: stdout });
+  setImmediate(() => {
+    stdout.end(output);
+    stdout.on("close", () => child.emit("close", 0));
+    stdout.resume();
+  });
+  return child;
+}
+
+/**
+ * A runtime on which exactly `tools` are executables in BIN, and `git` too unless `git` is null:
+ * `git --version` prints `git`.
+ */
 function runtimeWith(
   tools: string[],
   platform: NodeJS.Platform = "linux",
+  git: string | null = GIT_VERSION,
 ): Pick<RunContext, "workerRuntime"> & { env: Record<string, string> } {
-  const present = new Set(tools.map((tool) => join(BIN, tool)));
+  const present = new Set(
+    [...tools, ...(git !== null ? ["git"] : [])].map((tool) => join(BIN, tool)),
+  );
   const workerRuntime: WorkerRuntime = {
     ...defaultWorkerRuntime,
     platform,
     canExecute: (path) =>
       present.has(path) ? Promise.resolve() : Promise.reject(new Error(`ENOENT: ${path}`)),
+    spawn: (command, args, options) =>
+      command === join(BIN, "git") && git !== null
+        ? fakeChild(git)
+        : defaultWorkerRuntime.spawn(command, args, options),
   };
   return { workerRuntime, env: { PATH: BIN } };
 }
@@ -147,6 +176,8 @@ async function setup(
     config?: Config | null;
     tools?: string[];
     platform?: NodeJS.Platform;
+    /** What `git --version` prints; `null`: git is not on PATH. */
+    git?: string | null;
     env?: Record<string, string>;
     answers?: Answers;
   } = {},
@@ -155,6 +186,7 @@ async function setup(
   const runtime = runtimeWith(
     options.tools ?? ["uv", "docker", "cosign", ...HARNESS_COMMANDS],
     options.platform,
+    options.git === undefined ? GIT_VERSION : options.git,
   );
   const ctx = await testContext({
     fetch: server(calls, options.answers),
@@ -208,7 +240,7 @@ describe("pidgen doctor", () => {
     },
   );
 
-  it("reports node, server, credential, runtime, the release list and its harnesses as ok and exits 0", async () => {
+  it("reports node, git, server, credential, runtime, the release list and its harnesses as ok and exits 0", async () => {
     const { ctx, calls } = await setup();
     const { code, body } = await run(ctx);
 
@@ -218,6 +250,7 @@ describe("pidgen doctor", () => {
     const checks = body.data?.checks ?? [];
     expect(checks.map((check) => check.id)).toEqual([
       "node",
+      "git",
       "server",
       "credential",
       "runtime",
@@ -238,6 +271,8 @@ describe("pidgen doctor", () => {
     const byId = checksOf(body);
     expect(byId["worker"]).toMatchObject({ status: "warn", fix: "pidgen worker install" });
     expect(byId["node"]?.summary).toContain(process.versions.node);
+    expect(byId["git"]?.summary).toContain("2.43.0");
+    expect(byId["git"]?.summary).toContain(`${BIN}/git`);
     expect(byId["server"]?.summary).toContain("1.0");
     expect(byId["credential"]?.summary).toMatch(/administrator/);
     expect(byId["credential"]?.summary).toMatch(/may enroll workers/);
@@ -257,6 +292,7 @@ describe("pidgen doctor", () => {
     const checks = checksOf(body);
     expect(Object.keys(checks)).toEqual([
       "node",
+      "git",
       "server",
       "credential",
       "runtime",
@@ -468,6 +504,49 @@ describe("pidgen doctor", () => {
     expect(checksOf(body)["runtime"]?.summary).toMatch(/cosign/);
   });
 
+  // c1-git: git missing or older than 2.25 fails, with the platform's fix.
+  it("fails the git check when git is missing, with the package manager fix on Linux", async () => {
+    const { ctx } = await setup({ git: null });
+    const { code, body } = await run(ctx);
+
+    expect(code).toBe(ExitCode.Unexpected);
+    expect(body.error?.code).toBe("DOCTOR_FAILED");
+    expect(body.error?.message).toMatch(/git/);
+    expect(checksOf(body)["git"]).toMatchObject({
+      status: "fail",
+      fix: "install git with your package manager",
+    });
+    expect(checksOf(body)["git"]?.summary).toMatch(/not on PATH/);
+  });
+
+  it("fails the git check when git is missing on macOS, with xcode-select --install", async () => {
+    const { ctx } = await setup({ git: null, platform: "darwin" });
+    const { code, body } = await run(ctx);
+
+    expect(code).toBe(ExitCode.Unexpected);
+    expect(checksOf(body)["git"]).toMatchObject({ status: "fail", fix: "xcode-select --install" });
+  });
+
+  it("fails the git check when git is older than 2.25", async () => {
+    const { ctx } = await setup({ git: "git version 2.24.3 (Apple Git-128)\n" });
+    const { code, body } = await run(ctx);
+
+    expect(code).toBe(ExitCode.Unexpected);
+    expect(checksOf(body)["git"]).toMatchObject({
+      status: "fail",
+      fix: "install git with your package manager",
+    });
+    expect(checksOf(body)["git"]?.summary).toMatch(/2\.24\.3.*2\.25/);
+  });
+
+  it("passes the git check for git 2.25 and later", async () => {
+    const { ctx } = await setup({ git: "git version 2.25.0\n" });
+    const { code, body } = await run(ctx);
+
+    expect(code).toBe(ExitCode.Ok);
+    expect(checksOf(body)["git"]).toMatchObject({ status: "ok", fix: null });
+  });
+
   it("fails the runtime check on a platform the worker does not support", async () => {
     const { ctx } = await setup({ platform: "win32" });
     const { body } = await run(ctx);
@@ -557,7 +636,7 @@ describe("pidgen doctor: the release list's harness and worker checks", () => {
     const { code, body } = await run(setup.ctx);
     expect(code).toBe(ExitCode.Ok);
     const checks = checksOf(body);
-    expect(Object.keys(checks).slice(4)).toEqual([
+    expect(Object.keys(checks).slice(5)).toEqual([
       "releases",
       "harness:claude",
       "harness:codex",
@@ -585,7 +664,7 @@ describe("pidgen doctor: the release list's harness and worker checks", () => {
 
     const { code, body } = await run(setup.ctx);
     expect(code).toBe(ExitCode.Ok);
-    expect(Object.keys(checksOf(body)).slice(4)).toEqual(["releases", "harness:pi", "worker"]);
+    expect(Object.keys(checksOf(body)).slice(5)).toEqual(["releases", "harness:pi", "worker"]);
   });
 
   it("warns about a missing harness while another is found", async () => {
@@ -669,6 +748,36 @@ describe("pidgen doctor: the release list's harness and worker checks", () => {
   });
 });
 
+describe("gitCheck", () => {
+  it("passes git 2.25 and later", () => {
+    expect(gitCheck({ path: "/usr/bin/git", version: "2.25.0" }, "linux")).toMatchObject({
+      id: "git",
+      status: "ok",
+      fix: null,
+    });
+    expect(gitCheck({ path: "/usr/bin/git", version: "2.39.3" }, "darwin").status).toBe("ok");
+    expect(gitCheck({ path: "/usr/bin/git", version: "3.0.0" }, "linux").status).toBe("ok");
+  });
+
+  it("fails git that is missing, older than 2.25 or cannot be run, with the platform's fix", () => {
+    expect(gitCheck(null, "darwin")).toMatchObject({
+      id: "git",
+      status: "fail",
+      fix: "xcode-select --install",
+    });
+    expect(gitCheck(null, "linux")).toMatchObject({
+      status: "fail",
+      fix: "install git with your package manager",
+    });
+    expect(gitCheck({ path: "/usr/bin/git", version: "2.24.9" }, "linux").status).toBe("fail");
+    expect(gitCheck({ path: "/usr/bin/git", version: "1.9.0" }, "darwin")).toMatchObject({
+      status: "fail",
+      fix: "xcode-select --install",
+    });
+    expect(gitCheck({ path: "/usr/bin/git", version: null }, "linux").status).toBe("fail");
+  });
+});
+
 describe("nodeCheck", () => {
   it("passes the Node.js versions the CLI supports", () => {
     expect(nodeCheck("22.12.0")).toMatchObject({ id: "node", status: "ok", fix: null });
@@ -698,6 +807,7 @@ describe("pidgen doctor documentation", () => {
     expect(section).toContain("`{id, status, summary, fix}`");
     for (const id of [
       "node",
+      "git",
       "server",
       "credential",
       "runtime",

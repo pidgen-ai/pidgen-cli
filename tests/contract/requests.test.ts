@@ -15,6 +15,7 @@ import { publishedIssues } from "../support/published.js";
 
 const STORED: Record<string, unknown> = {
   id: "conv-example-1",
+  request_key: "REQ-7",
   state: "acknowledged",
   waiting_on_requester: false,
   kind: "bug",
@@ -39,6 +40,7 @@ const STORED: Record<string, unknown> = {
   close_reason: null,
   close_note: null,
   duplicate_of: null,
+  duplicate_of_key: null,
   promoted: null,
   version: 3,
   created_at: "2026-10-14T09:00:00Z",
@@ -116,7 +118,18 @@ const ANSWERS: Array<
   [
     "POST /api/v1/requests/{request_id}/promote",
     "RequestPromotionResponse",
-    { status: "ok", data: { request: STORED, ticket_id: "TKT-example" }, meta: {} },
+    {
+      status: "ok",
+      data: {
+        request: {
+          ...STORED,
+          state: "promoted",
+          promoted: { kind: "ticket", id: "TKT-example", ticket_key: "ALPHA-12", stage: null },
+        },
+        ticket_id: "TKT-example",
+      },
+      meta: {},
+    },
   ],
 ];
 
@@ -162,7 +175,7 @@ async function run(ctx: TestContext, ...argv: string[]) {
 }
 
 const REQUEST = {
-  id: expect.stringMatching(/^conv-/) as unknown,
+  id: "REQ-7",
   state: expect.any(String) as unknown,
   kind: expect.any(String) as unknown,
   title: expect.any(String) as unknown,
@@ -209,7 +222,7 @@ describe("pidgen request against the Prism mock of the published document", () =
     expect(body).toMatchObject({ ok: true, error: null, meta: { account: "ACC-EXAMPLE" } });
     expect(body.data).toMatchObject({
       outcome: expect.stringMatching(/^(created|appended|occurrence|regression)$/),
-      url: expect.stringMatching(/\/requests\/conv-/),
+      url: `${server().url}/requests/REQ-7?account=ACC-EXAMPLE`,
       request: REQUEST,
       attachments: [expect.objectContaining({ id: expect.any(String), size: expect.any(Number) })],
     });
@@ -249,33 +262,33 @@ describe("pidgen request against the Prism mock of the published document", () =
 
   it("show returns the Request and its timeline with attachments", async () => {
     const { ctx, sent } = await setup();
-    const { code, body } = await run(ctx, "request", "show", "conv-example-1");
+    const { code, body } = await run(ctx, "request", "show", "REQ-7");
     expect(code, JSON.stringify(body.error)).toBe(ExitCode.Ok);
     const data = body.data as { request: unknown; timeline: Array<{ files: unknown[] }> };
     expect(data.request).toMatchObject(REQUEST);
     expect(data.timeline.length).toBeGreaterThan(0);
     expect(data.timeline.some((entry) => entry.files.length > 0)).toBe(true);
     expect(sent).toEqual([
-      { method: "GET", url: `${server().url}/api/v1/requests/conv-example-1` },
-      { method: "GET", url: `${server().url}/api/v1/requests/conv-example-1/timeline` },
+      { method: "GET", url: `${server().url}/api/v1/requests/REQ-7` },
+      { method: "GET", url: `${server().url}/api/v1/requests/REQ-7/timeline` },
     ]);
   });
 
   it.each([
-    [["acknowledge", "conv-example-1"], "acknowledge"],
-    [["reply", "conv-example-1", "--text", "Thanks."], "reply"],
-    [["reply", "conv-example-1", "--text", "Which browser?", "--ask"], "ask"],
-    [["accept", "conv-example-1", "--priority", "P2", "--unknown", "steps"], "accept"],
-    [["close", "conv-example-1", "--reason", "duplicate", "--duplicate-of", "conv-0"], "close"],
-    [["promote", "conv-example-1", "--project", "ALPHA", "--no-refine"], "promote"],
+    [["acknowledge", "REQ-7"], "acknowledge"],
+    [["reply", "REQ-7", "--text", "Thanks."], "reply"],
+    [["reply", "REQ-7", "--text", "Which browser?", "--ask"], "ask"],
+    [["accept", "REQ-7", "--priority", "P2", "--unknown", "steps"], "accept"],
+    [["close", "REQ-7", "--reason", "duplicate", "--duplicate-of", "REQ-3"], "close"],
+    [["promote", "REQ-7", "--project", "ALPHA", "--no-refine"], "promote"],
   ])("pidgen request %j reads the version and sends the stated body", async (argv, action) => {
     const { ctx, sent } = await setup();
     const { code, body } = await run(ctx, "request", ...argv);
     expect(code, JSON.stringify(body.error)).toBe(ExitCode.Ok);
     expect((body.data as { state: unknown }).state).toEqual(expect.any(String));
     expect(sent).toEqual([
-      { method: "GET", url: `${server().url}/api/v1/requests/conv-example-1` },
-      { method: "POST", url: `${server().url}/api/v1/requests/conv-example-1/${action}` },
+      { method: "GET", url: `${server().url}/api/v1/requests/REQ-7` },
+      { method: "POST", url: `${server().url}/api/v1/requests/REQ-7/${action}` },
     ]);
   });
 });

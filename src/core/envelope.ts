@@ -51,6 +51,7 @@ export function render(
   context: PresentationContext = {},
 ): string {
   if (format === "json") return JSON.stringify(envelope) + "\n";
+  if (context.human !== undefined) return context.human;
   if (!envelope.ok && envelope.error) {
     const mutation = renderMutationFailure(
       context.command?.join(" ") ?? "",

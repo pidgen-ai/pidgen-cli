@@ -13,6 +13,7 @@ material only, the public API only, and the CLI contract — are in [`AGENTS.md`
 | Request validation | `zod`, from the public API schemas (`z.fromJSONSchema`) |
 | Input files | `yaml`, so `-f` bodies can be YAML as well as JSON; it has no dependencies of its own |
 | Worker provenance | The verifying parts of the `sigstore` library (the one npm uses for package provenance): `@sigstore/verify` checks a Sigstore bundle, `@sigstore/bundle` reads one, `@sigstore/protobuf-specs` reads the trust root, and `@sigstore/tuf` fetches Sigstore's trust root. They verify the worker's PEP 740 attestation against its release identity, which is not code to write by hand. The signing half (`@sigstore/sign`) is not a dependency, and all four load only when a worker artifact is verified, so other commands start no slower |
+| Setup's prompts | `@clack/prompts` 1.8.1 and the `@clack/core` 1.5.1 it is built on (MIT; their own dependencies are `sisteransi`, `fast-wrap-ansi` and `fast-string-width`), pinned exactly: checkbox, select, text and confirm prompts, spinners and task logs for `pidgen setup`, the one interactive command. `@clack/core` draws setup's own screens (each answered question collapses to one line); `@clack/prompts` gives the spinner and task log. Only setup loads them, with a dynamic import, so no other command starts slower |
 | API types | `openapi-typescript`, generated from `contracts/openapi.json` |
 | Build | `tsup`, one bundled file for the `pidgen` bin |
 | Tests | `vitest`; `@stoplight/prism-cli` as a mock server for contract tests |
@@ -270,6 +271,7 @@ prompts, capture foreground streams, or infer success from an unknown outcome or
 | `ticket types` | list | Workflow types; resource sections with compact collections where appropriate. |
 | `ticket unfollow` | mutation | Preview requirements, actual application state and complete result details. |
 | `worker doctor` | diagnostic | Complete checks, statuses, fixes and supporting records, on success or failure. |
+| `worker login` | mutation | Labeled lifecycle details: the harness and its login state. |
 | `worker enroll` | mutation | Labeled lifecycle details; all supplied qualifications retained. |
 | `worker install` | installation | Labeled lifecycle details; all supplied qualifications retained. |
 | `worker start` | exception | Foreground inherits worker streams/status with no CLI result; --detach renders lifecycle details. |

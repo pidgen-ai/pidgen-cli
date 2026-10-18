@@ -48,6 +48,7 @@ import { manifestTemplate } from "./manifest/template.js";
 import { workerDoctor } from "./worker/doctor.js";
 import { workerEnroll } from "./worker/enroll.js";
 import { workerInstall } from "./worker/install.js";
+import { workerLogin } from "./worker/login.js";
 import { workerStart } from "./worker/start.js";
 import { workerStatus } from "./worker/status.js";
 import { workerStop } from "./worker/stop.js";
@@ -200,6 +201,7 @@ export const commands: readonly CommandSpec[] = [
   workerStop,
   workerStatus,
   workerDoctor,
+  workerLogin,
   workerSubscriptions,
   workerSubscriptionsUse,
   planShow,

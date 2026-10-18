@@ -97,11 +97,23 @@ async function configuredServer(ctx: RunContext, global: GlobalOptions): Promise
   return resolveTarget(ctx, await loadConfig(ctx), global).url;
 }
 
-async function loginWithDeviceCode(
+/** The device authorization's addresses and code, for a caller that shows them itself. */
+export type DeviceCodeShown = Pick<
+  DeviceAuthorization,
+  "user_code" | "verification_uri" | "verification_uri_complete"
+>;
+
+/**
+ * The device-code login. `present` shows the verification address and user code; without it they
+ * are printed to standard error as `pidgen auth login` prints them. `pidgen setup` draws them in its
+ * own frame.
+ */
+export async function loginWithDeviceCode(
   ctx: RunContext,
   url: string,
   global: GlobalOptions,
   deviceLabel: string | undefined,
+  present?: (shown: DeviceCodeShown) => void,
 ): Promise<CommandResult> {
   const config = await loadConfig(ctx);
   const profileName = selectProfile(ctx, config, global);
@@ -121,10 +133,18 @@ async function loginWithDeviceCode(
 
   // The user code is for the person, so it is shown even when standard error is not a terminal.
   // It never appears on standard output, and the device code is never shown.
-  ctx.io.stderr(
-    `Open ${authorization.verification_uri} and enter the code  ${authorization.user_code}\n`,
-  );
-  if (ctx.io.interactive) ctx.io.stderr("Waiting for approval…\n");
+  if (present !== undefined) {
+    present({
+      user_code: authorization.user_code,
+      verification_uri: authorization.verification_uri,
+      verification_uri_complete: authorization.verification_uri_complete,
+    });
+  } else {
+    ctx.io.stderr(
+      `Open ${authorization.verification_uri} and enter the code  ${authorization.user_code}\n`,
+    );
+    if (ctx.io.interactive) ctx.io.stderr("Waiting for approval…\n");
+  }
 
   const token = await pollForToken(ctx, client, authorization);
 

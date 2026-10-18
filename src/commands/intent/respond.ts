@@ -3,6 +3,7 @@ import { PUBLIC_API_DOCUMENT } from "../api/document.js";
 import { inputInvalid, readInput, validateBody, type InputIssue } from "../../core/input.js";
 import { pathSegment } from "../../core/read.js";
 import type { CommandSpec } from "../../core/registry.js";
+import { presentIntent } from "../../core/requests.js";
 import { openSession } from "../../core/session.js";
 import type { components } from "../../generated/api.js";
 
@@ -59,8 +60,8 @@ export const RESPOND_ROUTE = {
 
 /**
  * `pidgen intent respond <conversation> -f <answers>`: settles the questions of an intake request
- * (`POST /intents/{conversation_id}/respond`), the `conversation_id` that `pidgen intent submit`
- * returned. The file is the request body, as JSON or YAML, or standard input with `-f -`:
+ * (`POST /intents/{conversation_id}/respond`), named by the key (`REQ-{n}`) that `pidgen intent
+ * submit` printed as its `conversation_id`, sent as given. The file is the request body, as JSON or YAML, or standard input with `-f -`:
  * `answers`, each naming its question by `question_id` (or by 0-based `question_index`) and
  * giving an `outcome` — `answer` (the default, with the `answer` text), `use_recommendation`
  * (assume the question's recommendation), `ask_teammate` (with `ask_user_id`) or `leave_open` —
@@ -70,7 +71,8 @@ export const RESPOND_ROUTE = {
  * delegate, an answer naming no question (or naming it twice), or an `answer` outcome without its
  * text, is `INPUT_INVALID` (exit code 2) with each problem in `error.details.issues`. `data` is the server's
  * result, switched on `outcome`: `created` carries the new ticket and `assumptions_recorded`, and
- * `still_needs_clarification` says questions remain and carries the updated `request`. The
+ * `still_needs_clarification` says questions remain and carries the updated `request`, each
+ * request named by its key. The
  * request never expires. An unknown or another Account's conversation is the server's
  * `CONVERSATION_NOT_FOUND` (exit code 4); a withdrawn one is `REQUEST_WITHDRAWN` (exit code 5).
  * See docs/commands.md, "intent".
@@ -80,7 +82,7 @@ export const intentRespond: CommandSpec = {
   summary: "Answer an intake request's questions",
   configure(command: Command) {
     command
-      .argument("<conversation>", "the conversation_id from pidgen intent submit, e.g. conv-…")
+      .argument("<conversation>", "the request: its key from pidgen intent submit, e.g. REQ-12")
       .requiredOption(
         "-f, --file <answers>",
         "the answers as JSON or YAML ({answers: [{question_id, outcome, answer}], delegate}); - reads standard input",
@@ -124,6 +126,6 @@ export const intentRespond: CommandSpec = {
       path: `/intents/${conversation}/respond`,
       body,
     });
-    return { data: response.data, meta: session.meta(response) };
+    return { data: presentIntent(response.data), meta: session.meta(response) };
   },
 };

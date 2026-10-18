@@ -3,6 +3,7 @@ import { PUBLIC_API_DOCUMENT } from "../api/document.js";
 import { usageError } from "../../core/errors.js";
 import { readInput, validateBody } from "../../core/input.js";
 import type { CommandSpec } from "../../core/registry.js";
+import { presentIntent } from "../../core/requests.js";
 import { openSession } from "../../core/session.js";
 import type { components } from "../../generated/api.js";
 
@@ -23,7 +24,8 @@ export const SUBMISSION_KEY_MAX_LENGTH = 200;
  * server's result, switched on `outcome`: `created` carries the new ticket (`ticket_id`,
  * `ticket_key`, `stage`, ...), and `needs_clarification` carries the `conversation_id` and its
  * `questions` to answer with `pidgen intent respond`, and, from a server that publishes durable
- * requests, the `request_id` and the `request` itself. `--submission-key` is sent as
+ * requests, the `request_id` and the `request` itself. The request is named by its key
+ * (`REQ-{n}`) in `conversation_id` and `request_id`, by its id only when it has none. `--submission-key` is sent as
  * `submission_key`: submitting again with the same key and body returns the same outcome, and the
  * same key with another body is the server's `SUBMISSION_KEY_REUSED` (a refusal, exit code 5). A
  * body file that already has a `submission_key` keeps it unless the option is given. An empty key,
@@ -60,7 +62,7 @@ export const intentSubmit: CommandSpec = {
       path: SUBMIT_ROUTE.path,
       body,
     });
-    return { data: response.data, meta: session.meta(response) };
+    return { data: presentIntent(response.data), meta: session.meta(response) };
   },
 };
 

@@ -130,6 +130,7 @@ describe("worker releases against the Prism mock of the published document", () 
     ]);
     expect(checks.filter((check) => check.id !== "runtime" && check.id !== "credential")).toEqual([
       expect.objectContaining({ id: "node", status: "ok" }),
+      expect.objectContaining({ id: "git", status: "ok" }),
       expect.objectContaining({ id: "server", status: "ok" }),
       expect.objectContaining({ id: "releases", status: "ok" }),
       expect.objectContaining({ id: "harness:claude", status: "ok" }),

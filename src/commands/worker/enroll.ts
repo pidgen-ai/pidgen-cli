@@ -79,7 +79,7 @@ export const workerEnroll: CommandSpec = {
       if (worker === null) {
         throw new CliError(
           "WORKER_NOT_FOUND",
-          `The worker is installed at ${installed.location} but pidgen-worker is not on PATH. Add its directory to PATH or set PIDGEN_WORKER_BIN, then enroll again.`,
+          `The worker was installed at ${installed.location}, but it cannot be run from there. Run \`pidgen worker install --force\`, then enroll again.`,
           ExitCode.Usage,
           { installed },
         );

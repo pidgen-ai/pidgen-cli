@@ -13,6 +13,59 @@ export interface WorkerConfig {
   env: Record<string, string | undefined>;
   homeDir: string;
   cwd: string;
+  /** Where a collected child's output goes (`pipeChildren`); the CLI's standard error otherwise. */
+  io?: ChildOutputIo;
+}
+
+/**
+ * A caller that collects the output of the commands it runs: with `pipeChildren` set, a child's
+ * standard output and error are piped and written to `stderr()`, line by line, instead of going
+ * to the CLI's standard error. `pidgen setup` sets it, to keep that output off the screen.
+ */
+export interface ChildOutputIo {
+  stderr(text: string): void;
+  pipeChildren?: boolean;
+}
+
+/** The text a secret is replaced with wherever the CLI shows or records a child's output. */
+export const REDACTED = "[redacted]";
+
+/** A line-buffered writer of a child's output to `io.stderr()`, with each secret replaced. */
+export interface ChildOutputWriter {
+  write(chunk: string | Buffer): void;
+  /** Writes what is left of an unfinished last line. */
+  end(): void;
+}
+
+/**
+ * The writer of a collected child's output when `io` collects it (`pipeChildren`), else `null`:
+ * the child then keeps the CLI's standard error. Each line is written whole, with every one of
+ * `secrets` replaced by `[redacted]`.
+ */
+export function collectedOutput(
+  io: ChildOutputIo | undefined,
+  secrets: readonly string[] = [],
+): ChildOutputWriter | null {
+  if (io?.pipeChildren !== true) return null;
+  const hide = (text: string) =>
+    secrets.reduce(
+      (shown, secret) => (secret === "" ? shown : shown.split(secret).join(REDACTED)),
+      text,
+    );
+  let pending = "";
+  return {
+    write(chunk) {
+      pending += chunk.toString();
+      const end = pending.lastIndexOf("\n");
+      if (end < 0) return;
+      io.stderr(hide(pending.slice(0, end + 1)));
+      pending = pending.slice(end + 1);
+    },
+    end() {
+      if (pending !== "") io.stderr(hide(`${pending}\n`));
+      pending = "";
+    },
+  };
 }
 
 export interface WorkerRuntime {
@@ -64,6 +117,12 @@ export function resolvePidgenHome(config: Pick<WorkerConfig, "env" | "homeDir">)
   return config.env["PIDGEN_HOME"] || join(config.homeDir, ".pidgen");
 }
 
+/**
+ * The `pidgen-worker` the CLI runs: `PIDGEN_WORKER_BIN` when it is set; else the executable the
+ * install record names (`pidgen worker install` puts it in the worker home, which is not on
+ * `PATH`); and only when there is no install record, the first `pidgen-worker` on `PATH`. A
+ * recorded worker that is missing is `WORKER_NOT_FOUND`, never another one found on `PATH`.
+ */
 export async function resolveWorker(
   config: WorkerConfig,
   runtime: WorkerRuntime = defaultWorkerRuntime,
@@ -77,9 +136,124 @@ export async function resolveWorker(
     throw workerNotFound();
   }
 
+  const recorded = await recordedWorker(config);
+  if (recorded !== null) {
+    if (await isExecutable(recorded, runtime)) return recorded;
+    throw new CliError(
+      "WORKER_NOT_FOUND",
+      `The worker the install record names, ${recorded}, is missing. Run \`pidgen worker install --force\` to install it again.`,
+      ExitCode.Usage,
+      { location: recorded },
+    );
+  }
+
   const found = await findOnPath(config, "pidgen-worker", runtime);
   if (found !== null) return found;
   throw workerNotFound();
+}
+
+/** The install record's file name, in `<worker home>/run/`. */
+export const INSTALL_RECORD_NAME = "pidgen-install.json";
+
+export function installRecordPath(config: Pick<WorkerConfig, "env" | "homeDir">): string {
+  return join(resolvePidgenHome(config), "run", INSTALL_RECORD_NAME);
+}
+
+export function installRecordInvalid(path: string): CliError {
+  return new CliError(
+    "INSTALL_RECORD_INVALID",
+    `The worker install record at ${path} cannot be read. Run \`pidgen worker install --force\` to replace it.`,
+    ExitCode.Unexpected,
+    { path },
+  );
+}
+
+/**
+ * The `pidgen-worker` a wheel install record names, or `null` with no record (or a container
+ * record, which runs no executable here). `worker-install.ts` validates the whole record; this
+ * reads only what finding the executable needs.
+ */
+async function recordedWorker(
+  config: Pick<WorkerConfig, "env" | "homeDir">,
+): Promise<string | null> {
+  const path = installRecordPath(config);
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch (error) {
+    if (isFileNotFoundError(error)) return null;
+    throw error;
+  }
+  let record: unknown;
+  try {
+    record = JSON.parse(text) as unknown;
+  } catch {
+    throw installRecordInvalid(path);
+  }
+  if (typeof record !== "object" || record === null) throw installRecordInvalid(path);
+  const { form, location } = record as Record<string, unknown>;
+  if (form === "container") return null;
+  if (form !== "wheel" || typeof location !== "string" || location === "") {
+    throw installRecordInvalid(path);
+  }
+  return location;
+}
+
+/** The file `pidgen-worker enroll` writes its credential to, in the worker home. */
+export const WORKER_ENV_NAME = "worker.env";
+
+/**
+ * What the CLI may know of the worker home's `worker.env`: whether it holds a credential, never the
+ * credential itself.
+ */
+export interface WorkerCredential {
+  /** The file read: `$PIDGEN_HOME/worker.env`. */
+  path: string;
+  /** Whether `PIDGEN_NODE_TOKEN` is present and non-empty. */
+  credential: boolean;
+  /** `PIDGEN_SERVICE_URL`: the server the worker enrolled with, or `null`. */
+  serviceUrl: string | null;
+  /** `PIDGEN_LOCALITY_DOMAIN`: the worker's host id in the Account, or `null`. */
+  hostId: string | null;
+}
+
+/**
+ * Reads the worker home's `worker.env` for whether it holds a credential, and the server and host
+ * id it was enrolled with. A missing file is a home with no credential. The credential's value is
+ * never returned, kept, or printed.
+ */
+export async function readWorkerCredential(
+  config: Pick<WorkerConfig, "env" | "homeDir">,
+): Promise<WorkerCredential> {
+  const path = join(resolvePidgenHome(config), WORKER_ENV_NAME);
+  let text = "";
+  try {
+    text = await readFile(path, "utf8");
+  } catch (error) {
+    if (!isFileNotFoundError(error)) throw error;
+  }
+  const values = new Map<string, string>();
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim().replace(/^export\s+/, "");
+    const equals = line.indexOf("=");
+    if (line.startsWith("#") || equals <= 0) continue;
+    let value = line.slice(equals + 1).trim();
+    const quote = value[0];
+    if ((quote === '"' || quote === "'") && value.length >= 2 && value.endsWith(quote)) {
+      value = value.slice(1, -1);
+    }
+    values.set(line.slice(0, equals).trim(), value);
+  }
+  const named = (key: string) => {
+    const value = values.get(key);
+    return value === undefined || value === "" ? null : value;
+  };
+  return {
+    path,
+    credential: named("PIDGEN_NODE_TOKEN") !== null,
+    serviceUrl: named("PIDGEN_SERVICE_URL"),
+    hostId: named("PIDGEN_LOCALITY_DOMAIN"),
+  };
 }
 
 /** True when the worker runs on `runtime`'s platform: Linux and macOS. */
@@ -120,8 +294,9 @@ export async function findWorker(
  * token goes only to the worker on its command line; the worker exchanges it for its credential at
  * `server`, the server the enrollment was created on, and stores that itself. `--no-start` leaves
  * starting to `pidgen worker start`, which records the worker it starts. `args` come last, so the
- * caller's own flags win. The worker's output goes to the CLI's standard error. Returns the
- * worker's exit status.
+ * caller's own flags win. The worker's output goes to the CLI's standard error, or, when the caller
+ * collects it (`io.pipeChildren`), to `io.stderr()` after the command's line, with the token
+ * replaced by `[redacted]` in both. Returns the worker's exit status.
  */
 export async function runWorkerEnroll(
   config: WorkerConfig,
@@ -132,12 +307,21 @@ export async function runWorkerEnroll(
   runtime: WorkerRuntime = defaultWorkerRuntime,
 ): Promise<number> {
   const enroll = ["enroll", "--token", token, "--server", server, "--no-start", ...args];
+  const collected = collectedOutput(config.io, [token]);
+  if (collected !== null) {
+    const shown = [worker, ...enroll].map((arg) => (arg === token ? REDACTED : arg));
+    config.io!.stderr(`$ ${displayCommand(shown)}\n`);
+  }
   const child = runtime.spawn(worker, enroll, {
     cwd: config.cwd,
     env: workerEnvironment(config),
-    stdio: ["inherit", 2, 2],
+    stdio: collected ? ["inherit", "pipe", "pipe"] : ["inherit", 2, 2],
   });
-  return waitForChild(child);
+  child.stdout?.on("data", (chunk: string | Buffer) => collected?.write(chunk));
+  child.stderr?.on("data", (chunk: string | Buffer) => collected?.write(chunk));
+  const status = await waitForChild(child);
+  collected?.end();
+  return status;
 }
 
 export async function runWorkerForeground(
@@ -202,16 +386,24 @@ export async function runWorkerDoctor(
   runtime: WorkerRuntime = defaultWorkerRuntime,
 ): Promise<Record<string, unknown>> {
   const worker = await resolveWorker(config, runtime);
-  const child = runtime.spawn(worker, ["doctor", "--json", ...args], {
+  const argv = ["doctor", "--json", ...args];
+  const collected = collectedOutput(config.io);
+  if (collected !== null) config.io!.stderr(`$ ${displayCommand([worker, ...argv])}\n`);
+  const child = runtime.spawn(worker, argv, {
     cwd: config.cwd,
     env: workerEnvironment(config),
-    stdio: ["inherit", "pipe", "inherit"],
+    stdio: ["inherit", "pipe", collected ? "pipe" : "inherit"],
   });
 
   const chunks: Buffer[] = [];
   child.stdout?.on("data", (chunk: string | Buffer) => chunks.push(Buffer.from(chunk)));
+  child.stderr?.on("data", (chunk: string | Buffer) => collected?.write(chunk));
   const exitCode = await waitForChild(child);
+  collected?.end();
   const output = Buffer.concat(chunks).toString("utf8");
+  // The report is the output a person reads: collected, it is kept as the worker printed it.
+  collected?.write(output);
+  collected?.end();
 
   if (exitCode !== ExitCode.Ok) {
     const report = tryParseDoctorReport(output);
@@ -223,6 +415,29 @@ export async function runWorkerDoctor(
     );
   }
   return parseDoctorReport(output);
+}
+
+/**
+ * Runs `pidgen-worker capacity <args>` with its standard output and error captured together, and
+ * resolves with its exit status and that output. The worker validates and writes its `node.yaml`
+ * and asks a running manager to apply it.
+ */
+export async function runWorkerCapacity(
+  config: WorkerConfig,
+  args: readonly string[],
+  runtime: WorkerRuntime = defaultWorkerRuntime,
+): Promise<{ status: number; output: string }> {
+  const worker = await resolveWorker(config, runtime);
+  const child = runtime.spawn(worker, ["capacity", ...args], {
+    cwd: config.cwd,
+    env: workerEnvironment(config),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const chunks: Buffer[] = [];
+  child.stdout?.on("data", (chunk: string | Buffer) => chunks.push(Buffer.from(chunk)));
+  child.stderr?.on("data", (chunk: string | Buffer) => chunks.push(Buffer.from(chunk)));
+  const status = await waitForChild(child);
+  return { status, output: Buffer.concat(chunks).toString("utf8") };
 }
 
 export async function startWorkerDetached(

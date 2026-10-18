@@ -18,6 +18,35 @@ agent's shell it exits 2 with `TERMINAL_REQUIRED` and lists the same steps in
 decisions spelled out. Every `pidgen` command prints one JSON envelope: read `data`, and branch on
 the exit code and `error.code`.
 
+## What pidgen setup does
+
+When the person has a terminal, suggest they run setup themselves. It goes through eight steps, one
+question or task at a time, each question a prompt they answer with the arrow keys, space and
+Enter, collapsing to one line once answered:
+
+| Step | What it does |
+|---|---|
+| 1. Check this machine | Runs the doctor checks; offers to install `uv` when it is missing (uv's own installer, after the person says yes); stops when `git` is missing or older than 2.25 |
+| 2. Sign in to Pidgen | Device-code sign-in, the Account question when the person belongs to several, and whether the credential may enroll workers |
+| 3. Choose coding agents | Checkboxes of Claude Code and Codex, those on `PATH` ticked; ticking a missing one installs it with `npm install -g @anthropic-ai/claude-code` or `npm install -g @openai/codex`, with no further question; Pi is shown, disabled, when it is on `PATH` |
+| 4. Sign in to coding agents | Each chosen agent's status first, then the agent's own login, the same as `pidgen worker login claude --format json`, only for those not signed in |
+| 5. Size coding agent sessions | Asks how many sessions each agent runs at once: numbers with plan hints (table in "Change a coding agent's session cap"), or Custom, any whole number from 1 |
+| 6. Install the worker | One question, install pidgen-worker <version> and accept its licence, then the install and its verification |
+| 7. Enroll and start the worker | Enrolls, applies the caps with `pidgen-worker capacity set`, starts the worker and waits until it is connected |
+| 8. Prove the worker works | The worker's own checks, then the time taken and the next thing to do |
+
+Flags answer the questions in advance, for example
+`pidgen setup --agent claude --sessions claude=2 --format json`: `--agent` (repeatable) chooses the
+coding agents and `--sessions <agent>=<n>` (repeatable) how many sessions each runs at once;
+`--plan <agent>=<plan>` (repeatable) still answers it from a plan instead, but not together with
+`--sessions` for the same agent. `--accept-licence` answers the install question; only the person
+may give it. Ctrl-C at a question exits 2 with `SETUP_CANCELLED`, keeping what was done. A failed
+step's error names the step and its fix, and says that running setup again continues from there; a
+re-run skips what is already done and applies the caps again. On a finished machine a re-run asks
+the person what to do (check, change the coding agents or sessions, or update the worker), unless
+`--agent`, `--sessions` or `--plan` are given. A credential that cannot enroll workers stops setup at
+sign-in with `ENROLL_NOT_PERMITTED`, before anything is installed.
+
 Some steps need the person, not you: approving the sign-in, accepting the worker's licence, and
 logging each coding agent in. Stop and ask at those points; never approve, accept or log in on
 their behalf.
@@ -36,9 +65,9 @@ or `warn` and act on its `fix`:
 | `node` | Node.js is too old for the CLI; the person upgrades it |
 | `server` | The server is unreachable or not Pidgen. With nothing configured this is the hosted Pidgen server; if the person uses another server, step 2 signs in to it |
 | `credential` | Not signed in, or the credential may not enroll workers. Step 2 fixes it |
-| `runtime` | `uv` is missing. The CLI never installs it: give the person the `fix` |
+| `runtime` | `uv` is missing. Guided setup offers to install it; from here, give the person the `fix` |
 | `releases` | The server's worker release list could not be read. Nothing can be installed until it can; report the `summary` and stop |
-| `harness:<kind>` | That coding agent's command is not on `PATH`. One missing beside another found is fine; all missing is a `fail`, and the person installs at least one |
+| `harness:<kind>` | That coding agent's command is not on `PATH`. One missing beside another found is fine; all missing is a `fail`, and the person installs at least one: `npm install -g @anthropic-ai/claude-code` (Claude Code) or `npm install -g @openai/codex` (Codex) |
 | `worker` | No worker installed yet (`warn`, expected on a fresh machine), or one the server no longer accepts. Step 3 fixes it |
 
 Exit 1 with `DOCTOR_FAILED` means at least one `fail`; the report is in `error.details`. A failing
@@ -77,8 +106,9 @@ pidgen auth login --with-token --account <account> --format json
 ## 3. Install and verify the worker
 
 Installing the worker accepts its licence, so ask first. Tell the person that `pidgen-worker` is
-proprietary software under its own end-user licence agreement, that installing it accepts the
-agreement, and that the command prints the notice. Install only after they agree.
+proprietary software under its own end-user licence agreement, which they can read at
+https://pidgen.ai/legal/eula, that installing it accepts the agreement, and that the command prints
+the notice. Install only after they agree.
 
 ```console
 pidgen worker install --runtime wheel --format json
@@ -111,6 +141,24 @@ pidgen worker enroll --label build-box-1 --no-install --format json
 pidgen worker start --detach --format json
 ```
 
+Between the two, size each coding agent from the person's plan (ask them; the table is in
+"Change a coding agent's session cap"). Enrolling wrote `node.yaml`, so the caps can be set now.
+The CLI installs the worker in `~/.pidgen/worker/bin`, which is not on `PATH`, and runs it by
+that path; put the directory on `PATH` first (`export PATH="$HOME/.pidgen/worker/bin:$PATH"`) to
+run `pidgen-worker` by name. For Claude Code on Max 5x alone:
+
+```console
+pidgen-worker capacity set claude --max 2
+pidgen-worker capacity set codex --max 0
+pidgen-worker capacity set pi --max 0
+pidgen-worker capacity set prompts --min 1 --max 2
+```
+
+Each chosen agent gets its cap, every other agent `--max 0`, and the prompt pool `--min 1` and the
+sum of the caps as `--max`. Each command prints `saved` (with `saved, apply pending` or
+`saved; …` after it when the worker is not running yet); exit 1 means the edit was refused and the
+output says why.
+
 `--no-install` because step 3 installed it. Enrolling does not start the worker;
 `pidgen worker start --detach --format json` does, and the CLI records that worker so it can stop it and report
 on it.
@@ -122,7 +170,7 @@ on success.
 | Exit | `error.code` | Meaning and next step |
 |---|---|---|
 | 3 | `FORBIDDEN` | The credential may not enroll workers; go back to step 2 |
-| 2 | `WORKER_NOT_FOUND` | `pidgen-worker` is not on `PATH`. Add the directory of the install record's `location` to `PATH` and enroll again |
+| 2 | `WORKER_NOT_FOUND` | The worker the install record names (`error.details.location`) is missing: run `pidgen worker install --force --format json` and enroll again |
 | 1 | `ENROLL_FAILED` | The worker refused; its reason is on standard error. A host already enrolled in this Account is refused: pass a different `--host-id` after `--`, or remove the old worker in the web app. Each attempt spends one enrollment, so read the reason before retrying |
 
 `pidgen worker start --detach --format json` waits two seconds. Exit 1 with `WORKER_EXITED` means the worker
@@ -146,8 +194,9 @@ release should be installed (section "Update").
 of `data.checks` has `name`, `ok`, `summary` and, when it fails, `defect` and `remedy`. A failure
 exits 1 with `DOCTOR_FAILED` and the report in `error.details`. Typical failures and their remedies:
 
-- **A coding agent is not logged in.** The person logs in with that agent's own command, such as
-  `claude /login`. You never handle their credentials.
+- **A coding agent is not logged in.** The person runs `pidgen worker login claude --format json` or
+  `pidgen worker login codex --format json` in their own terminal: it runs the agent's login there
+  and returns `data.login`, `ready` when it worked. You never handle their credentials.
 - **A coding agent's command is missing** while the worker is set to run it: install it, or switch
   that agent off (section "Configure the worker").
 - **`git`, `node` or `npm` is missing or too old:** the person installs it.
@@ -218,7 +267,24 @@ pidgen-worker capacity set codex --max 0
 ```
 
 `max` caps that agent's concurrent sessions on this machine and reserves nothing, so the caps may
-add up to more than the prompt pool's `max`. `--max 0` switches the agent off. An agent runs only
+add up to more than the prompt pool's `max`. Size it from the person's plan, as guided setup does:
+
+| Coding agent | Plan | Sessions at a time | `--plan` value |
+|---|---|---|---|
+| Claude Code | Pro | 1 | `claude=pro` |
+| Claude Code | Max 5x | 2 | `claude=max-5x` |
+| Claude Code | Max 20x | 4 | `claude=max-20x` |
+| Claude Code | API key, Team or Enterprise | 2 | `claude=api` |
+| Claude Code | Not sure | 1 | `claude=not-sure` |
+| Codex | Plus | 1 | `codex=plus` |
+| Codex | Pro | 3 | `codex=pro` |
+| Codex | Business or Enterprise | 2 | `codex=business` |
+| Codex | API key | 2 | `codex=api` |
+| Codex | Not sure | 1 | `codex=not-sure` |
+
+A person with a terminal can also size them again with
+`pidgen setup --agent claude --sessions claude=4 --format json` (or `--plan claude=max-20x` for `--sessions`),
+which applies the caps without enrolling again. `--max 0` switches the agent off. An agent runs only
 when it is above 0 here, its command is installed and logged in, and the person's Pidgen Account
 allows it. After switching one on, run `pidgen worker doctor --format json` to confirm its command and login.
 

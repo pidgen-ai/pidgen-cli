@@ -94,9 +94,74 @@ contract and its exceptions.
 | You want to… | Continue with |
 |---|---|
 | Ask a coding agent to file, plan, or follow work | [Install agent skills](install-skills.md) |
-| Execute Pidgen work on this machine | [Install and connect a worker](install-worker.md) |
+| Execute Pidgen work on this machine | [Set up a worker](#set-up-a-worker), then [Install and connect a worker](install-worker.md) for the details |
 | File a ticket directly from your terminal | [Create your first ticket](#create-your-first-ticket) |
 | Look up a command or flag | [Command reference](commands.md) or `pidgen --help` |
+
+## Set up a worker
+
+A worker runs Pidgen work on a machine you control, using the coding agents installed there. On a
+Linux or macOS machine with the CLI installed, run:
+
+```sh
+pidgen setup
+```
+
+`pidgen setup` is the CLI's one interactive command. It walks through eight steps, showing one
+question or task at a time: you answer with the arrow keys, space and Enter, and each answer
+collapses to one line, such as `◇  Coding agents · Claude Code, Codex`. Ctrl-C at a question stops
+setup and keeps everything it finished; run it again to continue.
+
+1. **Check this machine.** Runs `pidgen doctor`, and offers to install `uv` when it is missing.
+   `git` 2.25 or later is required.
+2. **Sign in to Pidgen.** Signs you in with a device code, if you are not signed in already.
+3. **Choose coding agents.** Tick Claude Code, Codex, or both; the ones on this machine start
+   ticked. Ticking one that is missing installs it with npm, with no further question.
+   `--agent claude` or `--agent codex` (repeatable) answers in advance.
+4. **Sign in to coding agents.** Runs `pidgen worker login <agent>` for each chosen agent that is
+   not signed in; the agent's own login runs in your terminal.
+5. **Size coding agent sessions.** Asks how many of each agent's sessions run at once: a choice of
+   numbers, each with the plans it suits, or *Custom…* for any whole number from 1.
+   `--sessions claude=4` (repeatable) answers in advance, and so does `--plan claude=max-5x`.
+6. **Install the worker.** Asks once, `Install pidgen-worker <version> and accept its licence?`,
+   naming the licence and linking its full text (`Read it: https://pidgen.ai/legal/eula`), then
+   installs and verifies the worker. `--accept-licence` answers yes in advance.
+7. **Enroll and start the worker.** Enrolls this machine, applies the session caps, starts the
+   worker and waits until Pidgen reports it connected.
+8. **Prove the worker works.** Runs the worker's own checks, then ends with the time setup took
+   and a summary card: what was set up, how to manage it, and the next thing to do.
+
+Run it again on a finished machine and it asks what to do: check everything and stop, change the
+coding agents or sessions, or update the worker when a newer release is out.
+
+To answer every question in advance:
+
+```sh
+pidgen setup --agent claude --sessions claude=2 --accept-licence
+```
+
+The hints start from each agent's plan; `--plan` takes the plan instead of a number:
+
+| Coding agent | Plan | Sessions at a time |
+|---|---|---|
+| Claude Code | Pro | 1 |
+| Claude Code | Max 5x | 2 |
+| Claude Code | Max 20x | 4 |
+| Claude Code | API key, Team or Enterprise | 2 |
+| Claude Code | Not sure | 1 |
+| Codex | Plus | 1 |
+| Codex | Pro | 3 |
+| Codex | Business or Enterprise | 2 |
+| Codex | API key | 2 |
+| Codex | Not sure | 1 |
+
+To change a cap later, run the worker's own command, such as
+`pidgen-worker capacity set claude --max 4` (`--max 0` switches an agent off), or run
+`pidgen setup --sessions claude=4` (or `pidgen setup --plan claude=max-20x`) again. If a step
+fails, setup shows one block: what failed and why, the fix, the setup log, and
+`Run pidgen setup again to continue from here.`
+[Install and connect a worker](install-worker.md) covers each step, the `--sessions` and `--plan` values, and the
+commands to use without a terminal.
 
 ## Create your first ticket
 

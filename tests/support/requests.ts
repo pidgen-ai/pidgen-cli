@@ -3,11 +3,15 @@
  * shared by the command tests. Nothing here is a real person, project or Account.
  */
 
-/** An intake request as the durable-request contract states it: one open question, one settled. */
+/**
+ * An intake request as the durable-request contract states it: one open question, one settled. Its
+ * id (`conv-…`) differs from its public key (`REQ-7`), which is what the CLI prints.
+ */
 export function intakeRequest(overrides: Record<string, unknown> = {}) {
   const person = { user_id: "usr-example-1", display_name: "Example Person" };
   return {
     request_id: "conv-example-1",
+    request_key: "REQ-7",
     project_id: "proj-example",
     title: "Show the login page",
     text: "People can sign in from the home page.",
@@ -73,4 +77,13 @@ export function intakeRequest(overrides: Record<string, unknown> = {}) {
     waiting_since: "2026-10-01T09:00:00Z",
     ...overrides,
   };
+}
+
+/**
+ * An intake request as the intent commands print it: named by its key in `request_id`, the id
+ * only when it has no key.
+ */
+export function shownIntake(request: Record<string, unknown>): Record<string, unknown> {
+  const { request_key: key, ...rest } = request;
+  return { ...rest, request_id: key ?? request["request_id"] };
 }

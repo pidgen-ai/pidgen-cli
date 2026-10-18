@@ -15,6 +15,7 @@ import {
   REQUEST_KINDS,
   REQUEST_ROUTES,
   REQUEST_URGENCIES,
+  requestName,
   requestUrl,
   sendRequestRoute,
   validateRequestBody,
@@ -68,7 +69,8 @@ interface Evidence {
  * first (a missing one is `CLI_USAGE`, exit 2).
  *
  * `data` is `{outcome, url, request, entry_id, occurrence_id, attachments}`: what the submission
- * did (`created`, `appended`, `occurrence` or `regression`), the Request's page, and each evidence
+ * did (`created`, `appended`, `occurrence` or `regression`), the Request's page
+ * (`/requests/REQ-{n}?account=…`), the Request named by its key in `id`, and each evidence
  * file as uploaded (`POST /requests/{request_id}/attachments`) to the returned `occurrence_id`, or
  * else `entry_id`. A refused upload keeps its code and exit, and its details name the Request filed.
  */
@@ -133,8 +135,9 @@ export const requestSubmit: CommandSpec = {
       {},
       { body, idempotent: true },
     );
-    const id = data.request.id;
-    const url = requestUrl(session.target.url, id);
+    // The Request is named by its key, never its conv- id, unless the server has no key for it.
+    const id = requestName(data.request);
+    const url = requestUrl(session.target.url, id, session.target.account);
     const attachments: RequestAttachment[] = [];
     if (evidence.length > 0) {
       const owner =

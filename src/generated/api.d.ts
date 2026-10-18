@@ -12426,6 +12426,11 @@ export interface components {
              */
             request_id: string;
             /**
+             * Request Key
+             * @description The request's public key in its Account, `REQ-{n}`, or null when it has none; every /api/v1/intents/{conversation_id} path takes it.
+             */
+            request_key: string | null;
+            /**
              * Project Id
              * @description The Project the request is in.
              */
@@ -12641,6 +12646,11 @@ export interface components {
              * @description The request's id; the same as `conversation_id`.
              */
             request_id: string;
+            /**
+             * Request Key
+             * @description The request's public key in its Account, `REQ-{n}`, or null when it has none; every /api/v1/intents/{conversation_id} path takes it.
+             */
+            request_key: string | null;
             /** @description The request, with its structured questions and what the caller may do. */
             request: components["schemas"]["IntakeRequest"];
         };
@@ -12698,6 +12708,11 @@ export interface components {
              * @description The request the Ticket was created from; read it at GET /api/v1/intents/{request_id}.
              */
             request_id: string;
+            /**
+             * Request Key
+             * @description The request's public key in its Account, `REQ-{n}`, or null when it has none; every /api/v1/intents/{conversation_id} path takes it.
+             */
+            request_key: string | null;
             /**
              * Assumptions Recorded
              * @description How many questions are recorded on the Ticket as assumptions instead of answers.
@@ -16703,9 +16718,14 @@ export interface components {
         Request: {
             /**
              * Id
-             * @description The Request's id (`conv-…`); its page is /requests/{id}.
+             * @description The Request's internal id (`conv-…`). Show customers `request_key` instead; every /api/v1/requests/{request_id} path takes either.
              */
             id: string;
+            /**
+             * Request Key
+             * @description The Request's public key in its Account, `REQ-{n}`, or null for a Request the server has not keyed. Its page is /requests/{request_key}?account={id}.
+             */
+            request_key: string | null;
             /**
              * State
              * @description Its lane: `new`, `acknowledged`, `accepted`, `promoted`, `resolved` or `closed`. `promoted` and `resolved` follow the linked item.
@@ -16791,6 +16811,11 @@ export interface components {
              * @description The surviving Request when it was closed as a duplicate, or null.
              */
             duplicate_of: string | null;
+            /**
+             * Duplicate Of Key
+             * @description The surviving Request's key (`REQ-{n}`) when it was closed as a duplicate, or null.
+             */
+            duplicate_of_key: string | null;
             /** @description What it became, or null. */
             promoted: components["schemas"]["RequestPromoted"] | null;
             /**
@@ -16928,6 +16953,11 @@ export interface components {
              * @description The request.
              */
             request_id: string;
+            /**
+             * Request Key
+             * @description The request's public key in its Account, `REQ-{n}`, or null when it has none; every /api/v1/intents/{conversation_id} path takes it.
+             */
+            request_key: string | null;
             /** @description The executed action. */
             action: components["schemas"]["ActionKind"];
             /**
@@ -17525,6 +17555,11 @@ export interface components {
              * @description The Ticket's or Idea's id.
              */
             id: string;
+            /**
+             * Ticket Key
+             * @description The Ticket's key, e.g. PIDGEN-12, when it became a Ticket; null for an Idea or a Ticket with no key.
+             */
+            ticket_key: string | null;
             /**
              * Stage
              * @description The linked item's live stage, or null if unknown.
@@ -28173,6 +28208,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 conversation_id: string;
             };
             cookie?: never;
@@ -28222,6 +28258,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 conversation_id: string;
             };
             cookie?: never;
@@ -28293,6 +28330,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 conversation_id: string;
             };
             cookie?: never;
@@ -28364,6 +28402,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 conversation_id: string;
             };
             cookie?: never;
@@ -28435,6 +28474,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 conversation_id: string;
             };
             cookie?: never;
@@ -30438,6 +30478,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 request_id: string;
             };
             cookie?: never;
@@ -30487,6 +30528,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 request_id: string;
             };
             cookie?: never;
@@ -30558,6 +30600,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 request_id: string;
             };
             cookie?: never;
@@ -30629,6 +30672,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 request_id: string;
             };
             cookie?: never;
@@ -30700,6 +30744,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 request_id: string;
             };
             cookie?: never;
@@ -30771,6 +30816,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 request_id: string;
             };
             cookie?: never;
@@ -30842,6 +30888,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 request_id: string;
             };
             cookie?: never;
@@ -30913,6 +30960,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 request_id: string;
                 attachment_id: string;
             };
@@ -30963,6 +31011,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 request_id: string;
             };
             cookie?: never;
@@ -31034,6 +31083,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 request_id: string;
             };
             cookie?: never;
@@ -31105,6 +31155,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 request_id: string;
             };
             cookie?: never;
@@ -31176,6 +31227,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 request_id: string;
             };
             cookie?: never;
@@ -31256,6 +31308,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 request_id: string;
             };
             cookie?: never;
@@ -31327,6 +31380,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 request_id: string;
             };
             cookie?: never;
@@ -31398,6 +31452,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 request_id: string;
             };
             cookie?: never;
@@ -31469,6 +31524,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description The Request: its key (`REQ-{n}`) or its id (`conv-…`), resolved inside the Account, key first. */
                 request_id: string;
             };
             cookie?: never;

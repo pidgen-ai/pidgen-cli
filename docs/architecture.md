@@ -11,7 +11,8 @@
   defaults to JSON. `--format json` and `--format table` override selection. JSON envelopes and exit
   codes are stable, and anything with side effects previews before it applies.
   The one interactive command is `pidgen setup`, the guided path for a person at a terminal; it
-  is composed of the scriptable commands and prints each one as it runs it.
+  is composed of the scriptable commands, shows one line per action, and records each command it
+  runs, with its output, in a setup log (`--verbose` shows them as they run).
 - **The home of the Pidgen agent skills.** The agent skills are bundled in the npm package and
   installed into an agent's skill directory with `pidgen skills install` ([Skills](skills.md)).
 - **The front door for workers.** `pidgen worker` installs and verifies a worker, enrolls it, and

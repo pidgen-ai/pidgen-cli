@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { access, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import { z } from "zod";
 import type { GlobalOptions, RunContext } from "./context.js";
@@ -43,12 +43,15 @@ import {
   assertSupportedPlatform,
   displayCommand,
   findOnPath,
+  installRecordInvalid,
+  installRecordPath,
   resolvePidgenHome,
   runWorkerDoctor,
   runWorkerForeground,
   startWorkerDetached,
   stopWorker,
   workerEnvironment,
+  collectedOutput,
   workerStatus,
   type WorkerRecord,
 } from "./worker.js";
@@ -58,8 +61,10 @@ import {
  *
  * One interface, `WorkerAdapter`, with one implementation per form, chosen by the install record's
  * `form`. The wheel adapter installs the exact wheel a release names, after its provenance
- * verifies, with `uv tool install`; it runs the installed `pidgen-worker` with the code in
- * `worker.ts`. The container adapter (`worker-container.ts`) verifies the worker image's cosign
+ * verifies, with `uv tool install` into a uv tool environment of its own under the worker home
+ * (`UV_TOOL_DIR` and `UV_TOOL_BIN_DIR`), never uv's shared `pidgen-worker` tool slot, so it cannot
+ * replace a worker installed some other way or one that is running; it runs the installed
+ * `pidgen-worker` by the path the install record names, with the code in `worker.ts`. The container adapter (`worker-container.ts`) verifies the worker image's cosign
  * signature, pulls it by digest and runs it as a named container.
  *
  * The install record lives at `<worker home>/run/pidgen-install.json`, beside the detached
@@ -129,7 +134,12 @@ export interface WorkerAdapter {
   doctor(args: readonly string[]): Promise<Record<string, unknown>>;
 }
 
-const RECORD_NAME = "pidgen-install.json";
+/**
+ * The interpreter `uv tool install` runs the worker on: the Python the wheel was chosen for, and
+ * only one uv manages, so a system Python (a python.org build on macOS lacks CA certificates) is
+ * never picked.
+ */
+const MANAGED_PYTHON = ["--python", WORKER_PYTHON, "--python-preference", "only-managed"] as const;
 const UV_INSTALL_URL = "https://docs.astral.sh/uv/getting-started/installation/";
 /** The fix for an installed worker that no longer verifies: install, and verify, it again. */
 const REINSTALL = "pidgen worker install --force";
@@ -209,6 +219,11 @@ export interface InstallWorkerOptions {
    * notice is printed and anything is downloaded or run. Throwing stops the install.
    */
   beforeInstall?: (release: ResolvedRelease, list: WorkerReleaseList) => Promise<void>;
+  /**
+   * Print the licence notice before installing (default). `pidgen setup` asks to accept the
+   * licence in `beforeInstall` instead, so it prints no notice.
+   */
+  printLicence?: boolean;
 }
 
 export interface InstalledWorker {
@@ -244,12 +259,13 @@ export async function installWorker(
   const adapter = adapterFor(ctx, form);
   await adapter.prerequisite();
   await options.beforeInstall?.(release, list);
-  ctx.io.stderr(licenceNotice(list.eula));
+  if (options.printLicence !== false) ctx.io.stderr(licenceNotice(list.eula));
   const installed = await adapter.install(release, {
     reinstall: options.force || record !== null,
   });
   await writeInstallRecord(ctx, installed);
   if (record !== null && record.file !== installed.file) await removeKeptArtifact(record);
+  if (form === "wheel") await retireSharedInstall(ctx, record, await adapter.status());
   return { record: installed, installed: true, meta };
 }
 
@@ -273,12 +289,23 @@ async function chooseForm(
   throw runtimeUnavailable(detect.includes("container") ? undefined : "wheel-only");
 }
 
-/** The worker's licence notice, as `pidgen worker install`, `pidgen worker update` and `pidgen setup` print it. */
+/**
+ * Where the worker's licence, the Pidgen Worker End-User Licence Agreement, is published in full.
+ * The CLI's own constant: the release list's `eula` has no field for it. Shown as plain text (no
+ * terminal hyperlink), so it reads and copies the same in every terminal and in the setup log.
+ */
+export const WORKER_EULA_URL = "https://pidgen.ai/legal/eula";
+
+/** The line that links the licence's full text, under the install question and the notice. */
+export const WORKER_EULA_LINK = `Read it: ${WORKER_EULA_URL}`;
+
+/** The worker's licence notice, as `pidgen worker install` and `pidgen worker update` print it. */
 export function licenceNotice(eula: WorkerEula): string {
   return [
     `pidgen-worker is licensed under the ${eula.name} (${eula.location}).`,
     eula.notice,
     "Installing it accepts the licence.",
+    WORKER_EULA_LINK,
     "",
   ].join("\n");
 }
@@ -286,9 +313,7 @@ export function licenceNotice(eula: WorkerEula): string {
 // ---------------------------------------------------------------------------------------------
 // The install record
 
-export function installRecordPath(ctx: Pick<RunContext, "env" | "homeDir">): string {
-  return join(resolvePidgenHome(ctx), "run", RECORD_NAME);
-}
+export { installRecordPath };
 
 const IdentitySchema = z.object({ issuer: z.string(), subject: z.string() });
 const RecordSchema = z.object({
@@ -325,12 +350,7 @@ export async function readInstallRecord(
   }
   const result = RecordSchema.safeParse(parsed);
   if (!result.success || (result.data.form === "wheel" && result.data.file === null)) {
-    throw new CliError(
-      "INSTALL_RECORD_INVALID",
-      `The worker install record at ${path} cannot be read. Run \`pidgen worker install --force\` to replace it.`,
-      ExitCode.Unexpected,
-      { path },
-    );
+    throw installRecordInvalid(path);
   }
   const { volume, index, ...record } = result.data;
   return {
@@ -386,24 +406,30 @@ export interface CommandResult {
  * Runs a command the CLI composed: prints it to standard error, then runs it with an argument
  * list, never through a shell. Its standard error goes to the CLI's; its standard output is
  * captured when `capture` is set and otherwise also goes to standard error, so standard output
- * keeps only the envelope.
+ * keeps only the envelope. A caller that collects output (`ctx.io.pipeChildren`, as setup does)
+ * gets both through `ctx.io.stderr()` instead.
  */
 export async function runCommand(
   ctx: RunContext,
   argv: readonly [string, ...string[]],
-  options: { capture?: boolean } = {},
+  options: { capture?: boolean; env?: Record<string, string> } = {},
 ): Promise<CommandResult> {
   const [command, ...args] = argv;
   ctx.io.stderr(`$ ${displayCommand(argv)}\n`);
+  const collected = collectedOutput(ctx.io);
   const child = ctx.workerRuntime.spawn(command, args, {
     cwd: ctx.cwd,
-    env: workerEnvironment(ctx),
-    stdio: ["ignore", options.capture ? "pipe" : 2, 2],
+    env: { ...workerEnvironment(ctx), ...options.env },
+    stdio: ["ignore", options.capture || collected ? "pipe" : 2, collected ? "pipe" : 2],
     shell: false,
   });
   const chunks: Buffer[] = [];
-  child.stdout?.on("data", (chunk: string | Buffer) => chunks.push(Buffer.from(chunk)));
+  child.stdout?.on("data", (chunk: string | Buffer) =>
+    options.capture ? chunks.push(Buffer.from(chunk)) : collected?.write(chunk),
+  );
+  child.stderr?.on("data", (chunk: string | Buffer) => collected?.write(chunk));
   const exitCode = await waitFor(child, command);
+  collected?.end();
   return { exitCode, stdout: Buffer.concat(chunks).toString("utf8") };
 }
 
@@ -435,6 +461,149 @@ function waitFor(child: ChildProcess, command: string): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The worker's own uv tool environment, and uv's shared tool slot
+
+/**
+ * The uv tool environment the wheel is installed into, under the worker home: `tools` holds the
+ * tool's environment (`UV_TOOL_DIR`), `bin` its `pidgen-worker` (`UV_TOOL_BIN_DIR`). The bin
+ * directory is not on `PATH`; the CLI runs the worker by the path the install record names.
+ */
+export function workerToolDirs(ctx: Pick<RunContext, "env" | "homeDir">): {
+  toolDir: string;
+  binDir: string;
+} {
+  const root = join(resolvePidgenHome(ctx), "worker");
+  return { toolDir: join(root, "tools"), binDir: join(root, "bin") };
+}
+
+/**
+ * What every `uv tool` command the CLI runs for its own install gets, so uv's shared tool directory
+ * and `~/.local/bin` are never touched: the tool directories, and where a Python uv downloads may
+ * put its executables.
+ */
+function ownUvEnvironment(ctx: Pick<RunContext, "env" | "homeDir">): Record<string, string> {
+  const { toolDir, binDir } = workerToolDirs(ctx);
+  return {
+    UV_TOOL_DIR: toolDir,
+    UV_TOOL_BIN_DIR: binDir,
+    UV_PYTHON_BIN_DIR: join(dirname(binDir), "python-bin"),
+  };
+}
+
+/**
+ * True for a wheel record an earlier CLI made: it names a `pidgen-worker` outside the worker home's
+ * tool environment, where uv put it in its shared tool slot.
+ */
+export function inSharedSlot(
+  ctx: Pick<RunContext, "env" | "homeDir">,
+  record: InstallRecord,
+): boolean {
+  return record.form === "wheel" && dirname(record.location) !== workerToolDirs(ctx).binDir;
+}
+
+/** The `pidgen-worker` in uv's shared tool slot (uv's own defaults): its version and path. */
+export interface SharedWorker {
+  version: string;
+  location: string;
+}
+
+/**
+ * The `pidgen-worker` uv's shared tool slot holds, from `uv tool list --show-paths` run with the
+ * person's own uv settings, or `null` when it holds none (or uv is not on `PATH`).
+ */
+export async function sharedUvWorker(ctx: RunContext): Promise<SharedWorker | null> {
+  const uv = await findOnPath(ctx, "uv", ctx.workerRuntime);
+  if (uv === null) return null;
+  const listed = await runCommand(ctx, [uv, "tool", "list", "--show-paths"], { capture: true });
+  if (listed.exitCode !== 0) return null;
+  return parseToolList(listed.stdout);
+}
+
+/**
+ * `pidgen-worker`'s entry in `uv tool list --show-paths` output:
+ * `pidgen-worker v2.10.0 (<tool environment>)`, then `- pidgen-worker (<executable>)`.
+ */
+export function parseToolList(output: string): SharedWorker | null {
+  let version: string | null = null;
+  for (const line of output.split(/\r?\n/)) {
+    if (version === null) {
+      const tool = new RegExp(`^${WORKER_PROJECT} v(\\S+)`).exec(line);
+      if (tool !== null) version = tool[1]!;
+      continue;
+    }
+    if (!line.startsWith("- ")) break;
+    const entry = new RegExp(`^- ${WORKER_PROJECT} \\((.+)\\)$`).exec(line);
+    if (entry !== null) return { version, location: entry[1]! };
+  }
+  return null;
+}
+
+/**
+ * Removes the `pidgen-worker` an earlier CLI's record names from uv's shared tool slot, only when
+ * the slot still holds it: the recorded version at the recorded path. `other` when the slot now
+ * holds another install's, which is left alone; `absent` when it holds none.
+ */
+async function removeSharedTool(
+  ctx: RunContext,
+  uv: string,
+  record: InstallRecord,
+): Promise<"removed" | "absent" | "other"> {
+  const listed = await runCommand(ctx, [uv, "tool", "list", "--show-paths"], { capture: true });
+  const shared = listed.exitCode === 0 ? parseToolList(listed.stdout) : null;
+  if (shared === null) return "absent";
+  if (shared.location !== record.location || shared.version !== record.version) return "other";
+  const result = await runCommand(ctx, [uv, "tool", "uninstall", WORKER_PROJECT]);
+  if (result.exitCode !== 0) {
+    throw new CliError(
+      "UNINSTALL_FAILED",
+      `uv tool uninstall exited with status ${result.exitCode}; pidgen-worker ${record.version} is still installed.`,
+      ExitCode.Unexpected,
+      { exit_code: result.exitCode, location: record.location },
+    );
+  }
+  return "removed";
+}
+
+function leftInPlace(record: InstallRecord): string {
+  return `uv's shared ${WORKER_PROJECT} is no longer the ${record.version} at ${record.location} the install record named, so this CLI left it in place.\n`;
+}
+
+/**
+ * After the worker is installed in the worker home, the earlier CLI's install in uv's shared tool
+ * slot that `previous` names is removed, unless a worker is running from it (`local`, the detached
+ * worker's status) or the slot holds another install's worker now. Either is said in one line;
+ * a failure to remove it does not fail the install.
+ */
+export async function retireSharedInstall(
+  ctx: RunContext,
+  previous: InstallRecord | null,
+  local: { record: RunRecord | null; running: boolean } | null,
+): Promise<void> {
+  if (previous === null || !inSharedSlot(ctx, previous)) return;
+  const runningFromIt =
+    local?.running === true &&
+    local.record !== null &&
+    "command" in local.record &&
+    local.record.command[0] === previous.location;
+  if (runningFromIt) {
+    ctx.io.stderr(
+      `pidgen-worker ${previous.version} is still running from ${previous.location} (uv's shared tools), so it was left in place; once it stops, remove it with \`uv tool uninstall ${WORKER_PROJECT}\`.\n`,
+    );
+    return;
+  }
+  const uv = await findOnPath(ctx, "uv", ctx.workerRuntime);
+  if (uv === null) return;
+  try {
+    if ((await removeSharedTool(ctx, uv, previous)) === "other") {
+      ctx.io.stderr(leftInPlace(previous));
+    }
+  } catch (error) {
+    if (!(error instanceof CliError)) throw error;
+    ctx.io.stderr(`${error.message} Remove it with \`uv tool uninstall ${WORKER_PROJECT}\`.\n`);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // The wheel adapter
 
 export function wheelAdapter(ctx: RunContext): WorkerAdapter {
@@ -463,6 +632,7 @@ export function wheelAdapter(ctx: RunContext): WorkerAdapter {
       }
       checkWheelNames(release.version, wheel);
       const uv = await prerequisite();
+      const env = ownUvEnvironment(ctx);
       const expectedSha256 = wheel.digest.slice("sha256:".length);
       const index = release.index;
 
@@ -486,17 +656,21 @@ export function wheelAdapter(ctx: RunContext): WorkerAdapter {
         );
         const verifiedAt = new Date(ctx.now()).toISOString();
 
-        // Only now does anything run: uv installs the verified file into its own environment,
-        // with the interpreter the wheel was chosen for (a compiled wheel serves one Python).
-        const install = await runCommand(ctx, [
-          uv,
-          "tool",
-          "install",
-          "--python",
-          WORKER_PYTHON,
-          ...(options.reinstall ? ["--reinstall"] : []),
-          staged,
-        ]);
+        // Only now does anything run: uv installs the verified file into the worker home's own
+        // tool environment, with the interpreter the wheel was chosen for (a compiled wheel serves
+        // one Python).
+        const install = await runCommand(
+          ctx,
+          [
+            uv,
+            "tool",
+            "install",
+            ...MANAGED_PYTHON,
+            ...(options.reinstall ? ["--reinstall"] : []),
+            staged,
+          ],
+          { env },
+        );
         if (install.exitCode !== 0) {
           throw new CliError(
             "INSTALL_FAILED",
@@ -505,12 +679,9 @@ export function wheelAdapter(ctx: RunContext): WorkerAdapter {
             { exit_code: install.exitCode },
           );
         }
-        const bin = await runCommand(ctx, [uv, "tool", "dir", "--bin"], { capture: true });
+        const bin = await runCommand(ctx, [uv, "tool", "dir", "--bin"], { capture: true, env });
         const binDir = bin.exitCode === 0 ? bin.stdout.trim() : "";
-        const location =
-          binDir !== ""
-            ? join(binDir, "pidgen-worker")
-            : ((await findOnPath(ctx, "pidgen-worker", ctx.workerRuntime)) ?? "pidgen-worker");
+        const location = join(binDir !== "" ? binDir : workerToolDirs(ctx).binDir, "pidgen-worker");
 
         const file = join(workerDir, wheel.filename);
         await rename(staged, file);
@@ -554,15 +725,12 @@ export function wheelAdapter(ctx: RunContext): WorkerAdapter {
           { check: "digest", file: record.file, expected: record.digest },
         );
       }
-      const install = await runCommand(ctx, [
-        uv,
-        "tool",
-        "install",
-        "--python",
-        WORKER_PYTHON,
-        "--reinstall",
-        file,
-      ]);
+      // Into the worker home's tool environment, whatever location the record names.
+      const install = await runCommand(
+        ctx,
+        [uv, "tool", "install", ...MANAGED_PYTHON, "--reinstall", file],
+        { env: ownUvEnvironment(ctx) },
+      );
       if (install.exitCode !== 0) {
         throw new CliError(
           "INSTALL_FAILED",
@@ -575,17 +743,27 @@ export function wheelAdapter(ctx: RunContext): WorkerAdapter {
 
     async uninstall(record) {
       const uv = await prerequisite();
-      const result = await runCommand(ctx, [uv, "tool", "uninstall", WORKER_PROJECT]);
-      // uv refuses a tool it no longer has; one removed outside the CLI is already uninstalled.
-      if (result.exitCode !== 0 && (await pathExists(record.location))) {
-        throw new CliError(
-          "UNINSTALL_FAILED",
-          `uv tool uninstall exited with status ${result.exitCode}; pidgen-worker ${record.version} is still installed.`,
-          ExitCode.Unexpected,
-          { exit_code: result.exitCode, location: record.location },
-        );
+      const removed: string[] = [];
+      if (inSharedSlot(ctx, record)) {
+        // An earlier CLI's install, in uv's shared slot: removed only while the slot holds it.
+        const outcome = await removeSharedTool(ctx, uv, record);
+        if (outcome === "removed") removed.push(`tool ${WORKER_PROJECT}`);
+        if (outcome === "other") ctx.io.stderr(leftInPlace(record));
+      } else {
+        const result = await runCommand(ctx, [uv, "tool", "uninstall", WORKER_PROJECT], {
+          env: ownUvEnvironment(ctx),
+        });
+        // uv refuses a tool it no longer has; one removed outside the CLI is already uninstalled.
+        if (result.exitCode !== 0 && (await pathExists(record.location))) {
+          throw new CliError(
+            "UNINSTALL_FAILED",
+            `uv tool uninstall exited with status ${result.exitCode}; pidgen-worker ${record.version} is still installed.`,
+            ExitCode.Unexpected,
+            { exit_code: result.exitCode, location: record.location },
+          );
+        }
+        removed.push(`tool ${WORKER_PROJECT}`);
       }
-      const removed = [`tool ${WORKER_PROJECT}`];
       if (record.file !== null) {
         await removeKeptArtifact(record);
         removed.push(`file ${record.file}`);

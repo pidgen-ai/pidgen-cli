@@ -48,7 +48,7 @@ export async function testContext(overrides: Partial<RunContext> = {}): Promise<
       foreground: () => Promise.reject(new Error("unexpected docker call")),
     },
     cosign: { run: () => Promise.reject(new Error("unexpected cosign call")) },
-    ask: null,
+    prompter: null,
     hostName: "worker-host.example.com",
     ...overrides,
     out,
@@ -82,7 +82,7 @@ export async function expectMutationParity<T>(
   const { runCli } = await import("../../src/cli.js");
   ctx.io.stdoutIsTTY = true;
   ctx.io.interactive = true;
-  ctx.ask = () => {
+  ctx.prompter = () => {
     throw new Error("Mutation presentation must never prompt");
   };
   ctx.out.length = 0;

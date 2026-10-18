@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { runCli } from "../../src/cli.js";
 import { saveConfig, type Config } from "../../src/core/config.js";
 import { ExitCode } from "../../src/core/exit-codes.js";
+import type { Prompter } from "../../src/core/prompter.js";
 import { defaultWorkerRuntime } from "../../src/core/worker.js";
 import {
   envelope,
@@ -135,6 +136,21 @@ function publicError(status: number, code: string, message: string) {
   );
 }
 
+/**
+ * A terminal's prompter that `worker enroll` must never open: opening it records a question and
+ * fails. `null` is no terminal.
+ */
+function trapPrompter(
+  ask: ((question: string) => Promise<string>) | null | undefined,
+  questions: string[],
+): (() => Promise<Prompter>) | null {
+  if (ask === undefined || ask === null) return null;
+  return () => {
+    questions.push("worker enroll opened the prompter");
+    return Promise.reject(new Error("worker enroll must never ask"));
+  };
+}
+
 interface Setup {
   /** Put the fake pidgen-worker on PATH before the command runs. */
   installed?: boolean;
@@ -164,13 +180,7 @@ async function setup(options: Setup = {}) {
   const calls: Call[] = [];
   const respond = options.respond ?? (() => ok(201, enrollment(installCommand)));
   const questions: string[] = [];
-  const ask =
-    options.ask === undefined || options.ask === null
-      ? null
-      : (question: string) => {
-          questions.push(question);
-          return options.ask!(question);
-        };
+  const prompter = trapPrompter(options.ask, questions);
   const ctx = await testContext({
     homeDir: home,
     cwd: home,
@@ -190,7 +200,7 @@ async function setup(options: Setup = {}) {
       return Promise.resolve(respond(call));
     },
     workerRuntime: defaultWorkerRuntime,
-    ask,
+    prompter,
   });
   await saveConfig(ctx, CONFIG);
 
@@ -423,13 +433,7 @@ async function missing(options: MissingOptions = {}) {
     },
   };
   const questions: string[] = [];
-  ctx.ask =
-    options.ask === undefined || options.ask === null
-      ? null
-      : (question: string) => {
-          questions.push(question);
-          return options.ask!(question);
-        };
+  ctx.prompter = trapPrompter(options.ask, questions);
   return {
     ...setup,
     events,
@@ -518,7 +522,7 @@ describe("pidgen worker enroll with the worker missing", () => {
         .replace(/\.staging-[0-9a-f]+/g, "<staging>");
     const installPrinted = printed(install.ctx.err, install.directory);
     expect(installPrinted).toContain(
-      "$ <root>/path/uv tool install --python 3.12 <root>/.pidgen/worker/",
+      "$ <root>/path/uv tool install --python 3.12 --python-preference only-managed <root>/.pidgen/worker/",
     );
     expect(printed(enroll.ctx.err, enroll.directory)).toContain(installPrinted);
   });
@@ -619,20 +623,22 @@ describe("pidgen worker enroll with the worker missing", () => {
     expect(setup.enrollments()).toEqual([]);
   });
 
-  it("an install that leaves pidgen-worker off PATH exits 2 with WORKER_NOT_FOUND and spends no enrollment", async () => {
+  // home-lookup: the installed worker is run by the path its install record names, off PATH.
+  it("an install that leaves pidgen-worker off PATH enrolls with the worker its install record names", async () => {
     const setup = await missing({ onPath: false });
 
     const { code, body } = await run(setup.ctx, "worker", "enroll", "--install");
 
-    expect(code).toBe(ExitCode.Usage);
-    expect(body).toMatchObject({
-      ok: false,
-      error: {
-        code: "WORKER_NOT_FOUND",
-        details: { installed: { location: join(setup.binDir, "pidgen-worker") } },
-      },
+    expect(code).toBe(ExitCode.Ok);
+    expect(body.data).toMatchObject({
+      enrolled: true,
+      worker: setup.workerBin,
+      installed: { location: setup.workerBin },
     });
-    expect(setup.enrollments()).toEqual([]);
+    expect(setup.events).toContainEqual(
+      expect.stringMatching(new RegExp(`^spawn ${setup.workerBin} enroll `)),
+    );
+    expect(setup.enrollments()).toHaveLength(1);
   });
 
   it("a caller who may not enroll workers exits 3 after the install, with no worker enrolled", async () => {
@@ -713,6 +719,28 @@ describe("pidgen worker enroll never runs a server command through a shell", () 
     expect(Object.keys(await import("../../src/core/worker.js"))).not.toContain(
       "runInstallCommand",
     );
+  });
+
+  // The one shell the CLI starts: `pidgen setup` offers uv's own installer, `curl … | sh`, after
+  // the person consents. It runs as two argument lists, curl's output piped to sh's standard input;
+  // no command string reaches a shell, and no other source file names sh as a command.
+  it("starts sh only in setup, for uv's installer, fed by curl with no command string", async () => {
+    const root = new URL("../../src/", import.meta.url);
+    const files = (await readdir(root, { recursive: true }))
+      .filter((name) => name.endsWith(".ts") && !name.startsWith("generated"))
+      .map((name) => fileURLToPath(new URL(name, root)));
+    const spawnsSh = /spawn\(\s*["'`](ba|z|da)?sh["'`]/;
+    const naming: string[] = [];
+    for (const file of files) {
+      const text = await readFile(file, "utf8");
+      if (spawnsSh.test(text)) naming.push(file);
+    }
+    expect(naming.map((file) => file.slice(fileURLToPath(root).length))).toEqual([
+      join("commands", "setup", "setup.ts"),
+    ]);
+    const setup = await readFile(naming[0]!, "utf8");
+    expect(setup).toMatch(/spawn\(\s*"sh",\s*\[\]/);
+    expect(setup).toMatch(/spawn\(\s*"curl",\s*\["-LsSf", UV_INSTALLER_URL\]/);
   });
 });
 

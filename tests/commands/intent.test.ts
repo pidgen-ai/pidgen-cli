@@ -6,7 +6,7 @@ import { runCli } from "../../src/cli.js";
 import { saveConfig, type Config } from "../../src/core/config.js";
 import { ExitCode } from "../../src/core/exit-codes.js";
 import { envelope, jsonResponse, testContext, type TestContext } from "../support/context.js";
-import { intakeRequest } from "../support/requests.js";
+import { intakeRequest, shownIntake } from "../support/requests.js";
 
 const SERVER = "https://pidgen.example.com";
 const TOKEN = "pidgen_pat_fake_token_for_tests";
@@ -61,7 +61,18 @@ const CLARIFICATION = {
   stage: null,
   needs_clarification: true,
   conversation_id: "conv-example-1",
+  request_key: "REQ-7",
   questions: ["Which login methods?", "Should it remember the user?"],
+};
+
+/** The clarification as the CLI prints it: the conversation named by its key, REQ-7. */
+const CLARIFICATION_SHOWN = {
+  outcome: "needs_clarification",
+  ticket_id: null,
+  stage: null,
+  needs_clarification: true,
+  conversation_id: "REQ-7",
+  questions: CLARIFICATION.questions,
 };
 
 const STILL_NEEDS = {
@@ -111,7 +122,10 @@ function server(call: Call): Response {
   if (path === "/api/v1/intents" && call.method === "POST") {
     return ok(201, CREATED, "req_fake_submit");
   }
-  if (path === "/api/v1/intents/conv-example-1/respond" && call.method === "POST") {
+  if (
+    ["/api/v1/intents/conv-example-1/respond", "/api/v1/intents/REQ-7/respond"].includes(path) &&
+    call.method === "POST"
+  ) {
     return ok(200, CREATED, "req_fake_respond");
   }
   return publicError(404, "CONVERSATION_NOT_FOUND", "No such request in the Account.");
@@ -205,12 +219,14 @@ describe("pidgen intent submit", () => {
     expect(code).toBe(ExitCode.Ok);
     expect(body).toEqual({
       ok: true,
-      data: CLARIFICATION,
+      data: CLARIFICATION_SHOWN,
       error: null,
       meta: { ...META, request_id: "req_fake_submit" },
     });
+    // AC-9e98ff737e88: the conversation is named by its key, to pass to intent respond.
     const data = body.data as typeof CLARIFICATION;
-    expect(data.conversation_id).toBe("conv-example-1");
+    expect(data.conversation_id).toBe("REQ-7");
+    expect(JSON.stringify(data)).not.toContain("conv-");
     expect(data.questions).toEqual(CLARIFICATION.questions);
   });
 
@@ -286,7 +302,20 @@ describe("pidgen intent submit", () => {
     const name = await file(ctx, "intent.json", INTENT);
     const { code, body } = await run(ctx, "intent", "submit", "-f", name, "--submission-key", "k1");
     expect(code).toBe(ExitCode.Ok);
-    expect(body.data).toEqual(clarification);
+    expect(body.data).toEqual({
+      ...CLARIFICATION_SHOWN,
+      request_id: "REQ-7",
+      request: shownIntake(intakeRequest()),
+    });
+  });
+
+  it("submit names the conversation by its id only when the server has no key for it", async () => {
+    const clarification = { ...CLARIFICATION, request_key: null };
+    const { ctx } = await setup({ respond: () => ok(201, clarification, "req_fake_submit") });
+    const name = await file(ctx, "intent.json", INTENT);
+    const { code, body } = await run(ctx, "intent", "submit", "-f", name);
+    expect(code).toBe(ExitCode.Ok);
+    expect(body.data).toEqual({ ...CLARIFICATION_SHOWN, conversation_id: "conv-example-1" });
   });
 
   it("submit refused by the server (409 SUBMISSION_KEY_REUSED) is a refusal, exit 5", async () => {
@@ -503,6 +532,14 @@ describe("pidgen intent respond", () => {
     });
   });
 
+  it("respond passes a REQ key through to the path unchanged", async () => {
+    const { ctx, calls } = await setup();
+    const name = await file(ctx, "answers.json", ANSWERS);
+    const { code } = await run(ctx, "intent", "respond", "REQ-7", "-f", name);
+    expect(code).toBe(ExitCode.Ok);
+    expect(calls[0]?.url.pathname).toBe("/api/v1/intents/REQ-7/respond");
+  });
+
   it("respond percent-encodes the conversation as one path segment", async () => {
     const { ctx, calls } = await setup({ respond: () => ok(200, CREATED) });
     const name = await file(ctx, "answers.json", ANSWERS);
@@ -534,7 +571,7 @@ describe("pidgen intent respond", () => {
     expect(result.code).toBe(ExitCode.Ok);
     expect(result.body).toMatchObject({
       ok: true,
-      data: { outcome: "still_needs_clarification", request: { request_id: "conv-example-1" } },
+      data: { outcome: "still_needs_clarification", request: { request_id: "REQ-7" } },
     });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url.pathname).toBe("/api/v1/intents/conv-example-1/respond");
@@ -542,14 +579,19 @@ describe("pidgen intent respond", () => {
   });
 
   it("respond accepts empty answers with delegate and sends them as written", async () => {
-    const created = { ...CREATED, request_id: "conv-example-1", assumptions_recorded: 2 };
+    const created = {
+      ...CREATED,
+      request_id: "conv-example-1",
+      request_key: "REQ-7",
+      assumptions_recorded: 2,
+    };
     const { ctx, calls } = await setup({ respond: () => ok(200, created, "req_fake_respond") });
     const name = await file(ctx, "answers.json", { answers: [], delegate: true });
-    const { code, body } = await run(ctx, "intent", "respond", "conv-example-1", "-f", name);
+    const { code, body } = await run(ctx, "intent", "respond", "REQ-7", "-f", name);
     expect(code).toBe(ExitCode.Ok);
     expect(body).toEqual({
       ok: true,
-      data: created,
+      data: { ...CREATED, request_id: "REQ-7", assumptions_recorded: 2 },
       error: null,
       meta: { ...META, request_id: "req_fake_respond" },
     });
@@ -750,7 +792,11 @@ describe("pidgen intent respond", () => {
 /** Pages of `n` requests, answering `GET /intents` with the page the query names. */
 function pagedRequests(total: number) {
   const all = Array.from({ length: total }, (_, i) =>
-    intakeRequest({ request_id: `conv-example-${i + 1}`, version: i + 1 }),
+    intakeRequest({
+      request_id: `conv-example-${i + 1}`,
+      request_key: `REQ-${i + 101}`,
+      version: i + 1,
+    }),
   );
   return (call: Call): Response => {
     const page = Number(call.url.searchParams.get("page") ?? "1");
@@ -766,7 +812,10 @@ function pagedRequests(total: number) {
 
 describe("pidgen intent list", () => {
   it("list reads GET /intents and returns every request, leaving the state to the server's default", async () => {
-    const requests = [intakeRequest(), intakeRequest({ request_id: "conv-example-2" })];
+    const requests = [
+      intakeRequest(),
+      intakeRequest({ request_id: "conv-example-2", request_key: "REQ-8" }),
+    ];
     const { ctx, calls } = await setup({
       respond: () =>
         jsonResponse(
@@ -779,10 +828,14 @@ describe("pidgen intent list", () => {
     expect(code).toBe(ExitCode.Ok);
     expect(body).toEqual({
       ok: true,
-      data: requests,
+      data: requests.map(shownIntake),
       error: null,
       meta: { ...META, request_id: "req_fake_list" },
     });
+    expect((body.data as { request_id: string }[]).map((row) => row.request_id)).toEqual([
+      "REQ-7",
+      "REQ-8",
+    ]);
     expect(calls).toHaveLength(1);
     expect(calls[0]?.method).toBe("GET");
     expect(calls[0]?.url.pathname).toBe("/api/v1/intents");
@@ -834,8 +887,8 @@ describe("pidgen intent list", () => {
     expect(code).toBe(ExitCode.Ok);
     const data = body.data as { request_id: string }[];
     expect(data).toHaveLength(230);
-    expect(data[0]?.request_id).toBe("conv-example-1");
-    expect(data[229]?.request_id).toBe("conv-example-230");
+    expect(data[0]?.request_id).toBe("REQ-101");
+    expect(data[229]?.request_id).toBe("REQ-330");
     expect(calls.map((call) => call.url.searchParams.get("page"))).toEqual(["1", "2", "3"]);
     expect(body.meta["request_id"]).toBe("req_fake_page_1");
   });
@@ -912,22 +965,30 @@ describe("pidgen intent show", () => {
   it("show reads GET /intents/{conversation} and returns the request", async () => {
     const request = intakeRequest();
     const { ctx, calls } = await setup({ respond: () => ok(200, request, "req_fake_show") });
-    const { code, body } = await run(ctx, "intent", "show", "conv-example-1");
+    const { code, body } = await run(ctx, "intent", "show", "REQ-7");
     expect(code).toBe(ExitCode.Ok);
     expect(body).toEqual({
       ok: true,
-      data: request,
+      data: shownIntake(request),
       error: null,
       meta: { ...META, request_id: "req_fake_show" },
     });
+    expect((body.data as { request_id: string }).request_id).toBe("REQ-7");
     expect(calls).toHaveLength(1);
     expect(calls[0]?.method).toBe("GET");
-    expect(calls[0]?.url.pathname).toBe("/api/v1/intents/conv-example-1");
+    expect(calls[0]?.url.pathname).toBe("/api/v1/intents/REQ-7");
     expect(calls[0]?.url.search).toBe("");
     expect(calls[0]?.headers).toMatchObject({
       authorization: `Bearer ${TOKEN}`,
       "x-pidgen-account": "ACC-EXAMPLE",
     });
+  });
+
+  it("show names a request with no key by its id", async () => {
+    const { ctx } = await setup({ respond: () => ok(200, intakeRequest({ request_key: null })) });
+    const { code, body } = await run(ctx, "intent", "show", "conv-example-1");
+    expect(code).toBe(ExitCode.Ok);
+    expect((body.data as { request_id: string }).request_id).toBe("conv-example-1");
   });
 
   it("show percent-encodes the conversation as one path segment", async () => {
@@ -998,17 +1059,17 @@ describe("pidgen intent withdraw", () => {
     const { ctx, calls } = await setup({
       respond: () => ok(200, WITHDRAWN_REQUEST, "req_fake_withdraw"),
     });
-    const { code, body } = await run(ctx, "intent", "withdraw", "conv-example-1");
+    const { code, body } = await run(ctx, "intent", "withdraw", "REQ-7");
     expect(code).toBe(ExitCode.Ok);
     expect(body).toEqual({
       ok: true,
-      data: WITHDRAWN_REQUEST,
+      data: shownIntake(WITHDRAWN_REQUEST),
       error: null,
       meta: { ...META, request_id: "req_fake_withdraw" },
     });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.method).toBe("POST");
-    expect(calls[0]?.url.pathname).toBe("/api/v1/intents/conv-example-1/withdraw");
+    expect(calls[0]?.url.pathname).toBe("/api/v1/intents/REQ-7/withdraw");
     expect(calls[0]?.body).toEqual({});
     expect(calls[0]?.headers).toMatchObject({
       authorization: `Bearer ${TOKEN}`,
@@ -1147,13 +1208,14 @@ it.each([40, 80, 120])(
     ctx.io.stdoutColumns = columns;
     const argv = ["intent", "list"];
     expect(await runCli([...argv, "--format", "json"], ctx)).toBe(ExitCode.Ok);
+    expect((envelope(ctx).data as { request_id: string }[])[0]?.request_id).toBe("REQ-7");
     const previousCalls = [...calls];
     const previousErrors = [...ctx.err];
     calls.length = 0;
     ctx.out.length = 0;
     ctx.err.length = 0;
     expect(await runCli([...argv, "--format", "table"], ctx)).toBe(ExitCode.Ok);
-    for (const value of ["Intents (1 displayed)", WITHDRAWN_REQUEST.request_id, "withdrawn"])
+    for (const value of ["Intents (1 displayed)", "REQ-7", "withdrawn"])
       expect(ctx.out.join("")).toContain(value);
     expect(calls).toEqual(previousCalls);
     expect(ctx.err).toEqual(previousErrors);
@@ -1193,9 +1255,9 @@ it.each([40, 80, 120])(
       ctx,
       calls,
       ["intent", "submit", "-f", name],
-      ["Needs clarification.", "conv-example-1", "Questions"],
+      ["Needs clarification.", "REQ-7", "Questions"],
     );
-    expect(json.data).toEqual(CLARIFICATION);
+    expect(json.data).toEqual(CLARIFICATION_SHOWN);
     expect(calls).toHaveLength(1);
   },
 );

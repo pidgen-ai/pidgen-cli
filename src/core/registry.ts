@@ -32,6 +32,11 @@ export interface CommandResult {
   data: unknown;
   meta?: Partial<Omit<Meta, "cli_version">>;
   presentation?: Pick<PresentationContext, "responseStatus" | "now">;
+  /**
+   * The command's own rendering for a terminal (`--format table`), in place of the generic rendering
+   * of `data`, such as setup's summary card. JSON output is unaffected.
+   */
+  human?: string;
 }
 
 /** A foreground handoff controls the process status and deliberately emits no CLI envelope. */

@@ -172,6 +172,8 @@ export interface SpawnCall {
 
 export interface UvRun {
   args: string[];
+  /** The `UV_TOOL_DIR` and `UV_TOOL_BIN_DIR` uv was run with (absent: uv's defaults). */
+  env?: { UV_TOOL_DIR?: string; UV_TOOL_BIN_DIR?: string };
   /** The sha256 of the file `uv tool install` was given, read when it ran. */
   sha256?: string;
 }
@@ -199,8 +201,15 @@ export interface InstallContext {
   /** Versions whose worker exits during the startup check. */
   crashing: Set<string>;
   directory: string;
-  /** Where the fake uv puts `pidgen-worker`. */
+  /**
+   * The bin directory under the worker home (`<worker home>/worker/bin`), where the CLI's
+   * `uv tool install` puts `pidgen-worker`.
+   */
   binDir: string;
+  /** uv's shared tool bin directory (`~/.local/bin` on a real machine): uv's default. */
+  sharedBinDir: string;
+  /** uv's shared tool directory (`~/.local/share/uv/tools` on a real machine): uv's default. */
+  sharedToolDir: string;
   /** The directory on PATH holding the fake `uv` (and harness commands). */
   pathDir: string;
   spawns: SpawnCall[];
@@ -225,10 +234,14 @@ export interface InstallContextOptions extends InstallFetchOptions {
 export async function installContext(options: InstallContextOptions = {}): Promise<InstallContext> {
   const directory = await tempDir("pidgen-worker-install-");
   const pathDir = join(directory, "path");
-  const binDir = join(directory, "uv-bin");
+  const binDir = join(directory, ".pidgen", "worker", "bin");
+  const sharedBinDir = join(directory, "uv-bin");
+  const sharedToolDir = join(directory, "uv-tools");
   const uvLog = join(directory, "uv.log");
   await writeExecutable(join(pathDir, "placeholder"), "#!/bin/sh\nexit 0\n");
   if (options.uv !== false) await writeExecutable(join(pathDir, "uv"), fakeUv());
+  // A git new enough for the doctor's git check, so no test depends on the machine's own.
+  await writeExecutable(join(pathDir, "git"), "#!/bin/sh\necho 'git version 2.43.0'\n");
   for (const command of options.commands ?? []) {
     await writeExecutable(join(pathDir, command), "#!/bin/sh\nexit 0\n");
   }
@@ -281,7 +294,8 @@ export async function installContext(options: InstallContextOptions = {}): Promi
       PIDGEN_API_URL: SERVER,
       PATH: [pathDir, "/usr/bin", "/bin"].join(delimiter),
       FAKE_UV_LOG: uvLog,
-      FAKE_UV_BIN: binDir,
+      FAKE_UV_BIN: sharedBinDir,
+      FAKE_UV_TOOL_DIR: sharedToolDir,
       PIDGEN_WORKER_BIN: workerBin,
       ...(options.uvFails ? { FAKE_UV_FAIL: "1" } : {}),
       ...(options.uvUninstallFails ? { FAKE_UV_UNINSTALL_FAIL: "1" } : {}),
@@ -301,6 +315,8 @@ export async function installContext(options: InstallContextOptions = {}): Promi
     crashing,
     directory,
     binDir,
+    sharedBinDir,
+    sharedToolDir,
     pathDir,
     spawns,
     fetchCalls: calls,
@@ -328,25 +344,37 @@ async function writeExecutable(path: string, contents: string): Promise<void> {
 
 /**
  * A stand-in for `uv` that logs its argument list and installs a trivial `pidgen-worker`, or a copy
- * of the file at `FAKE_UV_WORKER` when that is set, or uninstalls it.
+ * of the file at `FAKE_UV_WORKER` when that is set, or uninstalls it. Like uv, it puts the tool's
+ * environment in `UV_TOOL_DIR` and its executable in `UV_TOOL_BIN_DIR` when they are set, and
+ * otherwise in its shared defaults (`FAKE_UV_TOOL_DIR`, `FAKE_UV_BIN`). `uv tool list --show-paths`
+ * lists the `pidgen-worker` there, with the version of the wheel it was installed from.
  */
-function fakeUv(): string {
+export function fakeUv(): string {
   return `#!${process.execPath}
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const args = process.argv.slice(2);
-const log = (entry) => fs.appendFileSync(process.env.FAKE_UV_LOG, JSON.stringify(entry) + "\\n");
-const bin = process.env.FAKE_UV_BIN;
+const env = {};
+for (const key of ["UV_TOOL_DIR", "UV_TOOL_BIN_DIR"]) if (process.env[key]) env[key] = process.env[key];
+const log = (entry) => fs.appendFileSync(process.env.FAKE_UV_LOG, JSON.stringify({ ...entry, env }) + "\\n");
+const bin = process.env.UV_TOOL_BIN_DIR || process.env.FAKE_UV_BIN;
+const tools = process.env.UV_TOOL_DIR || process.env.FAKE_UV_TOOL_DIR;
 if (args[0] === "tool" && args[1] === "install") {
   const file = args[args.length - 1];
   const sha256 = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
   log({ args, sha256 });
   if (process.env.FAKE_UV_FAIL) {
+    // FAKE_UV_FAIL_LINES: that many numbered lines of output before the failure.
+    const lines = Number(process.env.FAKE_UV_FAIL_LINES ?? 0);
+    for (let n = 1; n <= lines; n++) process.stderr.write("uv output line " + n + "\\n");
     process.stderr.write("fake uv: install failed\\n");
     process.exit(1);
   }
+  // As uv does, it reports what it resolved on standard error.
+  process.stderr.write("Resolved 45 packages in 320ms\\nInstalled 1 executable: pidgen-worker\\n");
   fs.mkdirSync(bin, { recursive: true });
+  fs.mkdirSync(path.join(tools, "pidgen-worker"), { recursive: true });
   const worker = process.env.FAKE_UV_WORKER
     ? fs.readFileSync(process.env.FAKE_UV_WORKER)
     : "#!/bin/sh\\n# installed from " + path.basename(file) + "\\nexit 0\\n";
@@ -360,11 +388,23 @@ if (args[0] === "tool" && args[1] === "uninstall") {
     process.exit(2);
   }
   fs.rmSync(path.join(bin, "pidgen-worker"), { force: true });
+  fs.rmSync(path.join(tools, "pidgen-worker"), { recursive: true, force: true });
   process.exit(0);
 }
 if (args[0] === "tool" && args[1] === "dir" && args[2] === "--bin") {
   log({ args });
   process.stdout.write(bin + "\\n");
+  process.exit(0);
+}
+if (args[0] === "tool" && args[1] === "list") {
+  log({ args });
+  const worker = path.join(bin, "pidgen-worker");
+  // uv says "No tools installed" on standard error; the fake keeps the test output quiet.
+  if (!fs.existsSync(worker)) process.exit(0);
+  const version = /pidgen_worker-([^-]+)-/.exec(fs.readFileSync(worker, "utf8"))?.[1] ?? "0.0.0";
+  const shown = args.includes("--show-paths");
+  process.stdout.write("pidgen-worker v" + version + (shown ? " (" + path.join(tools, "pidgen-worker") + ")" : "") + "\\n");
+  process.stdout.write("- pidgen-worker" + (shown ? " (" + worker + ")" : "") + "\\n");
   process.exit(0);
 }
 log({ args });
@@ -377,16 +417,23 @@ export const PREVIOUS_WHEEL = "pidgen_worker-0.8.0-py3-none-any.whl";
 /**
  * Stands up an earlier install as `pidgen worker install` would have left it: a kept, verified
  * 0.8.0 wheel under the worker home, its install record, and the `pidgen-worker` uv installed
- * from it. Returns the record.
+ * from it. With `legacy`, as an earlier CLI left it: the worker in uv's shared tool slot.
+ * Returns the record.
  */
-export async function previousInstall(setup: InstallContext): Promise<Record<string, unknown>> {
+export async function previousInstall(
+  setup: InstallContext,
+  options: { legacy?: boolean } = {},
+): Promise<Record<string, unknown>> {
   const workerDir = join(setup.pidgenHome, "worker");
   const file = join(workerDir, PREVIOUS_WHEEL);
   const bytes = "the 0.8.0 wheel, verified when it was installed";
   await mkdir(workerDir, { recursive: true });
   await writeFile(file, bytes);
   await writeFile(`${file}.provenance.json`, "{}\n");
-  await writeExecutable(setup.workerBin, `#!/bin/sh\n# installed from ${PREVIOUS_WHEEL}\nexit 0\n`);
+  // An earlier CLI let uv put the worker in its shared tool slot; this one uses the worker home.
+  const location = options.legacy ? join(setup.sharedBinDir, "pidgen-worker") : setup.workerBin;
+  await writeExecutable(location, `#!/bin/sh\n# installed from ${PREVIOUS_WHEEL}\nexit 0\n`);
+  if (options.legacy) await mkdir(join(setup.sharedToolDir, "pidgen-worker"), { recursive: true });
   const record = {
     form: "wheel",
     version: "0.8.0",
@@ -395,7 +442,7 @@ export async function previousInstall(setup: InstallContext): Promise<Record<str
     identity: { issuer: TEST_ISSUER, subject: TEST_SUBJECT },
     verified_at: "2025-10-01T00:00:00.000Z",
     installed_at: "2025-10-01T00:00:00.000Z",
-    location: setup.workerBin,
+    location,
     file,
   };
   await mkdir(join(setup.pidgenHome, "run"), { recursive: true });

@@ -55,8 +55,8 @@ the CLI: a retry of the same command is then the same submission.
 
 Read `data.outcome`: `created` is a new request; `appended` added it to a request already
 open; `occurrence` counted it on the open request with that fingerprint; `regression` matched a
-resolved request with that fingerprint. Report `data.url`, the request's page, and `data.request.id`
-to the person. `data.attachments` lists each uploaded file. A refused upload
+resolved request with that fingerprint. Report `data.url`, the request's page, and `data.request.id`,
+its key (`REQ-{n}`), to the person. `data.attachments` lists each uploaded file. A refused upload
 (`FILE_TOO_LARGE`, `REQUEST_ATTACHMENT_TYPE_REFUSED`, `REQUEST_ATTACHMENTS_LIMIT`) leaves the
 request filed: its `error.details` name it and the files already uploaded, so do not submit again.
 `REQUEST_SOURCE_PAUSED` means nothing was filed and the source this credential submits through is
@@ -124,7 +124,8 @@ explicit Agent selection. Do not choose it just to speed up filing.
 Switch on `data.outcome`:
 
 - `created`: retain `ticket_id`, `ticket_key`, `stage`, `ticket_url` and any `command_error`.
-- `needs_clarification`: retain `conversation_id` and bring `questions` back to the user.
+- `needs_clarification`: retain `conversation_id`, the request's key (`REQ-{n}`), and bring
+  `questions` back to the user.
   Use their words; never invent answers. Answer the questions by their 0-based indexes:
 
 ```yaml
@@ -135,7 +136,7 @@ delegate: false
 ```
 
 ```console
-pidgen intent respond CONVERSATION-EXAMPLE -f answers.yaml --format json
+pidgen intent respond REQ-12 -f answers.yaml --format json
 ```
 
 `still_needs_clarification` means more answers are needed. Use `delegate: true` only if the user

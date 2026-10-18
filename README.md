@@ -120,7 +120,9 @@ Guided setup currently uses the wheel runtime. To choose it and name your worker
 pidgen setup --runtime wheel --label development-worker
 ```
 
-Setup prints each command it runs and resumes completed steps when you run it again. If a step
+Setup shows one line per action, records each command it runs and its output in
+`~/.pidgen/logs/setup-<start time>.log` (`--verbose` shows them as they run), and resumes completed
+steps when you run it again. If a step
 fails, follow `error.details.fix`, then rerun setup. Afterward, check the worker:
 
 ```sh

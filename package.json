@@ -1,6 +1,6 @@
 {
   "name": "pidgen",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Command-line client and agent skills for Pidgen",
   "license": "Apache-2.0",
   "repository": {
@@ -41,6 +41,8 @@
     "prepublishOnly": "npm run release:check"
   },
   "dependencies": {
+    "@clack/core": "1.5.1",
+    "@clack/prompts": "1.8.1",
     "@sigstore/bundle": "^5.0.0",
     "@sigstore/protobuf-specs": "^0.5.2",
     "@sigstore/tuf": "^5.0.0",

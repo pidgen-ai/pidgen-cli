@@ -77,7 +77,7 @@ plan      show | apply | promote | template | cohorts
 manifest  template | apply
 review    list | attention
 run       list | show | node-output
-worker    install | verify | update | uninstall | enroll | start | stop | status | doctor | subscriptions   ·   subscriptions use
+worker    install | verify | update | uninstall | enroll | start | stop | status | doctor | login | subscriptions   ·   subscriptions use
 skills    install | status
 feedback  (one command: pidgen feedback --kind … <message>)
 setup     (one command: pidgen setup; the one interactive command)
@@ -1419,9 +1419,12 @@ $ pidgen ticket history PIDGEN-7 --all
 | `pidgen intent show <conversation>` | Show one intake request | `GET /intents/{conversation_id}` |
 | `pidgen intent withdraw <conversation> [--reason <text>]` | Withdraw a request still waiting on answers | `POST /intents/{conversation_id}/withdraw` |
 
-A request that needs answers is an **intake request**: a persisted record that never expires, keeps
-the id the intent routes return (`conversation_id`, also the request's `request_id`), and has
-structured questions. These routes and fields are published in the public API. In JSON mode,
+A request that needs answers is an **intake request**: a persisted record that never expires, is
+named by its key in the Account, `REQ-{n}`, and has structured questions. The intent commands print
+that key wherever the server names the request (`conversation_id`, `request_id`, and a nested
+`request`'s `request_id`), and print the request's internal id only when the server has no key for
+it. Every `<conversation>` argument takes the key (or that id) and is sent as given; the server
+resolves it inside the Account, key first. These routes and fields are published in the public API. In JSON mode,
 each command prints one envelope; terminal stdout defaults to human-readable output.
 
 - `pidgen intent submit -f <file> [--submission-key <key>]` — submits prose work from a JSON or YAML
@@ -1451,7 +1454,8 @@ each command prints one envelope; terminal stdout defaults to human-readable out
   `EPIC_PROJECT_MISMATCH` and `TEAM_MEMBER_ARCHIVED` exit 2; `FORBIDDEN` exits 3;
   `SUBMISSION_KEY_REUSED` exits 5. No `-f`, or an argument, is `CLI_USAGE` (exit code 2).
 - `pidgen intent respond <conversation> -f <answers>` — settles questions of the request
-  `pidgen intent submit` returned, by the `conversation_id`. The file is the request body, as JSON or
+  `pidgen intent submit` returned, by the key it printed as `conversation_id` (e.g.
+  `pidgen intent respond REQ-12 -f answers.yaml`). The file is the request body, as JSON or
   YAML (`-f -` reads standard input): `answers`, each naming its question by `question_id` (from
   the request's `questions`) or, as before, by its 0-based `question_index`, with an `outcome`:
 
@@ -1499,7 +1503,7 @@ each command prints one envelope; terminal stdout defaults to human-readable out
   `--state` the CLI sends none, and the server lists the `clarifying` requests. An unknown state
   (`creating` too, which the list does not take), an empty `--project`, a missing option value, or
   an argument is `CLI_USAGE` (exit code 2) and sends nothing.
-- `pidgen intent show <conversation>` — `data` is the request, unchanged: `request_id`, `project_id`,
+- `pidgen intent show <conversation>` — `data` is the request: `request_id` (its key, `REQ-{n}`), `project_id`,
   `title`, `text`, `source` and `source_location`, `submitted_by` and `submitted_at`, the Agent
   (`team_member_id`, and `agent_source`: `chosen`, `project_default` or `unassigned`), its `state`
   (`clarifying`, `creating`, `created` or `withdrawn`), its `questions` with `question_count`,
@@ -1532,8 +1536,12 @@ the requester's own text (`body`, never rewritten) and, for a bug, its `details`
 and actual results, and the ones that are `unknown`). It is submitted through a source (a token
 submits through the source it is bound to; a web session through the Account's `web` source) and
 triaged: acknowledged, asked about, replied to, accepted, closed, or promoted to a Ticket. Its
-state is `new`, `acknowledged`, `accepted`, `promoted`, `resolved` or `closed`, and its id is
-`conv-…`; its page is `/requests/{id}` on the server. Submitting needs `request.submit`; every
+state is `new`, `acknowledged`, `accepted`, `promoted`, `resolved` or `closed`. A Request is named
+by its key in the Account, `REQ-{n}` (e.g. `REQ-12`), and its page is
+`/requests/REQ-{n}?account=<account>` on the server. Every command prints the key in `id`, and the
+Request's internal id only when the server has no key for it; every `<request>` argument (and
+`--duplicate-of`) takes the key and is sent as given, and the server resolves it inside the
+Account. Submitting needs `request.submit`; every
 other write needs `request.triage`.
 
 The routes are in the published document: every body is validated against it before it is sent
@@ -1564,16 +1572,19 @@ directly, with no preview ([Preview and apply](preview-and-apply.md)).
   Each `--evidence` file is read before anything is sent (a missing one is `CLI_USAGE`, exit 2)
   and uploaded after, as multipart, to the returned `occurrence_id`, or else `entry_id`. `data` is
   `{outcome, url, request, entry_id, occurrence_id, attachments}`: `outcome` is `created`,
-  `appended`, `occurrence` or `regression`, `url` the Request's page, and `attachments` each
+  `appended`, `occurrence` or `regression`, `url` the Request's page
+  (`/requests/REQ-{n}?account=<account>`), `request.id` its key, and `attachments` each
   uploaded file's `{id, name, media_type, size}`. A refused upload (`FILE_TOO_LARGE`,
   `REQUEST_ATTACHMENT_TYPE_REFUSED`, `REQUEST_ATTACHMENTS_LIMIT`) keeps its code and exit, and its
   `error.details` name the Request already filed (`request`, `outcome`, `url`, `file`, `uploaded`).
 - `pidgen request list` — `--state`, `--kind`, `--target`, `--source` and `--query` are sent as
   `state`, `kind`, `target_kind` and `target_id`, `source_id` and `q`. Without `--page` every page
   is followed to the last; with `--page` (and `--per-page`, 1–100) only that page is read. `data`
-  is the list of Requests, newest first.
-- `pidgen request show` — `data` is `{request, timeline}`. The Request carries every field the
-  server states: `state`, `waiting_on_requester`, `kind`, `title`, `body`, `details`, `urgency`,
+  is the list of Requests, newest first, each named by its key in `id`.
+- `pidgen request show <request>` (e.g. `pidgen request show REQ-12`) — `data` is
+  `{request, timeline}`. The Request is named by its key in `id`, a duplicate's original by its key
+  in `duplicate_of`, and a promoted Request's Ticket by `promoted.ticket_key` (beside its `kind`,
+  `id` and `stage`). It carries every field the server states: `state`, `waiting_on_requester`, `kind`, `title`, `body`, `details`, `urgency`,
   `priority`, `labels`, `target`, `source`, `external_ref`, `external_url`, `requester`,
   `fingerprint`, `occurrence_count`, `close_reason`, `close_note`, `duplicate_of`, `promoted`,
   `version`, `created_at` and `updated_at`; `urgency`, `target`, `source` and `requester` may be
@@ -1587,7 +1598,8 @@ directly, with no preview ([Preview and apply](preview-and-apply.md)).
   (`GET /requests/{request_id}`) and send its `version` with the write, so a Request changed in
   between is refused with `REQUEST_VERSION_CONFLICT` rather than overwritten. `data` is the
   Request in its new state; `reply` answers `{state, request, entry_id}` and `promote`
-  `{state, request, ticket_id}`, `state` being the Request's new state. `reply --ask` asks a
+  `{state, request, ticket_id, ticket_key}`, `state` being the Request's new state and `ticket_key`
+  the new Ticket's key. `reply --ask` asks a
   question, after which the Request waits on the requester (`waiting_on_requester`).
   `accept --unknown` names a bug's details accepted as unknown. `close` requires `--reason`, one of
   `cannot_reproduce`, `wont_do`, `duplicate`, `invalid`, `answered`, `no_response`, `withdrawn` and
@@ -2110,8 +2122,8 @@ See [Workers](workers.md).
 
 | Command | Does |
 |---|---|
-| `pidgen worker install [--runtime wheel\|container] [--version <version>] [--force] [--test]` | Read the series to install from the server's worker release list with no credential (`GET /workers/releases`), take that series' newest release and this machine's wheel from PyPI (TestPyPI with `--test`), verify the wheel's PEP 740 attestation (or the image's cosign signature over the digest its tag names) against the worker's release identity, then install it with `uv tool install --python 3.12` or pull `<repository>@<digest>`, and write the install record |
-| `pidgen worker update [--version <version>] [--restart] [--test]` | Install the server's `current` release, or `--version`, in the recorded form with the same verification as `worker install`, and update the install record; `--restart` restarts a detached worker or the container on it, rolling back if it does not start |
+| `pidgen worker install [--runtime wheel\|container] [--version <version>] [--force] [--test]` | Read the series to install from the server's worker release list with no credential (`GET /workers/releases`), take that series' newest release and this machine's wheel from PyPI (TestPyPI with `--test`), verify the wheel's PEP 740 attestation (or the image's cosign signature over the digest its tag names) against the worker's release identity, then install it with `uv tool install --python 3.12 --python-preference only-managed` into its own tool environment under the worker home (`UV_TOOL_DIR`, `UV_TOOL_BIN_DIR`), never uv's shared tool slot, or pull `<repository>@<digest>`, and write the install record |
+| `pidgen worker update [--version <version>] [--restart] [--test]` | Install `--version`, or the server's `current` series' newest release on the installed version's track (final releases; pre-releases too while one is installed) when it is newer than the installed one, in the recorded form with the same verification as `worker install`, and update the install record; `--restart` restarts a detached worker or the container on it, rolling back if it does not start |
 | `pidgen worker uninstall [--purge]` | Stop a detached worker or the container and remove the installed worker (`uv tool uninstall`, or the container and image) and its install record; `--purge` also removes the worker home (and the container's volume) |
 | `pidgen worker verify` | Re-check the installed wheel's or image's digest and provenance against the install record |
 | `pidgen worker enroll [--label <label>] [--install\|--no-install] [-- args]` | Install the worker when it is missing and `--install` is given (the verified install of `worker install`), then create an enrollment (`POST /workers/enrollments`) and run `pidgen-worker enroll --server <server> --no-start`; it never asks and never starts the worker (`pidgen worker start --detach` does) |
@@ -2119,6 +2131,7 @@ See [Workers](workers.md).
 | `pidgen worker stop [--force]` | Stop the detached worker or container, killing it after `--timeout` only with `--force` |
 | `pidgen worker status [--host <host_id>]` | Show the detached worker record and local liveness and, with a credential, the App Service's record of this worker (`GET /workers`) |
 | `pidgen worker doctor [-- args]` | Run `pidgen-worker doctor --json` (with `docker exec` in the container) and return its report |
+| `pidgen worker login claude\|codex` | Sign the coding agent in to its default home, which the worker reads: run its login with the terminal inherited (`claude auth login`; `codex login --device-auth`), then its status command (`claude auth status`; `codex login status`) |
 | `pidgen worker subscriptions <worker>` | Show a worker's provider subscriptions per harness: primary, active, login, entitlement, quota and pause (`GET /workers/{host_id}/subscriptions`) |
 | `pidgen worker subscriptions use <worker> <harness> <label> [--move-continuing]` | Make one of a worker's subscriptions primary for a harness (`GET /workers/{host_id}/subscriptions`, then `PUT /workers/{host_id}/subscriptions/{harness}/primary`) |
 
@@ -2134,7 +2147,9 @@ enrollment ([Workers](workers.md#enroll-a-worker)).
 `identity`, `verified_at`, `installed_at`, `location`, `file` (`null` for a container) and, for a
 container, `volume` — plus `installed` (`false` when the recorded version was already installed
 and `--force` was not given). It prints the licence notice and every command it runs to standard
-error first, and refuses with `RUNTIME_UNAVAILABLE` (exit 2, no `uv`, or no `docker` and `cosign`
+error first; the notice names the licence and its location, gives its notice, says installing
+accepts it, and ends with `Read it: https://pidgen.ai/legal/eula`, the link to its full text
+(standard output and the JSON envelope do not carry it), and refuses with `RUNTIME_UNAVAILABLE` (exit 2, no `uv`, or no `docker` and `cosign`
 for `--runtime container`), `RELEASE_UNSUPPORTED` (exit 5) or `PROVENANCE_INVALID` (exit 5,
 nothing pulled, installed or run). `worker verify`'s `data` is `checks` (`digest` and `provenance`, in `pidgen doctor`'s
 shape) and `record`; a failed check exits 5 with `PROVENANCE_INVALID`, and no install record exits
@@ -2143,9 +2158,12 @@ agreed with the App Service and not yet published, so `install` and `update` wai
 publishing it.
 
 `worker update`'s `data` is the new install record plus `updated` (`false` when the record already
-names the release; nothing is installed or restarted), `previous_version`, `running` (whether a
+names the release, or, without `--version`, when nothing on the installed version's track is newer
+than it: an update never installs an older release, and only `--version` does; nothing is
+installed or restarted and no licence notice is printed), `previous_version`, `running` (whether a
 detached worker or the container runs), `restarted` and, after a restart, `worker` (the new
-detached worker or container record). Without `--restart` a running worker keeps the old version
+detached worker or container record). It prints the same licence notice as `worker install`, ending
+with `Read it: https://pidgen.ai/legal/eula`, on standard error. Without `--restart` a running worker keeps the old version
 until it is restarted. If the restarted worker exits during the startup check, the previous
 version is reinstalled and restarted and the command exits 1 with `UPDATE_ROLLED_BACK`
 ([Workers](workers.md#update-the-worker)). No install record exits 4 with `WORKER_NOT_INSTALLED`.
@@ -2266,60 +2284,108 @@ codes](output-and-exit-codes.md)).
 
 | Command | Does | Route |
 |---|---|---|
-| `pidgen setup [--runtime wheel] [--version <version>] [--label <label>] [--url <url>] [--test]` | The guided path from a fresh machine to a verified worker connected to the App Service | The routes of the commands it runs, and `GET /workers` |
+| `pidgen setup [--runtime wheel] [--version <version>] [--label <label>] [--url <url>] [--test] [--agent claude\|codex]… [--sessions <agent>=<n>]… [--plan <agent>=<plan>]… [--accept-licence] [--verbose]` | The guided path from a fresh machine to a verified worker connected to the App Service | The routes of the commands it runs, and `GET /workers` |
 
 ```console
-$ pidgen setup [--runtime wheel] [--version <version>] [--label <label>] [--url <url>]
+$ pidgen setup [--runtime wheel] [--version <version>] [--label <label>] [--url <url>] [--agent claude|codex]… [--sessions <agent>=<n>]… [--plan <agent>=<plan>]… [--accept-licence] [--verbose]
 ```
 
 `pidgen setup` is the primary entry point and the CLI's only interactive command: every other
-command never asks. It is composed of the scriptable commands below and prints each one to
-standard error, as `$ pidgen …`, before it runs it, so the whole path can be scripted afterwards.
-It runs six steps in order:
+command never asks. It is composed of the scriptable commands below, so the whole path can be
+scripted afterwards. The screen shows only the current action: each task (installing uv, a coding
+agent or the worker, enrolling, starting, the worker's checks) is a spinner that collapses to one
+line, such as `◇  pidgen-worker 2.11.0 installed and verified`, and no command line (`$ …`) or
+command output reaches standard error. Each run writes the commands as `$ pidgen …`, their full
+output, each step's start, end and result, each question and answer and every error in full to the
+setup log, `~/.pidgen/logs/setup-<start time>.log` (`$PIDGEN_HOME/logs` when set; mode 0600;
+credentials written as `[redacted]`; the newest ten kept). `--verbose` shows each task's commands
+and their output under it as it runs, and keeps them after it succeeds. A failing task keeps the
+last ten lines of its output from this run on screen, in its one failure block. It draws in clack's
+frame on standard error, starting with `┌  Pidgen setup`, and asks each
+question as a prompt you answer with the arrow keys, space and Enter: a checkbox list, a choice, a
+text field or a yes/no. Each answered question collapses to one line, such as
+`◇  Coding agents · Claude Code, Codex`; an answer given in advance by a flag is shown the same way,
+with `(from --sessions)` and the like. A successful run ends with `└  Done in <m> min <s> s`: in a
+terminal, on standard output, followed by a summary card (the Account, the worker's name, version
+and state, each coding agent's sessions, how to manage the worker, and the one next thing to do);
+with JSON on standard output, on standard error. The generic rendering of `data` is not shown.
+`data.steps` reports its eight parts by `id`:
 
-| Step (`id`) | Runs | Does |
-|---|---|---|
-| `check` | `pidgen doctor` | Runs the [doctor](#doctor) checks against the server it will sign in to and stops on a failing check a later step cannot fix, with each check's fix. A failing `credential` (fixed by signing in) or `worker` (fixed by installing) does not stop it |
-| `sign-in` | `pidgen auth login <url>` | Device-code login. When the User belongs to more than one Account it asks which one the worker serves (`pidgen account use <ACC-…>` makes it the default; an Account with no stored credential is signed in again and approved for it). Then it says whether the credential may enroll workers, from the role and token scopes `GET /me` publishes: it may when the scopes include `workers:enroll`, which an Account Owner or Administrator holds. When it may not, it names those roles and offers the Personal API Token path, `pidgen auth login <url> --with-token --account <ACC-…>` with a token that has `workers:enroll` |
-| `runtime` | — | The one question: the worker runtime, defaulting to what the machine has (`uv` means `wheel`), shown with the worker's licence notice. Installing accepts the licence. The container runtime is *planned*, so `wheel` is the only answer today |
-| `install` | `pidgen worker install --runtime <runtime>`, then `pidgen worker verify` | Installs the release and prints each verification as it passes |
-| `enroll` | `pidgen worker enroll --label <label>`, then `pidgen worker start --detach` | Enrolls this host and starts the worker detached, then reads `GET /workers` every two seconds until the App Service reports this host `connected`, for up to the global `--timeout` (120 seconds by default) |
-| `prove` | `pidgen worker doctor` | Runs the worker's own checks, then prints the one next thing to do as a command: `pidgen skills install`, or, with the skills installed, `pidgen ticket template` to file a first ticket |
+| Step | `id` | Runs | Does |
+|---|---|---|---|
+| 1. Check this machine | `check` | `pidgen doctor` | Shows one line, `This machine is ready · <Linux or macOS> · Node.js <major.minor> · git <major.minor>`; the checks a later step fixes and warnings that do not apply to what setup does (the container runtime's `cosign`) go only to the setup log, and other warnings are one `▲` line each. When `uv` is missing, asks `uv installs the worker and isn't on this machine. Install it?`: yes runs uv's installer, `curl -LsSf https://astral.sh/uv/install.sh \| sh`, and uses the installed `uv` (from `~/.local/bin` while `PATH` does not have it yet) for the rest of setup; no stops with `RUNTIME_UNAVAILABLE` (exit 2) and that command as the fix. A `uv` already in `~/.local/bin` is used without asking. Then it runs the [doctor](#doctor) checks against the server it will sign in to and stops on a failing check a later step cannot fix, with each check's fix. A failing `credential` (fixed by signing in) or `worker` (fixed by installing) does not stop it |
+| 2. Sign in to Pidgen | `sign-in` | `pidgen auth login <url>` | Device-code login. When the User belongs to more than one Account it asks which one the worker serves, a choice of the Accounts by name with your role in each (`pidgen account use <ACC-…>` makes it the default; an Account with no stored credential is signed in again and approved for it). The sign-in block leads with the link that carries the code (`verification_uri_complete`), then the address and the code, and a spinner waits for the approval; it collapses to `Signed in as <email> · <Account> · <Role>`. Then it decides whether the credential may enroll workers, from the role and token scopes `GET /me` publishes: it may when the scopes include `workers:enroll`, which an Account Owner or Administrator holds. When it may not, and this machine's worker is not enrolled, setup stops here, before anything is installed, with `ENROLL_NOT_PERMITTED` (exit 3), naming those roles and the Personal API Token path, `pidgen auth login <url> --with-token --account <ACC-…>` with a token that has `workers:enroll`. Then it says what was done before this run (see **Re-running**) |
+| 3. Choose coding agents | `agents` | — | Asks which coding agents the worker runs, as checkboxes of Claude Code and Codex with the ones on `PATH` ticked; a missing one is labelled `not installed · setup installs it with npm`, and ticking it is the consent: setup installs it with `npm install -g @anthropic-ai/claude-code` or `npm install -g @openai/codex` and asks nothing more. Pi is shown, disabled, when it is on `PATH`: the worker runs it, and setup doesn't manage it. Confirming none keeps the question open with `Choose at least one.` `--agent claude` and `--agent codex` (repeatable) answer in advance, and a missing agent they name is installed the same way. When npm may not write its global directory (EACCES), setup prints the command for the person to run and asks whether it finished; no, or an agent still not on `PATH`, stops with `AGENT_NOT_FOUND` (exit 2) and the install command as the fix; another npm failure stops with `INSTALL_FAILED` (exit 1) |
+| 4. Sign in to coding agents | `agent-login` | `pidgen worker login <agent>` for each chosen agent | Runs each chosen agent's status command first (`claude auth status`, `codex login status`) and prints `<agent>: signed in` for those that are; then, for each that is not, says `<agent> needs you to sign in. Its own sign-in runs here; setup continues after it.` and runs `pidgen worker login <agent>` when you press Enter. An agent that cannot say whether it is signed in is asked about (`Sign in now?`, default *No, it's signed in*). `skipped` when every chosen agent is signed in |
+| 5. Size coding agent sessions | `capacity` | — | Asks, for each chosen agent, `<agent>: how many sessions should run at once?`: a choice of numbers, each with the plans it suits as a hint (Claude Code: 1 *Pro, or not sure*, 2 *Max 5x, API key, Team or Enterprise*, 4 *Max 20x*; Codex: 1 *Plus, or not sure*, 2 *Business, Enterprise or API key*, 3 *Pro*), plus *Custom…*, which takes a whole number from 1 (another answer keeps it open with `Enter a whole number, 1 or more.`). It starts on the lowest, or, on a re-run, on the cap in the worker's `node.yaml`. The hints are starting values, not the providers' limits. `--sessions <agent>=<n>` (repeatable, `n` from 1 to 64) answers in advance; so does `--plan <agent>=<plan>`, with the plans `claude=pro\|max-5x\|max-20x\|api\|not-sure` and `codex=plus\|pro\|business\|api\|not-sure` (Claude Code Pro 1, Max 5x 2, Max 20x 4, API key, Team or Enterprise 2, Not sure 1; Codex Plus 1, Pro 3, Business or Enterprise 2, API key 2, Not sure 1). Another value, or both flags for one agent, is `CLI_USAGE`. The `enroll` step applies the caps |
+| 6. Install the worker | `runtime` | — | Nothing is asked while setup offers only the `wheel` runtime (installed with `uv`); the container runtime is *planned* |
+| 6. Install the worker | `install` | `pidgen worker install --runtime <runtime>`, then `pidgen worker verify` | Asks one question once the release is chosen and before anything is downloaded or run, `Install pidgen-worker <version> and accept its licence?`, with one line naming the licence (`The worker is proprietary software under the <licence name>.`) and one linking its full text (`Read it: https://pidgen.ai/legal/eula`); setup prints no other licence notice. The setup log records both lines under the question, also when `--accept-licence` answers it and the screen shows only the answered line. `--accept-licence` answers yes in advance. No stops setup with `SETUP_CANCELLED` (exit 2): the worker wasn't installed. Then it installs the release under the spinner `Installing pidgen-worker <version>…`, verifies it (`Verifying it was published by Pidgen's release workflow…`), and collapses to `pidgen-worker <version> installed and verified`; each verification is in the setup log |
+| 7. Enroll and start the worker | `enroll` | `pidgen worker enroll --label <name> -- --host-id <name>`, then `pidgen worker start --detach` | Enrolls this install's worker under its name, which is both the enrollment's label and the worker's host id (`--label`, else this host's name; when the Account lists another install's unrevoked worker under that name, setup says so and asks for a name, defaulting to the next free one, `<name>-2`, then `-3`; a `--label` the Account already lists stops with `CLI_USAGE`, exit 2; a worker the Account revoked is enrolled again under its name after the person agrees, `Enroll it again?` defaulting to yes, and declining stops with `SETUP_CANCELLED`, exit 2); applies the caps with `pidgen-worker capacity set <agent> --max <cap>` for each chosen agent, `--max 0` for each other harness the worker knows (`claude`, `codex`, `pi`), and `pidgen-worker capacity set prompts --min 1 --max <sum of the caps>`, where exit 0 with a line of output reading `saved`, `saved (…)`, `saved, apply pending` or `saved; …` is success and exit 1 stops the step with `CAPACITY_REFUSED` and the command's message (any other answer is `CAPACITY_FAILED`); then starts the worker detached, never when the worker home's `worker.env` holds no `PIDGEN_NODE_TOKEN` (that stops with `ENROLL_FAILED`, exit 1, naming `pidgen feedback --kind not-working`), then reads `GET /workers` every two seconds until the App Service reports the worker `connected`, for up to the global `--timeout` (120 seconds by default) |
+| 8. Prove the worker works | `prove` | `pidgen worker doctor` | Runs the worker's own checks; the one next thing to do is `data.steps[…].next` and the card's `Next:` line: `pidgen skills install`, or, with the skills installed, `pidgen ticket template` to file a first ticket |
 
-- `--runtime`, `--version` and `--label` answer in advance: `--runtime` skips the question,
-  `--version` picks the release (default: the server's `current`), and `--label` names the worker
+- `--agent`, `--sessions`, `--plan`, `--accept-licence`, `--runtime`, `--version` and `--label`
+  answer in advance: `--runtime` names the form, `--version` picks the release (default: the server's `current`), and `--label` names the worker
   (default: this host's name). `--url` is the server (default: the configured one, else the
   hosted server, `https://api.pidgen.ai`); naming another server than `PIDGEN_API_URL` is `CLI_USAGE`.
 - **Resuming.** Run it again and it resumes: a signed-in profile for the server (a credential
   `GET /me` accepts) skips `sign-in`; an installed worker (an install record for the requested
   version, or, without `--version`, one the server still accepts) skips `runtime` and `install`;
-  an enrolled host (`GET /workers` lists this host's worker unrevoked) skips the enrollment, and a
-  running detached worker skips the start. `enroll` is `skipped` when both are. A credential that
-  cannot read `GET /workers` (a Personal API Token) counts a running worker as enrolled.
+  an enrolled machine skips the enrollment (this install's worker home, `$PIDGEN_HOME` or
+  `~/.pidgen`, has a `worker.env` with a non-empty `PIDGEN_NODE_TOKEN` whose `PIDGEN_SERVICE_URL`
+  is the server's origin, and `GET /workers` lists its `PIDGEN_LOCALITY_DOMAIN` as an unrevoked
+  host id; a worker listed under this host's name that is not this install's is never adopted), and a
+  running detached worker skips the start. The caps chosen at `capacity` in this run are applied
+  again on an enrolled host; `enroll` is `skipped` only when the enrollment and the start are and
+  no caps were applied. A credential that
+  cannot read `GET /workers` (a Personal API Token) counts the worker home's credential for the
+  server as enrolled.
+- **Re-running.** When every action is done (the worker installed, enrolled and running, and its
+  `node.yaml` sets coding agents' sessions), setup shows
+  `◇  Already set up · <Account> · <agents> · pidgen-worker <version> · running` and asks
+  `What do you want to do?`: *Check everything and stop* (no more questions; the agents, caps,
+  install and enrollment are `skipped`, then the connection and the worker's checks), *Change
+  coding agents or sessions* (the questions again), and, only when `pidgen worker update` would
+  install a newer release by its rule (the newest of the server's current series on the installed
+  version's track, so a machine on `2.11.1b1` is offered `2.11.1b2` and never `2.11.0`), *Update
+  the worker to <version>* (`pidgen worker update --restart`
+  as the `install` step). `--agent`, `--sessions` or `--plan` answer it: change. On a part-done
+  machine the done actions collapse into one line, `◇  Already done · …`, and setup continues.
 - **Waiting.** A credential that cannot read `GET /workers` cannot see the worker connect: the
   `enroll` step reports `connected: null` and names `pidgen worker status` to check with an Owner's
   or Administrator's sign-in. Otherwise a worker not reported `connected` before the timeout exits 8
   with `WORKER_NOT_CONNECTED`; `error.details` has `host_id`, the server's `worker` record, whether
   the worker is `running`, and its `log`.
+- **Cancelling.** Ctrl-C at any question stops setup with `■  Setup cancelled. Everything before
+  this is kept.` and `└  Run pidgen setup again to continue.`; it exits 2 with `SETUP_CANCELLED`,
+  and `error.details` has the `step` it stopped at and the `steps` so far. What finished before is
+  kept, so running it again resumes.
 - **Failures.** Setup never hides a failure: a failed step stops it, and nothing after it runs. The
-  error keeps the failing command's own `code` and exit code; its message names the command, the
-  error and the fix, and `error.details` adds `step`, `command` (the command that failed), `error`
-  (`{code, message, details}`), `fix`, and `steps` so far. A credential that may not enroll stops
-  at `enroll` with `ENROLL_NOT_PERMITTED` (exit 3) before any enrollment is created.
+  error keeps the failing command's own `code` and exit code; its message names the step
+  (`Setup stopped at <title>`), the command, the error and the fix, ending with
+  ``Run `pidgen setup` again to continue from here.``, and `error.details` adds `step`, `command` (the command that failed), `error`
+  (`{code, message, details}`), `fix`, `steps` so far, and `setup_log`, the setup log's path (a failing command's own `log`, such as the worker's, is kept). In a terminal
+  the screen shows one block and nothing else: `■` and what failed and why, the one fix, the setup
+  log's path, and `└  Run pidgen setup again to continue from here.`; standard output shows nothing
+  more (no `error <code>:` line, no details). A credential that may not enroll stops at `sign-in`
+  with `ENROLL_NOT_PERMITTED` (exit 3), before anything is installed or enrolled.
 - **No terminal.** Without a terminal on standard input and standard error it asks nothing, runs
   nothing, and exits 2 with `TERMINAL_REQUIRED`; `error.details.commands` lists the equivalent
-  commands in order: `pidgen doctor`, `pidgen auth login <url>`, `pidgen worker install`,
-  `pidgen worker verify`, `pidgen worker enroll --label <label>`, `pidgen worker start --detach`,
+  commands in order: `pidgen doctor`, `pidgen auth login <url>`, `pidgen worker login <agent>` for
+  each `--agent`, `pidgen worker install`,
+  `pidgen worker verify`, `pidgen worker enroll --label <label> -- --host-id <label>`, the `pidgen-worker capacity set`
+  commands when `--agent` and a `--sessions` or `--plan` for each agent are given, `pidgen worker start --detach`,
   `pidgen worker status` (to see the worker connect) and `pidgen worker doctor`, with `--runtime`,
   `--version` and the global `--profile` and `--account` as given.
-- Setup installs nothing the worker needs besides the worker: when a harness, `uv` or Docker is
-  missing, the `check` step's fix says how to install it.
+- Besides the worker, setup installs only `uv` and the coding agents chosen at `agents`, and only
+  when the person says yes (or ticks them): when `git` or Docker is missing, the `check` step's fix says how to
+  install it. A missing harness does not stop the `check` step: choosing coding agents fixes it.
 
-`data` is `steps`, one entry per step that ran, in order: `id`, `status` (`done`, `skipped` or
+`data` is `steps`, one entry per `id` that ran, in order: `id`, `status` (`done`, `skipped` or
 `failed`), `command` (the commands the step runs, joined with `&&`, whether or not it was skipped;
-`null` for `runtime`) and `summary`. `sign-in` adds `account` and `enroll` (`allowed`, `account`,
+`null` for `runtime`, `agents` and `capacity`, and for `agent-login` with no agent chosen) and `summary`. `agents` adds `agents` (the chosen kinds) and `installed` (those setup installed);
+`agent-login` adds `logins` (each chosen agent's `ready`, `not_ready` or `unknown`); `capacity` adds `plans` (the plan id of each agent `--plan` answered for) and `caps` (each chosen agent's cap). `sign-in` adds `account` and `enroll` (`allowed`, `account`,
 `kind`, `role`, `scopes`, `roles` that may enroll, the `scope` that may, and `token_command`);
-`runtime` adds `runtime`; `install` adds `version`; `enroll` adds `host_id` and `connected`;
+`runtime` adds `runtime`; `install` adds `version`; `enroll` adds `host_id` (the worker's name), `connected` and, when it applied them, `capacity` (each harness's `--max`, and `prompts`);
 `prove` adds the worker's `report` and `next`, the next command.
 
 ## doctor
@@ -2344,6 +2410,7 @@ reports its checks in the same shape.
 | Check | Looks at | Fails, with its fix, when |
 |---|---|---|
 | `node` | The Node.js version this CLI runs on | It is older than 22.12 (`https://nodejs.org/en/download`) |
+| `git` | `git` on `PATH` and the version `git --version` reports | It is missing or older than 2.25 (`xcode-select --install` on macOS; install git with your package manager on Linux) |
 | `server` | `GET /health`, sent without the credential: the server answers as Pidgen and its API version window includes this CLI's | The configuration cannot be read (`chmod 600 <file>` for loose permissions); the server is not Pidgen; its window excludes this CLI's API version (`npm install -g pidgen@<channel>` when the CLI is too old, the channel being the one this CLI was released on: `alpha` for an alpha, else `latest`); or it cannot be reached (the health address) |
 | `credential` | `GET /me`: the profile's credential is valid, the current Account's role, the token kind (`cli` or `pat`) and scopes the server reports for it, and whether it may enroll workers | No credential is stored for the Account, or the server refuses it (`pidgen auth login <url> --account <ACC-…>`) |
 | `runtime` | `uv` on `PATH` for the wheel runtime; `docker` and `cosign` on `PATH` for the container runtime | Neither runtime is complete (the uv or cosign installation page), or the platform is not Linux or macOS |

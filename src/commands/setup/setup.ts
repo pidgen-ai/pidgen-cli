@@ -1,7 +1,42 @@
+import type { ChildProcess } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { delimiter, join } from "node:path";
 import { Option, type Command } from "commander";
+import { parse as parseYaml } from "yaml";
+import {
+  AGENT_KINDS,
+  agentEnvironment,
+  agentInstallArgs,
+  agentInstallCommand,
+  agentNotFound,
+  agentStatus,
+  AGENT_PLANS,
+  SESSION_HINTS,
+  CODING_AGENTS,
+  codingAgent,
+  findAgent,
+  findPlan,
+  SHOWN_ONLY_AGENTS,
+  WORKER_HARNESS_KINDS,
+  type AgentKind,
+  type AgentLogin,
+  type CodingAgent,
+} from "../../core/agents.js";
 import { DEFAULT_SERVER_URL, loadConfig, resolveTarget, type Target } from "../../core/config.js";
 import type { GlobalOptions, RunContext } from "../../core/context.js";
 import type { DoctorCheck } from "../../core/doctor.js";
+import {
+  drawCollapsed,
+  drawFailed,
+  drawOutro,
+  drawTaskLine,
+  PromptCancelled,
+  SYMBOL,
+  type Prompter,
+  type PromptOption,
+  type Spinner,
+  type TaskLog,
+} from "../../core/prompter.js";
 import { CliError, usageError } from "../../core/errors.js";
 import { ExitCode } from "../../core/exit-codes.js";
 import {
@@ -16,27 +51,41 @@ import {
 import type { CommandInput, CommandResult, CommandSpec } from "../../core/registry.js";
 import { openSession, responseMeta } from "../../core/session.js";
 import { skillsStatus } from "../../core/skills.js";
-import { findOnPath, findWorker, workerStatus as localWorkerStatus } from "../../core/worker.js";
+import { packageIndex, resolveUpdate } from "../../core/worker-index.js";
+import { readWorkerReleases, selectSeries } from "../../core/worker-releases.js";
+import { CLI_VERSION } from "../../core/version.js";
+import {
+  assertSupportedPlatform,
+  collectedOutput,
+  findOnPath,
+  readWorkerCredential,
+  resolvePidgenHome,
+  runWorkerCapacity,
+  workerPlatformSupported,
+  workerStatus as localWorkerStatus,
+} from "../../core/worker.js";
 import {
   displayArgument,
-  licenceNotice,
+  installWorker,
   readInstallRecord,
   RUNTIME_INSTRUCTIONS,
-  runtimeUnavailable,
+  sharedUvWorker,
+  WORKER_EULA_LINK,
   type InstallRecord,
   type WorkerForm,
 } from "../../core/worker-install.js";
-import { readWorkerReleases } from "../../core/worker-releases.js";
 import type { components } from "../../generated/api.js";
 import { accountUse } from "../account/use.js";
-import { authLogin, parseServerUrl } from "../auth/login.js";
+import { loginWithDeviceCode, parseServerUrl, type DeviceCodeShown } from "../auth/login.js";
 import { doctorChecks } from "../doctor/doctor.js";
 import { workerDoctor } from "../worker/doctor.js";
 import { workerEnroll } from "../worker/enroll.js";
-import { workerInstall } from "../worker/install.js";
+import { workerLogin } from "../worker/login.js";
 import { workerStart } from "../worker/start.js";
+import { workerUpdate } from "../worker/update.js";
 import { serverView, WORKERS_ROUTE, type ServerView } from "../worker/status.js";
 import { workerVerify } from "../worker/verify.js";
+import { SetupLog } from "./log.js";
 
 type WorkerList = components["schemas"]["WorkerList"];
 
@@ -47,17 +96,86 @@ export const HOSTED_SERVICE_URL = DEFAULT_SERVER_URL;
 const CONNECT_POLL_MS = 2_000;
 /** The longest enrollment label the public API document accepts. */
 const LABEL_MAX = 100;
-/** How many answers a question takes before setup gives up on it. */
-const ATTEMPTS = 3;
+/** The most sessions at a time `--sessions` and the Custom answer take (the worker's own limit). */
+const SESSIONS_MAX = 64;
+/** What setup says when the person presses Ctrl-C at a prompt. */
+const CANCELLED = "Setup cancelled. Everything before this is kept.";
 
-/** Doctor checks a later step fixes, so they do not stop setup: sign-in, and the install. */
+/**
+ * Doctor checks a later step fixes, so they do not stop setup: sign-in, the coding agents (one
+ * `harness:<kind>` check each), and the install.
+ */
 const FIXED_LATER = new Map([
   ["credential", "signing in"],
+  ["harness", "choosing coding agents"],
   ["worker", "installing"],
 ]);
 
-export type SetupStepId = "check" | "sign-in" | "runtime" | "install" | "enroll" | "prove";
+/** The step that fixes a failing doctor check, or `undefined` when none does. */
+function fixedLater(id: string): string | undefined {
+  return FIXED_LATER.get(id.startsWith("harness:") ? "harness" : id);
+}
+
+const PLATFORM_NAMES: Partial<Record<NodeJS.Platform, string>> = {
+  linux: "Linux",
+  darwin: "macOS",
+};
+
+/** `major.minor` of a version. */
+function minorVersion(version: string): string {
+  return version.split(".").slice(0, 2).join(".");
+}
+
+/** The check step's one line: "This machine is ready · Linux · Node.js 24.16 · git 2.43". */
+function machineReady(platform: NodeJS.Platform, checks: readonly DoctorCheck[]): string {
+  const parts = [
+    "This machine is ready",
+    PLATFORM_NAMES[platform] ?? platform,
+    `Node.js ${minorVersion(process.versions.node)}`,
+  ];
+  const git = /^git (\d+\.\d+)/.exec(checks.find((entry) => entry.id === "git")?.summary ?? "");
+  if (git !== null) parts.push(`git ${git[1]}`);
+  return parts.join(" · ");
+}
+
+/**
+ * Whether a doctor warning applies to what setup does, and so is shown: not one a later step
+ * fixes, and not the container runtime's (its cosign check) while setup installs only the wheel.
+ */
+function warningApplies(check: DoctorCheck): boolean {
+  if (fixedLater(check.id) !== undefined) return false;
+  return !(check.id === "runtime" && !SETUP_FORMS.includes("container"));
+}
+
+export type SetupStepId =
+  | "check"
+  | "sign-in"
+  | "agents"
+  | "agent-login"
+  | "capacity"
+  | "runtime"
+  | "install"
+  | "enroll"
+  | "prove";
 export type SetupStepStatus = "done" | "skipped" | "failed";
+
+/** Each `data.steps` id as a failure names it. */
+const STEP_TITLES: Readonly<Record<SetupStepId, string>> = {
+  check: "Check this machine",
+  "sign-in": "Sign in to Pidgen",
+  agents: "Choose coding agents",
+  "agent-login": "Sign in to coding agents",
+  capacity: "Size coding agent sessions",
+  runtime: "Install the worker",
+  install: "Install the worker",
+  enroll: "Enroll and start the worker",
+  prove: "Prove the worker works",
+};
+
+/** uv's own installer, which setup offers to run when the machine lacks uv. */
+const UV_INSTALLER_URL = "https://astral.sh/uv/install.sh";
+/** The installer as a person runs it: what setup prints and gives as the fix. */
+export const UV_INSTALL_COMMAND = `curl -LsSf ${UV_INSTALLER_URL} | sh`;
 
 /** One entry of `data.steps`: the step, what became of it, and the command it ran or stands for. */
 export interface SetupStep {
@@ -81,27 +199,64 @@ interface Answers {
   version: string | undefined;
   /** `--test`: install a release rehearsal from TestPyPI. */
   test: boolean;
+  /** The worker's name in the Account: `--label`, else this host's name. */
   label: string;
+  /** Whether `--label` gave it, answering the name question in advance. */
+  labelGiven: boolean;
   url: string;
+  /** `--agent`, in the order given, without repeats: the coding agents question answered. */
+  agents: AgentKind[];
+  /** `--plan <kind>=<plan>`: each agent's sessions question answered, by plan id. */
+  plans: Partial<Record<AgentKind, string>>;
+  /** `--sessions <kind>=<n>`: each agent's sessions question answered. */
+  sessions: Partial<Record<AgentKind, number>>;
+  /** `--accept-licence`: the install question answered yes. */
+  acceptLicence: boolean;
+  /** `--verbose`: each task's commands and output shown as it runs. */
+  verbose: boolean;
 }
 
 /**
- * `pidgen setup [--runtime wheel] [--version <version>] [--test] [--label <label>] [--url <url>]`: the guided
- * path from a fresh machine to a verified worker connected to the App Service, and the CLI's one
- * interactive command. It runs six steps in order, printing each as the `pidgen` command it runs:
+ * `pidgen setup [--runtime wheel] [--version <version>] [--test] [--label <label>] [--url <url>]
+ * [--agent <agent>]… [--sessions <agent>=<n>]… [--plan <agent>=<plan>]… [--accept-licence]
+ * [--verbose]`: the guided path from a fresh machine to a verified worker connected to the App
+ * Service, and the CLI's one interactive command. It draws in clack's frame on standard error
+ * (`┌  Pidgen setup`), asks each question as a clack prompt (`ctx.prompter`), and each answered
+ * question collapses to one `◇` line. The screen shows only the current action: each task (an
+ * install, the enrollment, the start) is a spinner that collapses to one `◇` line, and the
+ * commands it runs and their output go to the setup log (`~/.pidgen/logs/setup-<time>.log`, the
+ * newest ten kept); `--verbose` shows them under the task as it runs, and a failing task keeps its
+ * last ten lines on screen. `data.steps` reports the parts by id:
  *
- * 1. `check`: `pidgen doctor`; a failing check a later step cannot fix stops setup.
- * 2. `sign-in`: `pidgen auth login <url>` (device code), the Account question only when the User
- *    belongs to more than one, then whether the credential may enroll workers.
- * 3. `runtime`: the one question, defaulting to what the machine has, with the licence notice.
- * 4. `install`: `pidgen worker install`, then `pidgen worker verify`.
- * 5. `enroll`: `pidgen worker enroll --label <label>` and `pidgen worker start --detach`, then waits
- *    until `GET /workers` reports this worker connected.
- * 6. `prove`: `pidgen worker doctor`, then the one next thing to do.
+ * 1. `check`: offers to install uv when the machine lacks it, then `pidgen doctor`; a failing check
+ *    a later step cannot fix stops setup.
+ * 2. `sign-in`: `pidgen auth login <url>` (device code), the Account question (a select) only when
+ *    the User belongs to more than one, then whether the credential may enroll workers.
+ * 3. `agents`: which coding agents the worker runs (a multiselect; `--agent`), installing the
+ *    missing ones ticked with npm.
+ * 4. `agent-login`: `pidgen worker login <agent>` for each chosen agent not signed in.
+ * 5. `capacity`: how many sessions each chosen agent runs at once (a select of numbers with plan
+ *    hints plus Custom; `--sessions <agent>=<n>` or `--plan <agent>=<plan>`).
+ * 6. `runtime`: the wheel, the one form setup offers, so nothing is asked; `install`: one confirm,
+ *    install pidgen-worker <version> and accept its licence (`--accept-licence`), then
+ *    `pidgen worker install` and `pidgen worker verify`.
+ * 7. `enroll`: `pidgen worker enroll --label <name> -- --host-id <name>` unless this install's
+ *    worker home holds a credential the server lists unrevoked (a clash with another install's
+ *    worker asks for a free name), the caps (`pidgen-worker capacity set`) and
+ *    `pidgen worker start --detach` (never without a credential), then waits until `GET /workers`
+ *    reports this worker connected.
+ * 8. `prove`: `pidgen worker doctor`.
  *
- * A signed-in profile, an installed worker and an enrolled host are detected and skipped, so running
- * it again resumes. A failed step stops it with the command, its error and the fix. Without a
- * terminal it exits 2 with `TERMINAL_REQUIRED` and the equivalent commands.
+ * It ends with `└  Done in <m> min <s> s`: in a terminal on standard output, with the summary card
+ * (what was set up, how to manage it, the one next thing to do); with JSON on standard error. A
+ * signed-in profile, an installed worker and an enrolled host are detected and skipped, so running
+ * it again resumes: a part-done machine says what is done in one line, and a finished one asks
+ * whether to check everything, change the coding agents or sessions, or update the worker. A
+ * credential that cannot enroll workers stops it at sign-in. A failed step stops it with one block
+ * on screen (what failed and why, the fix, the log, where a re-run continues) and, in JSON, the
+ * step, the command, its error and the fix. Ctrl-C at a prompt stops it with
+ * `SETUP_CANCELLED` (exit 2), keeping what was done. Without a terminal it exits 2 with
+ * `TERMINAL_REQUIRED` and the equivalent commands.
  */
 /**
  * The forms `pidgen setup` offers. `pidgen worker install --runtime container` installs the
@@ -127,22 +282,115 @@ export const setup: CommandSpec = {
       .option(
         "--url <url>",
         `the Pidgen server (default: the configured one, else ${HOSTED_SERVICE_URL})`,
+      )
+      .addOption(
+        new Option(
+          "--agent <agent>",
+          `a coding agent for the worker (${AGENT_KINDS.join(" or ")}), answering the question in advance; repeatable`,
+        )
+          .argParser((value: string, previous: string[] = []) => [...previous, value])
+          .default([]),
+      )
+      .addOption(
+        new Option(
+          "--plan <agent=plan>",
+          `a coding agent's subscription plan, such as claude=max-5x, answering its sessions question in advance; repeatable`,
+        )
+          .argParser((value: string, previous: string[] = []) => [...previous, value])
+          .default([]),
+      )
+      .addOption(
+        new Option(
+          "--sessions <agent=n>",
+          `how many sessions a coding agent runs at once, such as claude=4, answering its question in advance; repeatable`,
+        )
+          .argParser((value: string, previous: string[] = []) => [...previous, value])
+          .default([]),
+      )
+      .option(
+        "--accept-licence",
+        "install the worker and accept its licence, answering the install question in advance",
+      )
+      .option(
+        "--verbose",
+        "show each task's commands and their output as it runs (the setup log has them either way)",
       );
   },
   async run(ctx, { options, global }) {
     const answers = await readAnswers(ctx, options, global);
     const commands = new Commands(global, answers);
-    if (ctx.ask === null) {
-      throw new CliError(
+    if (ctx.prompter === null) {
+      const equivalent = commands.equivalent();
+      const error = new CliError(
         "TERMINAL_REQUIRED",
         "pidgen setup asks questions and needs a terminal on standard input and standard error. Run the commands in error.details.commands instead, in order.",
         ExitCode.Usage,
-        { commands: commands.equivalent() },
+        { commands: equivalent },
       );
+      error.human = [
+        "pidgen setup asks questions and needs a terminal on standard input and standard error.",
+        "Run these commands instead, in order:",
+        ...equivalent.map((command) => `  ${command}`),
+        "",
+      ].join("\n");
+      throw error;
     }
-    return new SetupRun(ctx, ctx.ask, global, answers, commands).run();
+    const prompter = await ctx.prompter();
+    const started = ctx.now();
+    const log = SetupLog.open(ctx, started);
+    try {
+      writeLogHeader(log, ctx, answers, options, global, started);
+      return await new SetupRun(ctx, prompter, global, answers, commands, log).run(started);
+    } finally {
+      log.close();
+    }
   },
 };
+
+/** The top of the setup log: when, which CLI and Node.js, on what, against which server, how. */
+function writeLogHeader(
+  log: SetupLog,
+  ctx: RunContext,
+  answers: Answers,
+  options: Record<string, unknown>,
+  global: GlobalOptions,
+  started: number,
+): void {
+  log.secret(ctx.env["PIDGEN_TOKEN"]);
+  log.line("pidgen setup log");
+  log.line(`started ${new Date(started).toISOString()}`);
+  log.line(`pidgen CLI ${CLI_VERSION}`);
+  log.line(`Node.js ${process.versions.node}`);
+  log.line(`platform ${ctx.workerRuntime.platform} ${ctx.workerRuntime.arch ?? process.arch}`);
+  log.line(`host ${ctx.hostName}`);
+  log.line(`server ${answers.url}`);
+  log.line(`flags ${flagsGiven(options, global) || "(none)"}`);
+  log.line("");
+}
+
+/** The flags setup was run with, as a person types them. */
+function flagsGiven(options: Record<string, unknown>, global: GlobalOptions): string {
+  const flags: string[] = [];
+  const add = (name: string, value: unknown) => {
+    if (value === undefined || value === false) return;
+    if (Array.isArray(value)) {
+      for (const entry of value) flags.push(`--${name}`, String(entry));
+      return;
+    }
+    flags.push(`--${name}`, ...(value === true ? [] : [String(value)]));
+  };
+  add("profile", global.profile);
+  add("account", global.account);
+  add("format", global.format);
+  add("timeout", global.timeoutSeconds);
+  for (const [key, value] of Object.entries(options)) {
+    add(
+      key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`),
+      value,
+    );
+  }
+  return flags.map(displayArgument).join(" ");
+}
 
 async function readAnswers(
   ctx: RunContext,
@@ -166,6 +414,25 @@ async function readAnswers(
     typeof given === "string"
       ? parseServerUrl(given)
       : ((await configuredUrl(ctx, global)) ?? HOSTED_SERVICE_URL);
+  const agents: AgentKind[] = [];
+  for (const given of (options["agent"] as string[] | undefined) ?? []) {
+    const kind = given.trim().toLowerCase();
+    if (!(AGENT_KINDS as readonly string[]).includes(kind)) {
+      throw usageError(
+        `--agent ${given} is not a coding agent setup can install: give ${AGENT_KINDS.join(" or ")}.`,
+      );
+    }
+    if (!agents.includes(kind as AgentKind)) agents.push(kind as AgentKind);
+  }
+  const plans = readPlans((options["plan"] as string[] | undefined) ?? []);
+  const sessions = readSessions((options["sessions"] as string[] | undefined) ?? []);
+  for (const kind of AGENT_KINDS) {
+    if (plans[kind] !== undefined && sessions[kind] !== undefined) {
+      throw usageError(
+        `--sessions ${kind}=… and --plan ${kind}=… both answer ${codingAgent(kind).name}'s sessions question: give one of them.`,
+      );
+    }
+  }
   const fromEnvironment = ctx.env["PIDGEN_API_URL"];
   if (fromEnvironment !== undefined && !sameServer(fromEnvironment, url)) {
     throw usageError(
@@ -177,8 +444,93 @@ async function readAnswers(
     version: typeof version === "string" ? version.trim() : undefined,
     test: options["test"] === true,
     label: name,
+    labelGiven: typeof label === "string",
     url,
+    agents,
+    plans,
+    sessions,
+    acceptLicence: options["acceptLicence"] === true,
+    verbose: options["verbose"] === true,
   };
+}
+
+/** `--sessions <kind>=<n>`: a whole number of sessions from 1 for each agent; a later one wins. */
+function readSessions(given: readonly string[]): Partial<Record<AgentKind, number>> {
+  const sessions: Partial<Record<AgentKind, number>> = {};
+  for (const entry of given) {
+    const [kind = "", count = ""] = entry.split("=", 2).map((part) => part.trim().toLowerCase());
+    if (!(AGENT_KINDS as readonly string[]).includes(kind)) {
+      throw usageError(
+        `--sessions ${entry} names no coding agent setup sizes: give ${AGENT_KINDS.map((agent) => `${agent}=<n>`).join(" or ")}.`,
+      );
+    }
+    const number = wholeSessions(count);
+    if (number === null) {
+      throw usageError(
+        `--sessions ${entry} needs a whole number of sessions from 1 to ${SESSIONS_MAX}, such as ${kind}=2.`,
+      );
+    }
+    sessions[kind as AgentKind] = number;
+  }
+  return sessions;
+}
+
+/** A whole number of sessions from 1 to the worker's limit, or `null`. */
+function wholeSessions(text: string): number | null {
+  if (!/^\d+$/.test(text.trim())) return null;
+  const number = Number(text.trim());
+  return number >= 1 && number <= SESSIONS_MAX ? number : null;
+}
+
+/** `--plan <kind>=<plan>`, each checked against the agent's plans; a later one for a kind wins. */
+function readPlans(given: readonly string[]): Partial<Record<AgentKind, string>> {
+  const plans: Partial<Record<AgentKind, string>> = {};
+  for (const entry of given) {
+    const [kind = "", plan = ""] = entry.split("=", 2).map((part) => part.trim().toLowerCase());
+    if (!(AGENT_KINDS as readonly string[]).includes(kind)) {
+      throw usageError(
+        `--plan ${entry} names no coding agent setup sizes: give ${AGENT_KINDS.map((agent) => `${agent}=<plan>`).join(" or ")}.`,
+      );
+    }
+    const found = findPlan(kind as AgentKind, plan);
+    if (found === undefined) {
+      const ids = AGENT_PLANS[kind as AgentKind].map((candidate) => candidate.id).join(", ");
+      throw usageError(
+        `--plan ${entry} is not a ${codingAgent(kind as AgentKind).name} plan: give one of ${ids}.`,
+      );
+    }
+    plans[kind as AgentKind] = found.id;
+  }
+  return plans;
+}
+
+/** The concurrent-session caps setup applies: one per harness kind the worker knows, and `prompts`. */
+export type Caps = Record<string, number>;
+
+/**
+ * The `pidgen-worker capacity set` argument lists for the chosen agents' caps: each chosen agent's
+ * `--max`, `--max 0` for every other harness the worker knows, then the prompt pool, `--min 1` and
+ * the sum of the caps as `--max`.
+ */
+function capacityArgs(chosen: ReadonlyMap<AgentKind, number>): string[][] {
+  const args: string[][] = [];
+  for (const [kind, cap] of chosen) args.push(["set", kind, "--max", String(cap)]);
+  for (const kind of WORKER_HARNESS_KINDS) {
+    if (!chosen.has(kind as AgentKind)) args.push(["set", kind, "--max", "0"]);
+  }
+  const total = [...chosen.values()].reduce((sum, cap) => sum + cap, 0);
+  args.push(["set", "prompts", "--min", "1", "--max", String(total)]);
+  return args;
+}
+
+/** `pidgen-worker capacity <args>`, as a person types it. */
+function capacityCommand(args: readonly string[]): string {
+  return ["pidgen-worker", "capacity", ...args].map(displayArgument).join(" ");
+}
+
+/** "N session(s) at a time". */
+function sessions(cap: number): string {
+  return `${cap} session${cap === 1 ? "" : "s"} at a time`;
 }
 
 /** The configured server (`PIDGEN_API_URL`, then the profile), or `null` when there is none. */
@@ -231,7 +583,10 @@ class Commands {
       ...(this.answers.test ? ["--test"] : []),
     ]);
   verify = () => this.pidgen(["worker", "verify"]);
-  enroll = () => this.pidgen(["worker", "enroll", "--label", this.answers.label]);
+  agentLogin = (agent: AgentKind) => this.pidgen(["worker", "login", agent], { account: false });
+  /** `pidgen worker enroll`: the name is the enrollment's label and, after `--`, the worker's host id. */
+  enroll = (name: string = this.answers.label) =>
+    this.pidgen(["worker", "enroll", "--label", name, "--", "--host-id", name]);
   start = () => this.pidgen(["worker", "start", "--detach"]);
   status = () => this.pidgen(["worker", "status"]);
   workerDoctor = () => this.pidgen(["worker", "doctor"]);
@@ -241,14 +596,39 @@ class Commands {
     return [
       this.doctor(),
       this.login(),
+      ...this.answers.agents.map((agent) => this.agentLogin(agent)),
       this.install(this.answers.runtime),
       this.verify(),
       this.enroll(),
+      ...this.capacity(),
       this.start(),
       this.status(),
       this.workerDoctor(),
     ];
   }
+
+  /**
+   * The capacity commands, when `--agent` with `--sessions` or `--plan` answer every question they
+   * depend on.
+   */
+  private capacity(): string[] {
+    const { agents, plans, sessions } = this.answers;
+    const cap = (kind: AgentKind) =>
+      sessions[kind] ?? (plans[kind] !== undefined ? findPlan(kind, plans[kind])!.cap : undefined);
+    if (agents.length === 0 || agents.some((kind) => cap(kind) === undefined)) return [];
+    const caps = new Map(agents.map((kind) => [kind, cap(kind)!] as const));
+    return capacityArgs(caps).map(capacityCommand);
+  }
+}
+
+/**
+ * How a failure is drawn when it is not the generic block: the `■` line (what failed and why, in
+ * plain words), the lines under it (the one fix), and the `└` line (where a re-run continues).
+ */
+interface FailureScreen {
+  headline?: string;
+  lines?: string[];
+  end?: string;
 }
 
 /** A step that stopped: the command that failed, its error, and the fix. */
@@ -257,10 +637,30 @@ class StepFailure extends Error {
     readonly error: CliError,
     readonly command: string | null,
     readonly fix: string,
+    readonly screen: FailureScreen = {},
   ) {
     super(error.message);
   }
 }
+
+/** Text for the screen: the backticks that mark commands in messages and fixes are dropped. */
+function plainText(text: string): string {
+  return text.replace(/`([^`]*)`/g, "$1");
+}
+
+/** What this machine had done before this run, as setup found it after signing in. */
+interface Survey {
+  /** The install setup keeps (the install step skips it), or `null`. */
+  record: InstallRecord | null;
+  /** This install's worker's name when it is enrolled, else `null`. */
+  enrolled: string | null;
+  running: boolean;
+  /** Each coding agent's cap in the worker's `node.yaml`. */
+  caps: Partial<Record<AgentKind, number>>;
+}
+
+/** What a run does: everything, asking again (`change`); on a finished setup, check and stop, or update. */
+type RunMode = "change" | "check" | "update";
 
 interface SignedIn {
   target: Target;
@@ -268,66 +668,235 @@ interface SignedIn {
   permission: EnrollPermission;
 }
 
-/** The App Service's view of this host, or the refusal that kept it from being read. */
-type WorkersRead = { view: ServerView; refused: null } | { view: null; refused: CliError };
+/** The Account's workers from `GET /workers`, or the refusal that kept them from being read. */
+type WorkersRead = { list: WorkerList; refused: null } | { list: null; refused: CliError };
 
-const AGAIN = "then run `pidgen setup` again";
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** "20 Sep": the day an ISO time falls on, in UTC; the text itself when it is not a time. */
+function shortDate(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return `${date.getUTCDate()} ${MONTHS[date.getUTCMonth()]}`;
+}
+
+/** Whether the Account lists an unrevoked worker under `name`. */
+function nameTaken(list: WorkerList, name: string): boolean {
+  return list.workers.some((worker) => worker.host_id === name && worker.revoked_at === null);
+}
+
+/** The first of `<base>-2`, `<base>-3`, … the Account lists no worker under, within the label limit. */
+function nextFreeName(list: WorkerList, base: string): string {
+  const listed = new Set(list.workers.map((worker) => worker.host_id));
+  for (let number = 2; ; number++) {
+    const suffix = `-${number}`;
+    const name = `${base.slice(0, LABEL_MAX - suffix.length)}${suffix}`;
+    if (!listed.has(name)) return name;
+  }
+}
+
+/** What a re-run of setup does after a failure. */
+const CONTINUE = "Run `pidgen setup` again to continue from here.";
+
+/** How many of a failing task's last lines of output stay on screen. */
+const TAIL_LINES = 10;
+
+/**
+ * The task open now: a spinner (or, with `--verbose`, a task log) that ends in one line, the line
+ * it ends in when it fails, and the last lines of its output in this run.
+ */
+interface ActiveTask {
+  title: string;
+  failure: string;
+  spinner: Spinner | null;
+  taskLog: TaskLog | null;
+  tail: string[];
+}
 
 class SetupRun {
   private readonly steps: SetupStep[] = [];
+  private active: ActiveTask | null = null;
+  /** What the commands setup runs wrote that is not yet a whole line. */
+  private pending = "";
+  private readonly prompter: Prompter;
   private workerCheck: DoctorCheck | undefined;
   private signedIn: SignedIn | null = null;
   private form: WorkerForm | undefined;
   private skipInstall = false;
+  /** The coding agents chosen at the agents step. */
+  private agents: CodingAgent[] = [];
+  /** Each chosen agent's cap, set when the capacity step ran in this invocation; else `null`. */
+  private caps: Map<AgentKind, number> | null = null;
+  /** What was done before this run; set at the sign-in step. */
+  private survey: Survey | null = null;
+  /** Whether the "Already done" or "Already set up" line named the install and the enrollment. */
+  private reported = { install: false, enroll: false };
+  private mode: RunMode = "change";
+  /** The release a re-run offers to update the worker to. */
+  private updateTo: string | null = null;
+  /** Whether setup used a uv that `PATH` does not reach yet. */
+  private uvOffPath = false;
 
   constructor(
-    private readonly ctx: RunContext,
-    private readonly ask: (question: string) => Promise<string>,
+    /** Replaced once, when the check step installs uv where `PATH` does not reach yet. */
+    private ctx: RunContext,
+    prompter: Prompter,
     private readonly global: GlobalOptions,
     private readonly answers: Answers,
     private readonly commands: Commands,
-  ) {}
+    private readonly log: SetupLog,
+  ) {
+    this.prompter = loggedPrompter(prompter, log);
+  }
 
-  async run(): Promise<CommandResult> {
+  /**
+   * The context the commands setup runs get: what they write to standard error, and the output of
+   * the commands they run in turn, goes to the setup log (and, with `--verbose`, under the task),
+   * never straight to the screen.
+   */
+  private get quiet(): RunContext {
+    return {
+      ...this.ctx,
+      io: { ...this.ctx.io, stderr: (text) => this.collect(text), pipeChildren: true },
+    };
+  }
+
+  async run(started: number): Promise<CommandResult> {
     const c = this.commands;
+    this.prompter.intro("Pidgen setup");
     await this.step("check", c.doctor(), () => this.check());
     await this.step("sign-in", c.login(), () => this.signIn());
+    await this.step("agents", null, () => this.chooseAgents());
+    const logins = this.agents.map((agent) => c.agentLogin(agent.kind)).join(" && ");
+    await this.step("agent-login", logins || null, () => this.signInAgents());
+    await this.step("capacity", null, () => this.sizeAgents());
     await this.step("runtime", null, () => this.chooseRuntime());
     const install = `${c.install(this.form)} && ${c.verify()}`;
     await this.step("install", install, () => this.install());
     await this.step("enroll", `${c.enroll()} && ${c.start()}`, () => this.enrollAndStart());
     await this.step("prove", c.workerDoctor(), () => this.prove());
-    this.say("\nThis machine runs a verified worker connected to Pidgen.");
-    return {
+    const next = await this.nextCommand();
+    const seconds = Math.max(0, Math.round((this.ctx.now() - started) / 1000));
+    const done = `Done in ${Math.floor(seconds / 60)} min ${seconds % 60} s`;
+    const prove = this.steps.find((entry) => entry.id === "prove");
+    if (prove !== undefined) prove["next"] = next.command;
+    const result: CommandResult = {
       data: { steps: this.steps },
       meta: this.signedIn ? responseMeta(this.signedIn.target) : {},
     };
+    if (this.global.format !== "table") {
+      // Standard output is the envelope: the frame ends on standard error.
+      this.prompter.outro(done);
+      return result;
+    }
+    // In a terminal the frame ends on standard output, with the summary card under it.
+    const card = await this.card(next);
+    this.log.event(done);
+    this.log.write(card);
+    return { ...result, human: `${drawOutro(done)}${card}` };
+  }
+
+  /**
+   * The summary card: what was set up, how to manage it, and the one next thing to do.
+   */
+  private async card(next: { command: string; why: string }): Promise<string> {
+    const c = this.commands;
+    const record = await readInstallRecord(this.ctx);
+    const enroll = this.steps.find((entry) => entry.id === "enroll");
+    const host = typeof enroll?.["host_id"] === "string" ? enroll["host_id"] : this.answers.label;
+    const current = this.caps === null ? await this.currentCaps() : {};
+    const cap = (kind: AgentKind) => this.caps?.get(kind) ?? current[kind];
+    const email = this.signedIn?.me.user.email;
+    const rows: Array<[string, string[]]> = [
+      ["Account", [[this.accountName(), ...(email ? [email] : [])].join(" · ")]],
+      ["Worker", [`${host} · pidgen-worker ${record?.version ?? "(unknown)"} · running`]],
+      [
+        "Coding agents",
+        this.agents.map((agent) => {
+          const count = cap(agent.kind);
+          return count !== undefined ? `${agent.name} · ${sessions(count)}` : agent.name;
+        }),
+      ],
+    ];
+    const label = Math.max(...rows.map(([name]) => name.length)) + 2;
+    const manage: Array<[string, string]> = [
+      [c.status(), "what it's doing now"],
+      [c.pidgen(["worker", "stop"]), "stop it"],
+      [c.pidgen(["setup"], { account: false }), "change coding agents or sessions"],
+    ];
+    const command = Math.max(...manage.map(([text]) => text.length)) + 4;
+    const notes: string[] = [];
+    if (this.uvOffPath) notes.push("Open a new terminal to use uv by name.");
+    if (enroll?.["connected"] === null) {
+      notes.push(`Check it's connected: ${c.status()}, signed in as an Owner or Administrator.`);
+    }
+    return [
+      "",
+      "  This machine is a Pidgen worker",
+      ...notes.map((note) => `  ${note}`),
+      "",
+      ...rows.flatMap(([name, values]) =>
+        values.map((value, index) => `  ${(index === 0 ? name : "").padEnd(label)}${value}`),
+      ),
+      "",
+      "  Manage it",
+      ...manage.map(([text, why]) => `    ${text.padEnd(command)}${why}`),
+      "",
+      `  Next: ${next.why}`,
+      `    ${next.command}`,
+      "",
+    ].join("\n");
   }
 
   // -------------------------------------------------------------------------------------------
   // Running steps
 
+  /**
+   * Runs one step and records it in `data.steps`. A failure stops setup with the step, the command,
+   * its error and the fix; Ctrl-C at one of its prompts stops it with `SETUP_CANCELLED`.
+   */
   private async step(
     id: SetupStepId,
     command: string | null,
     body: () => Promise<StepResult>,
   ): Promise<void> {
+    this.log.event(`${id} started`);
     try {
-      const { status, summary, ...details } = await body();
+      const result = await body();
+      const { status, summary, ...details } = result;
       this.steps.push({ id, status, command, summary, ...details });
+      this.log.event(`${id} ${status}: ${summary}`);
     } catch (error) {
+      this.flush();
       const failure =
         error instanceof StepFailure
           ? error
           : error instanceof CliError
-            ? new StepFailure(error, command, `Fix the error, ${AGAIN}.`)
+            ? new StepFailure(error, command, "Fix the error.")
             : null;
+      if (failure === null || error instanceof PromptCancelled) {
+        this.failTask();
+        this.logError(id, error);
+      }
+      if (error instanceof PromptCancelled) {
+        this.steps.push({ id, command, status: "failed", summary: "Setup was cancelled." });
+        this.prompter.cancel(CANCELLED, "Run pidgen setup again to continue.");
+        const cancelled = new CliError("SETUP_CANCELLED", CANCELLED, ExitCode.Usage, {
+          step: id,
+          steps: this.steps,
+        });
+        // The cancel line is on screen; a terminal shows nothing more.
+        cancelled.human = "";
+        throw cancelled;
+      }
       if (failure === null) throw error;
       this.steps.push({ id, command, status: "failed", summary: failure.error.message });
       const ran = failure.command ?? command;
-      throw new CliError(
+      const given = failure.fix.trim();
+      const fix = `${given}${/[.!?]$/.test(given) ? "" : "."} ${CONTINUE}`;
+      const stopped = new CliError(
         failure.error.code,
-        `Setup stopped at ${id}${ran ? `: \`${ran}\` failed` : ""}: ${failure.error.message} Fix: ${failure.fix}`,
+        `Setup stopped at ${STEP_TITLES[id]}${ran ? `: \`${ran}\` failed` : ""}: ${failure.error.message} Fix: ${fix}`,
         failure.error.exitCode,
         {
           ...failure.error.details,
@@ -338,23 +907,85 @@ class SetupRun {
             message: failure.error.message,
             details: failure.error.details,
           },
-          fix: failure.fix,
+          fix,
           steps: this.steps,
+          // Beside the failing command's own `log` (the worker's, say), never over it.
+          setup_log: this.log.path,
         },
       );
+      this.drawStop(id, failure, error);
+      // The block is on screen; a terminal shows nothing more (JSON keeps every field).
+      stopped.human = "";
+      throw stopped;
     }
   }
 
-  /** Runs one scriptable command after printing it; its failure becomes the step's. */
+  /**
+   * The one block a failed step leaves on screen: the `■` line (the failed task's, or what stopped
+   * setup and why), the task's last lines of output, the one fix, the setup log, and the `└` line
+   * saying a re-run continues from here.
+   */
+  private drawStop(id: SetupStepId, failure: StepFailure, error: unknown): void {
+    const screen = failure.screen;
+    if (this.active !== null && screen.headline !== undefined) {
+      this.active.failure = screen.headline;
+    }
+    const tail = this.failTask();
+    this.logError(id, error);
+    if (tail === null) {
+      const headline =
+        screen.headline ??
+        `Setup stopped at ${STEP_TITLES[id]}: ${plainText(failure.error.message)}`;
+      this.say(drawFailed(headline));
+    }
+    const lines: string[] = [];
+    if (screen.lines !== undefined) {
+      lines.push(...screen.lines);
+    } else {
+      // A task's own output says why it failed; without any, its error does.
+      if (tail !== null && tail.length === 0) lines.push(plainText(failure.error.message));
+      lines.push(plainText(failure.fix));
+    }
+    lines.push(`Log: ${this.shownPath(this.log.path)}`);
+    for (const line of lines) this.say(drawTaskLine(line));
+    this.say(`${SYMBOL.end}  ${screen.end ?? plainText(CONTINUE)}`);
+  }
+
+  /** Records a step's error in full: its code, message, details, and the stack of a defect. */
+  private logError(id: SetupStepId, error: unknown): void {
+    if (error instanceof PromptCancelled) {
+      this.log.event(`${id} cancelled at a prompt`);
+      return;
+    }
+    const failure = error instanceof StepFailure ? error.error : error;
+    if (failure instanceof CliError) {
+      this.log.event(`${id} failed: ${failure.code} ${failure.message}`);
+      if (error instanceof StepFailure) {
+        this.log.line(`command: ${error.command ?? "(none)"}`);
+        this.log.line(`fix: ${error.fix}`);
+      }
+      this.log.line(
+        `details: ${JSON.stringify({ step: id, ...failure.details }, null, 2) ?? "{}"}`,
+      );
+      return;
+    }
+    const text = error instanceof Error ? (error.stack ?? error.message) : String(error);
+    this.log.event(`${id} failed: ${text}`);
+  }
+
+  /**
+   * Runs one scriptable command, its line (`$ <display>`) first, with the quiet context unless
+   * another is given: its output goes to the setup log. Its failure becomes the step's.
+   */
   private async runCommand(
     command: string,
     spec: CommandSpec,
     input: Partial<CommandInput>,
     fix: (error: CliError) => string,
-    ctx: RunContext = this.ctx,
-    display: string = command,
+    ctx: RunContext = this.quiet,
+    display: string | null = command,
   ): Promise<unknown> {
-    this.say(`$ ${display}`);
+    if (display !== null) this.note(`$ ${display}`);
     try {
       const result = await spec.run(ctx, {
         args: input.args ?? [],
@@ -368,32 +999,146 @@ class SetupRun {
     }
   }
 
-  private say(text: string): void {
-    this.ctx.io.stderr(`${text}\n`);
+  // -------------------------------------------------------------------------------------------
+  // The screen, the log and tasks
+
+  /** Text for the person: on the screen, and in the log. */
+  private screen(text: string): void {
+    this.flush();
+    this.log.write(text);
+    this.ctx.io.stderr(text);
   }
 
-  /** Asks until the answer is one of `choices` (an empty answer is `fallback`). */
-  private async choose<T>(
-    question: string,
-    choices: ReadonlyMap<string, T>,
-    fallback: T,
-    hint: string,
-  ): Promise<T> {
-    for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
-      const answer = (await this.ask(question)).trim();
-      if (answer === "") return fallback;
-      const chosen = choices.get(answer.toLowerCase());
-      if (chosen !== undefined) return chosen;
-      this.say(`"${answer}" is not one of the answers: ${hint}.`);
+  /** One line for the person. */
+  private say(text: string): void {
+    this.screen(`${text}\n`);
+  }
+
+  /** `│\n◇  <line>`: a question answered in advance, or an action's one-line result. */
+  private answered(line: string): void {
+    this.say(drawCollapsed(line));
+  }
+
+  /** `│\n▲  <line>`: a warning that applies to what setup does. */
+  private warn(line: string): void {
+    this.say(`${SYMBOL.bar}\n${SYMBOL.warn}  ${line}`);
+  }
+
+  /** A line of setup's own that is not for the screen: in the log, and under the task. */
+  private note(text: string): void {
+    this.collect(`${text}\n`);
+  }
+
+  /**
+   * What the commands setup runs write: the log takes it as it is; each whole line also joins the
+   * open task's last lines and, with `--verbose`, is shown under it (a command's own lines
+   * indented under the command).
+   */
+  private collect(text: string): void {
+    this.log.write(text);
+    this.pending += text;
+    const end = this.pending.lastIndexOf("\n");
+    if (end < 0) return;
+    const lines = this.pending.slice(0, end).split("\n");
+    this.pending = this.pending.slice(end + 1);
+    for (const raw of lines) this.collected(raw);
+  }
+
+  /** Ends a last line a command left unfinished. */
+  private flush(): void {
+    if (this.pending === "") return;
+    const line = this.pending;
+    this.pending = "";
+    this.log.write("\n");
+    this.collected(line);
+  }
+
+  private collected(raw: string): void {
+    // eslint-disable-next-line no-control-regex
+    const line = this.log.redact(raw.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\r/g, ""));
+    if (line.trim() === "") return;
+    const task = this.active;
+    if (task !== null) {
+      task.tail.push(line);
+      if (task.tail.length > TAIL_LINES) task.tail.shift();
     }
-    throw usageError(`No answer setup knows after ${ATTEMPTS} tries: ${hint}.`);
+    if (!this.answers.verbose) return;
+    const shown = line.startsWith("$ ") ? line : `  ${line}`;
+    if (task?.taskLog) task.taskLog.message(shown);
+    else this.ctx.io.stderr(`${drawTaskLine(shown)}\n`);
+  }
+
+  /**
+   * Opens a task: a spinner showing `title` (with `--verbose`, a task log under it), which ends in
+   * one line. `failure` is the line it ends in if it fails.
+   */
+  private begin(title: string, failure: string): void {
+    if (this.active !== null) this.done(this.active.title);
+    this.flush();
+    this.log.event(`task: ${title}`);
+    const task: ActiveTask = { title, failure, spinner: null, taskLog: null, tail: [] };
+    if (this.answers.verbose) {
+      task.taskLog = this.prompter.taskLog(title);
+    } else {
+      task.spinner = this.prompter.spinner();
+      task.spinner.start(title);
+    }
+    this.active = task;
+  }
+
+  /** What the open task is doing now; `failure`, when given, is the line it now ends in if it fails. */
+  private progress(message: string, failure?: string): void {
+    const task = this.active;
+    if (task === null) return;
+    this.log.event(`task: ${message}`);
+    if (failure !== undefined) task.failure = failure;
+    task.spinner?.message(message);
+    task.taskLog?.message(message);
+  }
+
+  /** Ends the open task in its one line. */
+  private done(line: string): void {
+    const task = this.active;
+    if (task === null) return;
+    this.flush();
+    this.active = null;
+    this.log.event(`task done: ${line}`);
+    task.spinner?.stop(line);
+    task.taskLog?.success(line);
+  }
+
+  /**
+   * Ends the open task as failed: its `■` line, then (without `--verbose`, which showed them) the
+   * last lines of its output in this run, each once. Returns those lines, or `null` when no task
+   * was open.
+   */
+  private failTask(): string[] | null {
+    const task = this.active;
+    if (task === null) return null;
+    this.flush();
+    this.active = null;
+    this.log.event(`task failed: ${task.failure}`);
+    if (task.spinner !== null) {
+      task.spinner.error(task.failure);
+      for (const line of task.tail) this.ctx.io.stderr(`${drawTaskLine(line)}\n`);
+    }
+    task.taskLog?.error(task.failure);
+    return task.tail;
+  }
+
+  /** A path as the person reads it: `~/…` under their home directory. */
+  private shownPath(path: string): string {
+    const home = this.ctx.homeDir;
+    return path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
   }
 
   // -------------------------------------------------------------------------------------------
   // 1. Check
 
   private async check(): Promise<StepResult> {
-    this.say(`$ ${this.commands.doctor()}`);
+    if (workerPlatformSupported(this.ctx.workerRuntime)) await this.ensureUv();
+    this.begin("Checking this machine…", "This machine isn't ready for the worker");
+    this.note(`$ ${this.commands.doctor()}`);
     // Before sign-in no server may be configured yet: check the one setup signs in to.
     const configured = await configuredUrl(this.ctx, this.global);
     const ctx =
@@ -402,15 +1147,15 @@ class SetupRun {
         : { ...this.ctx, env: { ...this.ctx.env, PIDGEN_API_URL: this.answers.url } };
     const { checks } = await doctorChecks(ctx, this.global);
     for (const entry of checks) {
-      const later = entry.status === "fail" ? FIXED_LATER.get(entry.id) : undefined;
-      this.say(
-        `  ${entry.status.padEnd(4)}  ${entry.id}  ${entry.summary}${later ? ` (${later} fixes this)` : ""}`,
+      const later = entry.status === "fail" ? fixedLater(entry.id) : undefined;
+      this.note(
+        `${entry.status.padEnd(4)}  ${entry.id}  ${entry.summary}${later ? ` (${later} fixes this)` : ""}`,
       );
     }
     this.workerCheck = checks.find((entry) => entry.id === "worker");
 
     const blocking = checks.filter(
-      (entry) => entry.status === "fail" && !FIXED_LATER.has(entry.id),
+      (entry) => entry.status === "fail" && fixedLater(entry.id) === undefined,
     );
     if (blocking.length > 0) {
       const names = blocking.map((entry) => entry.id).join(", ");
@@ -422,14 +1167,119 @@ class SetupRun {
           { checks },
         ),
         this.commands.doctor(),
-        `${blocking.map((entry) => `${entry.id}: ${entry.fix ?? "see its summary"}`).join("; ")}; ${AGAIN}`,
+        `${blocking.map((entry) => `${entry.id}: ${entry.fix ?? "see its summary"}`).join("; ")}.`,
       );
     }
     const warnings = checks.filter((entry) => entry.status === "warn").length;
+    this.done(machineReady(this.ctx.workerRuntime.platform, checks));
+    for (const entry of checks.filter(
+      (check) => check.status === "warn" && warningApplies(check),
+    )) {
+      this.warn(entry.summary);
+    }
     return {
       status: "done",
       summary: `Nothing on this machine stops setup${warnings > 0 ? ` (${warnings} warning${warnings === 1 ? "" : "s"})` : ""}.`,
     };
+  }
+
+  /**
+   * uv installs the worker. On `PATH`, it is used; in `~/.local/bin`, where uv's installer puts it,
+   * it is used for the rest of setup though `PATH` does not have it yet. Otherwise the person is
+   * asked to install it with uv's installer; declining fails with `RUNTIME_UNAVAILABLE`.
+   */
+  private async ensureUv(): Promise<void> {
+    if ((await findOnPath(this.ctx, "uv", this.ctx.workerRuntime)) !== null) return;
+    if (await this.useLocalUv()) return;
+    const install = await this.prompter.confirm({
+      message: "uv installs the worker and isn't on this machine. Install it?",
+      footer: `Runs uv's installer: ${UV_INSTALL_COMMAND}`,
+    });
+    const missing = (message: string, screen: FailureScreen = {}) =>
+      new StepFailure(
+        new CliError("RUNTIME_UNAVAILABLE", message, ExitCode.Usage, {
+          install: RUNTIME_INSTRUCTIONS,
+          command: UV_INSTALL_COMMAND,
+        }),
+        null,
+        `Install uv: \`${UV_INSTALL_COMMAND}\` (${RUNTIME_INSTRUCTIONS.wheel.url}).`,
+        screen,
+      );
+    if (!install) {
+      throw missing(
+        `uv is required to install the worker and was not installed. Install it with \`${UV_INSTALL_COMMAND}\`.`,
+        {
+          headline: "Setup stopped: the worker needs uv.",
+          lines: [`Install uv yourself: ${UV_INSTALL_COMMAND}`],
+          end: `Nothing was changed. ${plainText(CONTINUE)}`,
+        },
+      );
+    }
+    this.begin("Installing uv…", "Couldn't install uv");
+    this.note(`$ ${UV_INSTALL_COMMAND}`);
+    const status = await this.runUvInstaller();
+    if (status !== 0) {
+      throw missing(`uv's installer exited with status ${status}; uv was not installed.`);
+    }
+    if ((await findOnPath(this.ctx, "uv", this.ctx.workerRuntime)) !== null) {
+      this.done("uv installed");
+      return;
+    }
+    if (!(await this.useLocalUv(() => this.done("uv installed")))) {
+      throw missing("uv's installer finished, but setup cannot find the uv it installed.");
+    }
+  }
+
+  /**
+   * Uses `~/.local/bin/uv` for the rest of setup when it is there, after `found` (which ends an
+   * open task), with one warning line; false when it is not.
+   */
+  private async useLocalUv(found: () => void = () => undefined): Promise<boolean> {
+    const directory = join(this.ctx.homeDir, ".local", "bin");
+    const env = { PATH: directory };
+    const uv = await findOnPath({ env, cwd: this.ctx.cwd }, "uv", this.ctx.workerRuntime);
+    if (uv === null) return false;
+    const path = this.ctx.env["PATH"];
+    this.ctx = {
+      ...this.ctx,
+      env: { ...this.ctx.env, PATH: path ? `${directory}${delimiter}${path}` : directory },
+    };
+    found();
+    this.uvOffPath = true;
+    this.warn(
+      `Using uv at ${this.shownPath(uv)}; it is not on PATH yet: open a new terminal, or add ${this.shownPath(directory)} to PATH.`,
+    );
+    return true;
+  }
+
+  /**
+   * Runs uv's installer as `curl -LsSf <url> | sh` does, without a command string: curl's output is
+   * piped to the standard input of `sh`, the one shell the CLI starts, after the person consented.
+   * What they print goes to the setup log. Returns the first non-zero exit status, else 0.
+   */
+  private async runUvInstaller(): Promise<number> {
+    const runtime = this.ctx.workerRuntime;
+    const output = collectedOutput(this.quiet.io)!;
+    const options = {
+      cwd: this.ctx.cwd,
+      env: { HOME: this.ctx.homeDir, ...this.ctx.env },
+      shell: false,
+    } as const;
+    const curl = runtime.spawn("curl", ["-LsSf", UV_INSTALLER_URL], {
+      ...options,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const sh = runtime.spawn("sh", [], { ...options, stdio: ["pipe", "pipe", "pipe"] });
+    curl.stderr?.on("data", (chunk: Buffer) => output.write(chunk));
+    sh.stdout?.on("data", (chunk: Buffer) => output.write(chunk));
+    sh.stderr?.on("data", (chunk: Buffer) => output.write(chunk));
+    // A shell that is gone closes its input; curl's write to it is then not an error of setup's.
+    sh.stdin?.on("error", () => undefined);
+    curl.once("error", () => sh.stdin?.end());
+    if (curl.stdout && sh.stdin) curl.stdout.pipe(sh.stdin);
+    const [fetched, ran] = await Promise.all([exitStatus(curl), exitStatus(sh)]);
+    output.end();
+    return fetched !== 0 ? fetched : ran;
   }
 
   // -------------------------------------------------------------------------------------------
@@ -443,22 +1293,44 @@ class SetupRun {
       const approved = await this.login();
       signedIn = await this.requireSignIn(approved);
       if (signedIn.me.memberships.length > 1 && this.global.account === undefined) {
+        this.done(`Signed in as ${signedIn.me.user.email}`);
         signedIn = await this.chooseAccount(signedIn);
+      } else {
+        this.done(this.signedInLine(signedIn));
       }
     } else {
-      this.say(
+      this.note(
         `Signed in to ${this.answers.url} for ${signedIn.target.account}; skipping sign-in.`,
       );
     }
     this.signedIn = signedIn;
+    this.log.secret(signedIn.target.token);
 
     const enroll = this.describePermission(signedIn);
+    const survey = await this.takeSurvey();
+    if (!signedIn.permission.allowed && survey.enrolled === null) {
+      // Nothing is installed for a worker this credential cannot add.
+      if (status === "skipped") this.answered(this.signedInLine(signedIn));
+      throw this.cannotEnroll(signedIn, enroll);
+    }
+    await this.reportDone(survey, status === "skipped");
     return {
       status,
       summary: `Signed in as ${signedIn.me.user.email} for ${signedIn.target.account}.`,
       account: signedIn.target.account,
       enroll,
     };
+  }
+
+  /** "Signed in as sam@example.com · Acme · Administrator". */
+  private signedInLine({ me, target, permission }: SignedIn): string {
+    const membership = me.memberships.find((entry) => entry.account_id === target.account);
+    const role = permission.role ?? membership?.role ?? null;
+    return [
+      `Signed in as ${me.user.email}`,
+      membership?.account_name ?? target.account ?? "no Account",
+      ...(role !== null ? [role[0]!.toUpperCase() + role.slice(1)] : []),
+    ].join(" · ");
   }
 
   /** The profile's credential for the server, when `GET /me` accepts it. */
@@ -477,14 +1349,18 @@ class SetupRun {
         throw new StepFailure(
           error,
           null,
-          `PIDGEN_TOKEN is set and the server refuses it: set it to a valid token, or unset it to sign in with a device code; ${AGAIN}`,
+          "PIDGEN_TOKEN is set and the server refuses it: set it to a valid token, or unset it to sign in with a device code.",
         );
       }
       return null;
     }
   }
 
-  /** Device-code login; the Account is chosen when the login is approved. Returns that Account. */
+  /**
+   * Device-code login; the Account is chosen when the login is approved. Returns that Account. The
+   * sign-in block leads with the link that carries the code, then the address and the code; a
+   * spinner waits for the approval, and the caller ends it.
+   */
   private async login(): Promise<string> {
     // A device-code login chooses its Account when it is approved, so --account is not passed.
     const global: GlobalOptions = {
@@ -492,13 +1368,38 @@ class SetupRun {
       timeoutSeconds: this.global.timeoutSeconds,
       ...(this.global.profile !== undefined ? { profile: this.global.profile } : {}),
     };
+    const url = this.answers.url;
+    const login: CommandSpec = {
+      path: ["auth", "login"],
+      summary: "Sign in with a device code",
+      run: (ctx, input) =>
+        loginWithDeviceCode(ctx, url, input.global, undefined, (shown) =>
+          this.showDeviceCode(shown),
+        ),
+    };
     const data = (await this.runCommand(
       this.commands.login(),
-      authLogin,
-      { args: [this.answers.url], global },
-      () => `Approve the login in the web app before the code expires; ${AGAIN}.`,
+      login,
+      { args: [url], global },
+      () => "Approve the login in the web app before the code expires.",
     )) as { account: string };
     return data.account;
+  }
+
+  /** The sign-in block, then a spinner until the person approves. */
+  private showDeviceCode(shown: DeviceCodeShown): void {
+    const lines = [SYMBOL.bar, `${SYMBOL.active}  Sign in to Pidgen`];
+    if (shown.verification_uri_complete.trim() !== "") {
+      lines.push(
+        drawTaskLine("Open this link and approve the sign-in:"),
+        drawTaskLine(`  ${shown.verification_uri_complete}`),
+        drawTaskLine(`Or go to ${shown.verification_uri} and enter  ${shown.user_code}`),
+      );
+    } else {
+      lines.push(drawTaskLine(`Go to ${shown.verification_uri} and enter  ${shown.user_code}`));
+    }
+    this.say(lines.join("\n"));
+    this.begin("Waiting for you to approve in the browser…", "The sign-in wasn't approved");
   }
 
   private async requireSignIn(approved: string): Promise<SignedIn> {
@@ -513,7 +1414,7 @@ class SetupRun {
         { approved, account: wanted },
       ),
       this.commands.login(),
-      `Approve the login for ${wanted}, or run setup without --account; ${AGAIN}`,
+      `Approve the login for ${wanted}, or run setup without --account.`,
     );
   }
 
@@ -521,23 +1422,20 @@ class SetupRun {
   private async chooseAccount(signedIn: SignedIn): Promise<SignedIn> {
     const current = signedIn.target.account;
     const memberships = signedIn.me.memberships;
-    const choices = new Map<string, string>();
-    const lines = memberships.map((entry, index) => {
-      choices.set(String(index + 1), entry.account_id);
-      choices.set(entry.account_id.toLowerCase(), entry.account_id);
-      const mark = entry.account_id === current ? "  (signed in)" : "";
-      return `  ${index + 1}. ${entry.account_id}  ${entry.account_name}, ${entry.role}${mark}`;
+    const role = (name: string) => name[0]!.toUpperCase() + name.slice(1);
+    const chosen = await this.prompter.select({
+      message: "Which Account will this worker serve?",
+      options: memberships.map((entry) => ({
+        value: entry.account_id,
+        label: entry.account_name,
+        hint: (ENROLL_ROLES as readonly string[]).includes(entry.role)
+          ? role(entry.role)
+          : `${role(entry.role)} · can't enroll workers`,
+      })),
+      initialValue: current ?? memberships[0]!.account_id,
+      collapse: (account) =>
+        `Account · ${memberships.find((entry) => entry.account_id === account)?.account_name ?? account}`,
     });
-    const fallbackIndex = Math.max(
-      1,
-      memberships.findIndex((entry) => entry.account_id === current) + 1,
-    );
-    const chosen = await this.choose(
-      `You belong to ${memberships.length} Accounts:\n${lines.join("\n")}\nWhich Account will this worker serve? [${fallbackIndex}] `,
-      choices,
-      current ?? memberships[0]!.account_id,
-      `a number from 1 to ${memberships.length}, or an Account id`,
-    );
     if (chosen === current) return signedIn;
 
     const config = await loadConfig(this.ctx);
@@ -545,6 +1443,7 @@ class SetupRun {
     if (profile?.credentials[chosen] === undefined) {
       this.say(`Sign in again and approve the login for ${chosen}.`);
       const approved = await this.login();
+      this.done(`Signed in for ${approved}`);
       if (approved !== chosen) {
         throw new StepFailure(
           new CliError(
@@ -554,7 +1453,7 @@ class SetupRun {
             { approved, account: chosen },
           ),
           this.commands.login(),
-          `Approve the login for ${chosen}; ${AGAIN}`,
+          `Approve the login for ${chosen}.`,
         );
       }
     }
@@ -562,7 +1461,7 @@ class SetupRun {
       this.commands.accountUse(chosen),
       accountUse,
       { args: [chosen] },
-      () => `Sign in for ${chosen} with \`${this.commands.login()}\`; ${AGAIN}`,
+      () => `Sign in for ${chosen} with \`${this.commands.login()}\`.`,
     );
     const after = await this.currentSignIn();
     if (after === null) {
@@ -573,7 +1472,7 @@ class SetupRun {
           ExitCode.Auth,
         ),
         this.commands.login(),
-        `Sign in for ${chosen} with \`${this.commands.login()}\`; ${AGAIN}`,
+        `Sign in for ${chosen} with \`${this.commands.login()}\`.`,
       );
     }
     return after;
@@ -585,7 +1484,7 @@ class SetupRun {
     const tokenCommand = this.commands.tokenLogin(account);
     const roles = ENROLL_ROLES.map((role) => role[0]!.toUpperCase() + role.slice(1)).join(" or ");
     if (permission.allowed) {
-      this.say(
+      this.note(
         `This credential may enroll workers in ${account} (${permission.role ? `role ${permission.role}; ` : ""}it holds ${ENROLL_SCOPE}).`,
       );
     } else {
@@ -593,13 +1492,8 @@ class SetupRun {
         permission.kind === "pat"
           ? `the Personal API Token lacks ${ENROLL_SCOPE}`
           : `your role is ${permission.role ?? "unknown"}`;
-      this.say(
-        [
-          `This credential may not enroll workers in ${account}: ${reason}.`,
-          `An Account ${roles} can enroll workers. Or create a Personal API Token with ${ENROLL_SCOPE} in the web app and sign in with it:`,
-          `  ${tokenCommand}`,
-          "Setup still installs the worker; it stops before enrolling.",
-        ].join("\n"),
+      this.note(
+        `This credential may not enroll workers in ${account}: ${reason}. An Account ${roles} can, or a Personal API Token with ${ENROLL_SCOPE}: ${tokenCommand}`,
       );
     }
     return {
@@ -614,16 +1508,566 @@ class SetupRun {
     };
   }
 
-  // -------------------------------------------------------------------------------------------
-  // 3. Choose a runtime
+  /**
+   * Stops setup at sign-in when the credential cannot enroll workers, before anything is installed:
+   * the roles that can, and the Personal API Token command.
+   */
+  private cannotEnroll(
+    { permission, target }: SignedIn,
+    enroll: Record<string, unknown>,
+  ): StepFailure {
+    const id = permission.account ?? target.account ?? "<ACC-…>";
+    const tokenCommand = this.commands.tokenLogin(id);
+    const roles = ENROLL_ROLES.map((role) => role[0]!.toUpperCase() + role.slice(1)).join(" or ");
+    const pat = permission.kind === "pat";
+    const why = pat
+      ? `this Personal API Token can't enroll workers (it lacks ${ENROLL_SCOPE})`
+      : `that needs an ${roles}`;
+    return new StepFailure(
+      new CliError(
+        "ENROLL_NOT_PERMITTED",
+        `This credential may not enroll workers in ${id}: ${pat ? `the Personal API Token lacks ${ENROLL_SCOPE}` : `an Account ${roles} can`}. Setup stopped before installing anything.`,
+        ExitCode.Auth,
+        enroll,
+      ),
+      null,
+      `Ask an Account ${roles} to run setup on this machine, or sign in with a Personal API Token that has ${ENROLL_SCOPE}: \`${tokenCommand}\`.`,
+      {
+        headline: `You can't add workers to ${this.accountName()}: ${why}.`,
+        lines: [
+          `Ask ${pat ? `an ${roles}` : "one of them"} to run pidgen setup on this machine, or sign in with a`,
+          "Personal API Token that can enroll workers:",
+          `  ${tokenCommand}`,
+        ],
+        end: `Nothing was installed. ${plainText(CONTINUE)}`,
+      },
+    );
+  }
 
-  private async chooseRuntime(): Promise<StepResult> {
-    const record = await readInstallRecord(this.ctx);
+  /** What this machine had done before this run: the install, the enrollment, the caps. */
+  private async takeSurvey(): Promise<Survey> {
+    const record = await this.keptInstall();
+    let enrolled: string | null = null;
+    try {
+      const state = await this.enrollmentState();
+      if (state.enrolled) enrolled = state.hostId;
+    } catch (error) {
+      if (!(error instanceof CliError)) throw error;
+      this.note(`Could not tell whether this machine's worker is enrolled: ${error.message}`);
+    }
+    let running = false;
+    try {
+      running = (await localWorkerStatus(this.quiet, this.ctx.workerRuntime)).running;
+    } catch (error) {
+      if (!(error instanceof CliError)) throw error;
+    }
+    const survey: Survey = { record, enrolled, running, caps: await this.currentCaps() };
+    this.survey = survey;
+    return survey;
+  }
+
+  /**
+   * One line for what was done before this run. With every action done, "Already set up" and the
+   * question of what to do now (unless `--agent`, `--sessions` or `--plan` say: change them);
+   * otherwise "Already done" with the done actions, and setup continues.
+   */
+  private async reportDone(survey: Survey, signedInBefore: boolean): Promise<void> {
+    const account = this.accountName();
+    const agents = AGENT_KINDS.filter((kind) => survey.caps[kind] !== undefined);
+    const { record, enrolled, running } = survey;
+    if (record !== null && enrolled !== null && running && agents.length > 0) {
+      this.reported = { install: true, enroll: true };
+      this.answered(
+        [
+          "Already set up",
+          account,
+          agents.map((kind) => codingAgent(kind).name).join(", "),
+          `pidgen-worker ${record.version}`,
+          "running",
+        ].join(" · "),
+      );
+      const { agents: given, sessions: counts, plans } = this.answers;
+      const answered =
+        given.length > 0 || Object.keys(counts).length > 0 || Object.keys(plans).length > 0;
+      if (!answered) this.mode = await this.askRerun(record);
+      return;
+    }
+    const parts: string[] = [];
+    if (signedInBefore) parts.push(`signed in to ${account}`);
+    if (record !== null) parts.push(`pidgen-worker ${record.version} installed`);
+    if (enrolled !== null) parts.push(`enrolled as ${enrolled}`);
+    if (running) parts.push("running");
+    this.reported = { install: record !== null, enroll: enrolled !== null };
+    if (parts.length > 0) this.answered(`Already done · ${parts.join(" · ")}`);
+  }
+
+  /** The re-run question: check everything and stop, change the agents, or update the worker. */
+  private async askRerun(record: InstallRecord): Promise<RunMode> {
+    this.updateTo = await this.newerRelease(record);
+    const options: Array<PromptOption<RunMode>> = [
+      { value: "check", label: "Check everything and stop" },
+      { value: "change", label: "Change coding agents or sessions" },
+    ];
+    if (this.updateTo !== null) {
+      options.push({ value: "update", label: `Update the worker to ${this.updateTo}` });
+    }
+    return this.prompter.select({
+      message: "What do you want to do?",
+      options,
+      initialValue: "check",
+    });
+  }
+
+  /**
+   * The release `pidgen worker update` would install: the newest of the server's current series on
+   * `record`'s track when it is newer (`resolveUpdate`, the rule update itself follows).
+   */
+  private async newerRelease(record: InstallRecord): Promise<string | null> {
+    try {
+      const { list } = await readWorkerReleases(this.ctx, this.global);
+      const index = packageIndex(this.answers.test || record.index === "testpypi");
+      const release = await resolveUpdate(this.ctx, selectSeries(list), index, record.version);
+      return release?.version ?? null;
+    } catch (error) {
+      if (!(error instanceof CliError)) throw error;
+      this.note(`Could not read the server's current worker release: ${error.message}`);
+      return null;
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 3. Choose coding agents
+
+  /**
+   * The coding agents the worker runs: `--agent`, else the question, with the ones on `PATH`
+   * pre-ticked. A chosen agent that is missing is installed with npm: ticking it (or naming it
+   * with `--agent`) is the consent, so nothing more is asked.
+   */
+  private async chooseAgents(): Promise<StepResult> {
+    if (this.mode !== "change") {
+      // Checking or updating a finished setup keeps the agents its node.yaml names.
+      const kinds = AGENT_KINDS.filter((kind) => this.survey?.caps[kind] !== undefined);
+      this.agents = kinds.map(codingAgent);
+      return {
+        status: "skipped",
+        summary: `The worker runs ${this.agents.map((agent) => agent.name).join(" and ")}.`,
+        agents: kinds,
+        installed: [],
+      };
+    }
+    const runtime = this.ctx.workerRuntime;
+    const found = new Map<AgentKind, string | null>();
+    for (const agent of CODING_AGENTS) {
+      found.set(agent.kind, await findAgent(this.ctx, agent, runtime));
+    }
+    let chosen: AgentKind[];
+    if (this.answers.agents.length > 0) {
+      chosen = this.answers.agents;
+      this.answered(
+        `Coding agents · ${chosen.map((kind) => codingAgent(kind).name).join(", ")} (from --agent)`,
+      );
+    } else {
+      chosen = await this.askAgents(found);
+    }
+    if (chosen.length === 0) {
+      throw new StepFailure(
+        new CliError(
+          "AGENT_REQUIRED",
+          "No coding agent was chosen; the worker needs one to run work.",
+          ExitCode.Usage,
+          { agents: [...AGENT_KINDS] },
+        ),
+        null,
+        `Tick a coding agent, or name it in advance with \`--agent\`: \`pidgen setup --agent ${AGENT_KINDS[0]}\` (repeat \`--agent\` for more than one).`,
+      );
+    }
+    const installed: AgentKind[] = [];
+    for (const kind of chosen) {
+      if (found.get(kind) !== null) continue;
+      await this.installAgent(codingAgent(kind));
+      installed.push(kind);
+    }
+    this.agents = chosen.map(codingAgent);
+    const names = this.agents.map((agent) => agent.name).join(" and ");
+    return {
+      status: "done",
+      summary: `The worker runs ${names}${installed.length > 0 ? `; setup installed ${installed.map((kind) => codingAgent(kind).name).join(" and ")}` : ""}.`,
+      agents: chosen,
+      installed,
+    };
+  }
+
+  /**
+   * The coding agents question: a multiselect of the agents setup installs, the ones on `PATH`
+   * ticked, and each harness the worker runs that setup does not manage (Pi), shown disabled when
+   * it is on `PATH`. Confirming none keeps it open.
+   */
+  private async askAgents(found: ReadonlyMap<AgentKind, string | null>): Promise<AgentKind[]> {
+    const options: Array<PromptOption<string>> = CODING_AGENTS.map((agent) => ({
+      value: agent.kind,
+      label: agent.name,
+      hint:
+        found.get(agent.kind) !== null
+          ? "on this machine"
+          : "not installed · setup installs it with npm",
+    }));
+    for (const shown of SHOWN_ONLY_AGENTS) {
+      if ((await findOnPath(this.ctx, shown.command, this.ctx.workerRuntime)) === null) continue;
+      options.push({
+        value: shown.kind,
+        label: shown.name,
+        hint: "on this machine · the worker runs it; setup doesn't manage it",
+        disabled: true,
+      });
+    }
+    const chosen = await this.prompter.multiselect({
+      message: "Which coding agents will this worker run?",
+      options,
+      initialValues: CODING_AGENTS.filter((agent) => found.get(agent.kind) !== null).map(
+        (agent) => agent.kind,
+      ),
+      required: "Choose at least one.",
+      footer: "↑/↓ move · space select · enter confirm",
+      collapse: (values) =>
+        `Coding agents · ${options
+          .filter((option) => values.includes(option.value))
+          .map((option) => option.label)
+          .join(", ")}`,
+    });
+    return AGENT_KINDS.filter((kind) => chosen.includes(kind));
+  }
+
+  /**
+   * Installs a missing agent with `npm install -g <package>`. When npm may not write its global
+   * directory (EACCES), the person runs the command, and setup looks on `PATH` again once they say
+   * it finished.
+   */
+  private async installAgent(agent: CodingAgent): Promise<void> {
+    const install = agentInstallCommand(agent);
+    const missing = (message: string) =>
+      new StepFailure(
+        agentNotFound(agent, message),
+        install,
+        `Install ${agent.name}: \`${install}\`.`,
+      );
+    this.begin(`Installing ${agent.name}…`, `Couldn't install ${agent.name}`);
+    this.note(`$ ${install}`);
+    const { status, output } = await this.runNpm(agent);
+    if (status !== 0) {
+      if (!/EACCES/.test(output)) {
+        throw new StepFailure(
+          new CliError(
+            "INSTALL_FAILED",
+            `npm exited with status ${status}; ${agent.name} was not installed.`,
+            ExitCode.Unexpected,
+            { harness: agent.kind, command: install, status },
+          ),
+          install,
+          `Read npm's output (its last lines above, all of it in the setup log) and fix what it names, or install it yourself: \`${install}\`.`,
+        );
+      }
+      this.progress(
+        `npm may not install ${agent.name} here`,
+        `npm can't install ${agent.name} here`,
+      );
+      this.failTask();
+      this.say(
+        [
+          `npm may not write to its global directory (EACCES), so setup cannot install ${agent.name}.`,
+          "Run this yourself in another terminal (with sudo, or after pointing npm's prefix at a directory you own):",
+          `  ${install}`,
+        ].join("\n"),
+      );
+      const finished = await this.prompter.confirm({
+        message: `Has \`${install}\` finished?`,
+        active: "Yes, it's installed",
+        inactive: "No, stop setup",
+      });
+      if (!finished)
+        throw missing(`${agent.name} was not installed. Install it with \`${install}\`.`);
+    }
+    if ((await findAgent(this.ctx, agent, this.ctx.workerRuntime)) === null) {
+      throw missing(
+        `${agent.name} (${agent.command}) is still not on PATH. Install it with \`${install}\`, and put npm's global bin directory (\`npm prefix -g\`/bin) on PATH.`,
+      );
+    }
+    if (this.active !== null) this.done(`${agent.name} installed`);
+    else this.answered(`${agent.name} installed`);
+  }
+
+  /** Runs `npm install -g <package>`: its output goes to the setup log and is kept. */
+  private runNpm(agent: CodingAgent): Promise<{ status: number; output: string }> {
+    const collected = collectedOutput(this.quiet.io)!;
+    const child = this.ctx.workerRuntime.spawn("npm", agentInstallArgs(agent), {
+      cwd: this.ctx.cwd,
+      env: agentEnvironment(this.ctx),
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: false,
+    });
+    const output: string[] = [];
+    const take = (chunk: Buffer) => {
+      output.push(chunk.toString("utf8"));
+      collected.write(chunk);
+    };
+    child.stdout?.on("data", take);
+    child.stderr?.on("data", take);
+    return exitStatus(child).then((status) => {
+      collected.end();
+      return { status, output: output.join("") };
+    });
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 4. Sign in to coding agents
+
+  /**
+   * Asks each chosen agent's status command first, then runs `pidgen worker login <agent>` only for
+   * those not signed in; an agent that cannot say is signed in only when the person asks.
+   */
+  private async signInAgents(): Promise<StepResult> {
+    const runtime = this.ctx.workerRuntime;
+    const logins: Partial<Record<AgentKind, AgentLogin>> = {};
+    for (const agent of this.agents) {
+      const executable = await findAgent(this.ctx, agent, runtime);
+      if (executable === null)
+        throw new StepFailure(
+          agentNotFound(agent),
+          null,
+          `Install ${agent.name}: \`${agentInstallCommand(agent)}\`.`,
+        );
+      const login = await agentStatus(this.ctx, executable, agent, runtime);
+      logins[agent.kind] = login;
+      this.note(`${agent.name}: ${login}`);
+      // A finished setup's agents were signed in before: only a change is said.
+      if (login === "ready" && this.mode === "change") this.answered(`${agent.name} signed in`);
+    }
+    let ran = false;
+    for (const agent of this.agents) {
+      const login = logins[agent.kind];
+      if (login === "ready") continue;
+      if (login === "unknown") {
+        const now = await this.prompter.confirm({
+          message: `Setup can't tell whether ${agent.name} is signed in. Sign in now?`,
+          inactive: "No, it's signed in",
+          initialValue: false,
+        });
+        if (!now) continue;
+      } else {
+        await this.prompter.select({
+          message: `${agent.name} needs you to sign in. Its own sign-in runs here; setup continues after it.`,
+          options: [{ value: true, label: "Press Enter to start" }],
+          collapse: () => `${agent.name} · signing in`,
+        });
+      }
+      const data = (await this.runCommand(
+        this.commands.agentLogin(agent.kind),
+        workerLogin,
+        { args: [agent.kind] },
+        (error) => {
+          const fix = error.details["fix"];
+          return typeof fix === "string" ? fix : "Fix the error.";
+        },
+      )) as { login: AgentLogin };
+      logins[agent.kind] = data.login;
+      if (data.login === "ready") this.answered(`${agent.name} signed in`);
+      ran = true;
+    }
+    const pending = this.agents.filter((agent) => logins[agent.kind] !== "ready");
+    return {
+      status: ran ? "done" : "skipped",
+      summary:
+        pending.length === 0
+          ? ran
+            ? `Signed in to ${this.agents.map((agent) => agent.name).join(" and ")}.`
+            : "All chosen coding agents are signed in."
+          : `Setup cannot tell whether ${pending.map((agent) => agent.name).join(" and ")} ${pending.length === 1 ? "is" : "are"} signed in: run ${pending.map((agent) => `\`${this.commands.agentLogin(agent.kind)}\``).join(" and ")} if not.`,
+      logins,
+    };
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 5. Size coding agent sessions
+
+  /**
+   * Asks how many sessions each chosen agent runs at once (`--sessions` or `--plan` answer in
+   * advance). The enroll step applies the caps once `node.yaml` exists.
+   */
+  private async sizeAgents(): Promise<StepResult> {
+    const plans: Partial<Record<AgentKind, string>> = {};
+    const caps = new Map<AgentKind, number>();
+    const current = await this.currentCaps();
+    if (this.mode !== "change") {
+      // Checking or updating keeps the caps; they are not applied again.
+      for (const agent of this.agents) caps.set(agent.kind, current[agent.kind]!);
+      return {
+        status: "skipped",
+        summary: `${this.agents.map((agent) => `${agent.name} runs up to ${sessions(caps.get(agent.kind)!)}`).join("; ")}.`,
+        plans,
+        caps: Object.fromEntries(caps),
+      };
+    }
+    for (const agent of this.agents) {
+      const plan = this.answers.plans[agent.kind];
+      const given = this.answers.sessions[agent.kind];
+      let cap: number;
+      if (given !== undefined) {
+        cap = given;
+        this.answered(`${agent.name} · ${sessions(cap)} (from --sessions)`);
+      } else if (plan !== undefined) {
+        cap = findPlan(agent.kind, plan)!.cap;
+        plans[agent.kind] = plan;
+        this.answered(`${agent.name} · ${sessions(cap)} (from --plan)`);
+      } else {
+        cap = await this.askSessions(agent, current[agent.kind]);
+      }
+      caps.set(agent.kind, cap);
+    }
+    this.caps = caps;
+    return {
+      status: "done",
+      summary: `${this.agents.map((agent) => `${agent.name} runs up to ${sessions(caps.get(agent.kind)!)}`).join("; ")}.`,
+      plans,
+      caps: Object.fromEntries(caps),
+    };
+  }
+
+  /**
+   * The sessions question: the numbers the agent's plans suggest, each with its plans as the hint,
+   * then Custom (a whole number from 1). It starts on `current`, the worker's cap on a re-run, else
+   * on the lowest.
+   */
+  private async askSessions(agent: CodingAgent, current: number | undefined): Promise<number> {
+    const options: Array<PromptOption<number | "custom">> = SESSION_HINTS[agent.kind].map(
+      (entry) => ({ value: entry.sessions, label: String(entry.sessions), hint: entry.hint }),
+    );
+    if (current !== undefined && !options.some((option) => option.value === current)) {
+      options.push({ value: current, label: String(current), hint: "this worker's current cap" });
+      options.sort((a, b) => Number(a.value) - Number(b.value));
+    }
+    options.push({ value: "custom", label: "Custom…" });
+    const collapse = (count: number) => `${agent.name} · ${sessions(count)}`;
+    const answer = await this.prompter.select({
+      message: `${agent.name}: how many sessions should run at once?`,
+      options,
+      initialValue:
+        current ?? Math.min(...SESSION_HINTS[agent.kind].map((entry) => entry.sessions)),
+      footer: `Change it later: pidgen-worker capacity set ${agent.kind} --max <n>`,
+      collapse: (value) => (value === "custom" ? `${agent.name} · Custom…` : collapse(value)),
+    });
+    if (answer !== "custom") return answer;
+    const typed = await this.prompter.text({
+      message: `${agent.name} sessions at a time`,
+      validate: (value) =>
+        wholeSessions(value) === null ? "Enter a whole number, 1 or more." : undefined,
+      collapse: (value) => collapse(wholeSessions(value)!),
+    });
+    return wholeSessions(typed)!;
+  }
+
+  /** Each coding agent's cap in the worker's `node.yaml` (from 1), when there is one. */
+  private async currentCaps(): Promise<Partial<Record<AgentKind, number>>> {
+    let text: string;
+    try {
+      text = await readFile(join(resolvePidgenHome(this.ctx), "config", "node.yaml"), "utf8");
+    } catch {
+      return {};
+    }
+    const caps: Partial<Record<AgentKind, number>> = {};
+    try {
+      const harnesses = (parseYaml(text) as { harnesses?: Record<string, { max?: unknown }> })
+        ?.harnesses;
+      for (const kind of AGENT_KINDS) {
+        const max = harnesses?.[kind]?.max;
+        if (typeof max === "number" && Number.isInteger(max) && max >= 1 && max <= SESSIONS_MAX) {
+          caps[kind] = max;
+        }
+      }
+    } catch {
+      // A node.yaml setup cannot read leaves the questions on their lowest answer.
+    }
+    return caps;
+  }
+
+  /**
+   * Applies the caps the capacity step chose with `pidgen-worker capacity set`: each chosen agent's,
+   * `--max 0` for every other harness, then the prompt pool. Exit 0 with a "saved", "saved (…)",
+   * "saved, apply pending" or "saved; …" line is success, wherever the line falls: the worker
+   * prints the file's path and digest before it. Exit 1 (a refused edit) or anything else fails the
+   * step.
+   */
+  private async applyCaps(ctx: RunContext, caps: Map<AgentKind, number>): Promise<Caps> {
+    const applied: Caps = {};
+    for (const args of capacityArgs(caps)) {
+      const command = capacityCommand(args);
+      this.note(`$ ${command}`);
+      let result: { status: number; output: string };
+      try {
+        result = await runWorkerCapacity(ctx, args, ctx.workerRuntime);
+      } catch (error) {
+        if (error instanceof CliError) {
+          throw new StepFailure(error, command, "Install the worker: `pidgen worker install`.");
+        }
+        throw error;
+      }
+      const output = result.output.trim();
+      if (output !== "") this.note(output);
+      const saved = output
+        .split("\n")
+        .map((line) => line.trim())
+        .some(
+          (line) =>
+            line === "saved" ||
+            line === "saved, apply pending" ||
+            line.startsWith("saved; ") ||
+            line.startsWith("saved ("),
+        );
+      if (result.status !== 0 || !saved) {
+        const refused = result.status === 1;
+        throw new StepFailure(
+          new CliError(
+            refused ? "CAPACITY_REFUSED" : "CAPACITY_FAILED",
+            `\`${command}\` ${refused ? "refused the edit" : `exited with status ${result.status}`}: ${output || "(no output)"}`,
+            ExitCode.Unexpected,
+            { command, status: result.status, output },
+          ),
+          command,
+          refused
+            ? "Fix what the worker names, then run the command again or run setup again."
+            : "Read the worker's output in the setup log; check the installed worker with `pidgen worker verify`.",
+        );
+      }
+      applied[args[1]!] = Number(args.at(-1));
+    }
+    return applied;
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 6. Choose a runtime
+
+  /**
+   * The install record when setup keeps that install: the form and version asked for (any, unless
+   * `--runtime` or `--version` say), and a worker the machine check did not fail.
+   */
+  private async keptInstall(): Promise<InstallRecord | null> {
+    let record: InstallRecord | null;
+    try {
+      record = await readInstallRecord(this.ctx);
+    } catch (error) {
+      if (error instanceof CliError) return null;
+      throw error;
+    }
     const { runtime, version } = this.answers;
-    this.skipInstall =
+    const kept =
       record !== null &&
       (runtime === undefined || record.form === runtime) &&
       (version !== undefined ? record.version === version : this.workerCheck?.status !== "fail");
+    return kept ? record : null;
+  }
+
+  private async chooseRuntime(): Promise<StepResult> {
+    const record = await readInstallRecord(this.ctx);
+    const { runtime } = this.answers;
+    this.skipInstall = (await this.keptInstall()) !== null;
     if (this.skipInstall && record !== null) {
       this.form = record.form;
       return {
@@ -639,18 +2083,33 @@ class SetupRun {
 
     const available = await this.availableForms();
     if (available.length === 0) {
-      throw new StepFailure(runtimeUnavailable(), null, RUNTIME_INSTRUCTIONS.wheel.instructions);
+      throw new StepFailure(
+        new CliError(
+          "RUNTIME_UNAVAILABLE",
+          "uv is required to install the worker and was not found on PATH.",
+          ExitCode.Usage,
+          { install: RUNTIME_INSTRUCTIONS, command: UV_INSTALL_COMMAND },
+        ),
+        null,
+        `Install uv: \`${UV_INSTALL_COMMAND}\`.`,
+      );
     }
-    const { list } = await readWorkerReleases(this.ctx, this.global);
+    if (available.length === 1) {
+      // While setup offers one form, nothing is asked.
+      this.form = available[0]!;
+      return {
+        status: "done",
+        summary: `The ${this.form} runtime is the one setup installs.`,
+        runtime: this.form,
+      };
+    }
     const fallback = record?.form ?? available[0]!;
-    this.say(licenceNotice(list.eula).trimEnd());
-    const choices = new Map(available.map((form) => [form, form] as const));
-    this.form = await this.choose(
-      `Worker runtime (${available.join(", ")}; the container runtime is planned) [${fallback}] `,
-      choices,
-      fallback,
-      available.join(" or "),
-    );
+    this.form = await this.prompter.select({
+      message: "Which worker runtime will this machine run?",
+      options: available.map((form) => ({ value: form, label: form })),
+      initialValue: fallback,
+      collapse: (form) => `Worker runtime · ${form}`,
+    });
     return { status: "done", summary: `The ${this.form} runtime was chosen.`, runtime: this.form };
   }
 
@@ -664,26 +2123,37 @@ class SetupRun {
   // 4. Install and verify
 
   private async install(): Promise<StepResult> {
+    if (this.mode === "update" && this.updateTo !== null) return this.update(this.updateTo);
     if (this.skipInstall) {
       const record = await readInstallRecord(this.ctx);
-      this.say("The worker is installed; skipping the install.");
+      this.note("The worker is installed; skipping the install.");
+      if (!this.reported.install) this.answered(`pidgen-worker ${record?.version} is installed`);
       return { status: "skipped", summary: `pidgen-worker ${record?.version} is installed.` };
     }
+    if (this.form === "wheel") await this.warnSharedWorker();
+    const command = this.commands.install(this.form);
     const installed = (await this.runCommand(
-      this.commands.install(this.form),
-      workerInstall,
-      { options: { runtime: this.form, version: this.answers.version, force: false } },
+      command,
+      this.installSpec(command),
+      {},
       installFix,
+      this.quiet,
+      null,
     )) as InstallRecord;
+    const verifying = "Verifying it was published by Pidgen's release workflow…";
+    const unverified = `pidgen-worker ${installed.version} didn't verify`;
+    if (this.active === null) this.begin(verifying, unverified);
+    else this.progress(verifying, unverified);
     const verified = (await this.runCommand(
       this.commands.verify(),
       workerVerify,
       {},
-      () => `Reinstall it with \`pidgen worker install --force\`; ${AGAIN}`,
+      () => "Reinstall it with `pidgen worker install --force`.",
     )) as { checks: DoctorCheck[] };
     for (const entry of verified.checks) {
-      this.say(`  ${entry.status.padEnd(4)}  ${entry.id}  ${entry.summary}`);
+      this.note(`${entry.status.padEnd(4)}  ${entry.id}  ${entry.summary}`);
     }
+    this.done(`pidgen-worker ${installed.version} installed and verified`);
     return {
       status: "done",
       summary: `pidgen-worker ${installed.version} is installed and verified (${installed.digest}).`,
@@ -691,23 +2161,135 @@ class SetupRun {
     };
   }
 
+  /**
+   * The re-run's update: `pidgen worker update --restart`, verified as an install is, and the
+   * running worker restarted on it. Choosing the update in the re-run question is the consent.
+   */
+  private async update(version: string): Promise<StepResult> {
+    const record = await readInstallRecord(this.ctx);
+    const test = this.answers.test || record?.index === "testpypi";
+    const command = this.commands.pidgen([
+      "worker",
+      "update",
+      "--restart",
+      ...(test ? ["--test"] : []),
+    ]);
+    this.begin(
+      `Updating pidgen-worker to ${version}…`,
+      `Couldn't update pidgen-worker to ${version}`,
+    );
+    const updated = (await this.runCommand(
+      command,
+      workerUpdate,
+      { options: { restart: true, test } },
+      (error) =>
+        error.code === "UPDATE_ROLLED_BACK"
+          ? "The new release didn't start, so the previous one runs again; read the worker's log."
+          : "Read the output in the setup log and fix what it names.",
+    )) as InstallRecord & { previous_version: string };
+    this.done(`pidgen-worker ${updated.version} installed, verified and running`);
+    return {
+      status: "done",
+      summary: `pidgen-worker ${updated.previous_version} was updated to ${updated.version} and restarted.`,
+      command,
+      version: updated.version,
+    };
+  }
+
+  /**
+   * `pidgen worker install` as setup runs it: once the release is chosen, and before anything is
+   * downloaded or run, the one install question (install pidgen-worker <version> and accept its
+   * licence; `--accept-licence` answers it), then the command's line. The licence notice is not
+   * printed again. Declining stops setup with `SETUP_CANCELLED`: the person stopped it.
+   */
+  private installSpec(command: string): CommandSpec {
+    return {
+      path: ["worker", "install"],
+      summary: "Install the worker",
+      configure: () => undefined,
+      run: async (ctx, { global }) => {
+        assertSupportedPlatform(ctx.workerRuntime);
+        const { record, installed, meta } = await installWorker(ctx, global, {
+          runtime: this.form,
+          version: this.answers.version,
+          test: this.answers.test,
+          force: false,
+          printLicence: false,
+          beforeInstall: async (release, list) => {
+            await this.confirmInstall(release.version, list.eula.name);
+            this.begin(
+              `Installing pidgen-worker ${release.version}…`,
+              `Couldn't install pidgen-worker ${release.version}`,
+            );
+            this.note(`$ ${command}`);
+          },
+        });
+        return { data: { ...record, installed }, meta };
+      },
+    };
+  }
+
+  /**
+   * The install question: one confirm for the install and the licence it accepts, naming the
+   * licence and linking its full text. Answered with `--accept-licence`, the screen shows the one
+   * answered line; the log records the licence's lines under it either way.
+   */
+  private async confirmInstall(version: string, licence: string): Promise<void> {
+    const message = `Install pidgen-worker ${version} and accept its licence?`;
+    const detail = [`The worker is proprietary software under the ${licence}.`, WORKER_EULA_LINK];
+    if (this.answers.acceptLicence) {
+      this.answered(`${message} · Yes (from --accept-licence)`);
+      for (const line of detail) this.log.line(`  ${line}`);
+      return;
+    }
+    const yes = await this.prompter.confirm({ message, detail: detail.join("\n") });
+    if (yes) return;
+    throw new CliError(
+      "SETUP_CANCELLED",
+      `The licence wasn't accepted, so the worker wasn't installed.`,
+      ExitCode.Usage,
+      { version, licence },
+    );
+  }
+
+  /**
+   * One warning line when uv's shared tool slot holds a `pidgen-worker` the install record does not
+   * name: setup installs its own copy in the worker home and leaves that one alone.
+   */
+  private async warnSharedWorker(): Promise<void> {
+    const shared = await sharedUvWorker(this.quiet);
+    if (shared === null) return;
+    const record = await readInstallRecord(this.ctx);
+    if (record !== null && record.location === shared.location) return;
+    const shown = this.shownPath(resolvePidgenHome(this.ctx));
+    this.warn(
+      `Another pidgen-worker ${shared.version} is installed with uv (${shared.location}); setup installs its own copy in ${shown} and leaves that one alone.`,
+    );
+  }
+
   // -------------------------------------------------------------------------------------------
   // 5. Enroll and start
 
+  /**
+   * Enrolls this install's worker unless it is enrolled, applies the caps, and starts it. It is
+   * enrolled only when this install's worker home holds a credential (`worker.env` with
+   * `PIDGEN_NODE_TOKEN`) for the configured server, and `GET /workers` lists its host id
+   * unrevoked; a worker listed under this host's name that is not this install's is never adopted.
+   * A worker whose home holds no credential is never started.
+   */
   private async enrollAndStart(): Promise<StepResult> {
     const c = this.commands;
-    const { ctx, prefix } = await this.workerContext();
-    const host = this.ctx.hostName;
+    const ctx = this.quiet;
 
-    const read = await this.readWorkers();
+    const { read, enrolled, revoked, hostId: found } = await this.enrollmentState();
     const local = await localWorkerStatus(ctx, ctx.workerRuntime);
-    // A credential that cannot read the list (a Personal API Token) leaves only the local view: a
-    // worker that is running was enrolled.
-    const enrolled = read.view !== null ? read.view.enrolled : local.running;
+    let hostId = found;
+    let enroll = c.enroll(hostId);
     let ran = false;
 
     if (enrolled) {
-      this.say(`${host} is enrolled; skipping the enrollment.`);
+      this.note(`${hostId} is enrolled; skipping the enrollment.`);
+      if (!this.reported.enroll) this.answered(`${hostId} is enrolled in ${this.accountName()}`);
     } else {
       const permission = this.signedIn?.permission;
       if (permission !== undefined && !permission.allowed) {
@@ -719,70 +2301,191 @@ class SetupRun {
             ExitCode.Auth,
             { account, role: permission.role, roles: [...ENROLL_ROLES], scope: ENROLL_SCOPE },
           ),
-          c.enroll(),
-          `Ask an Account Owner or Administrator to run setup, or sign in with a Personal API Token that has ${ENROLL_SCOPE}: \`${c.tokenLogin(account)}\`; ${AGAIN}`,
+          enroll,
+          `Ask an Account Owner or Administrator to run setup, or sign in with a Personal API Token that has ${ENROLL_SCOPE}: \`${c.tokenLogin(account)}\`.`,
         );
       }
+      if (revoked) await this.confirmEnrollAgain(enroll);
+      hostId = await this.chooseName(read.list, revoked ? hostId : this.ctx.hostName);
+      enroll = c.enroll(hostId);
+      this.begin(`Enrolling as ${hostId}…`, `Couldn't enroll ${hostId}`);
       await this.runCommand(
-        c.enroll(),
+        enroll,
         workerEnroll,
-        { options: { label: this.answers.label } },
+        { args: ["--host-id", hostId], options: { label: hostId } },
         enrollFix,
         ctx,
-        `${prefix}${c.enroll()}`,
       );
+      this.done(`Enrolled as ${hostId} in ${this.accountName()}`);
       ran = true;
     }
 
+    this.begin(
+      local.running && this.caps === null ? "Checking the worker…" : "Starting the worker…",
+      "Couldn't set the worker's sessions",
+    );
+    // node.yaml exists once the worker is enrolled; a running manager applies the edit itself.
+    const capacity = this.caps !== null ? await this.applyCaps(ctx, this.caps) : null;
+    if (capacity !== null) ran = true;
+
+    if (this.active !== null) this.active.failure = "The worker didn't start";
     if (local.running && local.record !== null) {
-      this.say(`pidgen-worker is already running (pid ${local.record.pid}); skipping the start.`);
+      this.note(`pidgen-worker is already running (pid ${local.record.pid}); skipping the start.`);
     } else {
+      await this.requireCredential(ctx, enroll);
       await this.runCommand(
         c.start(),
         workerStart,
         { options: { detach: true } },
         (error) =>
           error.code === "WORKER_EXITED"
-            ? `Read error.details.log_tail and the worker's log, fix what it names; ${AGAIN}`
-            : `Fix the error; ${AGAIN}`,
+            ? "Read error.details.log_tail and the worker's log, and fix what it names."
+            : "Fix the error.",
         ctx,
-        `${prefix}${c.start()}`,
       );
       ran = true;
     }
 
-    const connected = await this.waitConnected(read, ctx);
+    const connected = await this.waitConnected(read, ctx, hostId);
+    this.done(
+      connected === true
+        ? "Worker running and connected to Pidgen"
+        : "Worker running · this credential can't confirm it connected",
+    );
     return {
       status: ran ? "done" : "skipped",
       summary:
         connected === true
-          ? `${host} is enrolled, running, and connected to the App Service.`
-          : `${host} is enrolled and running. This credential cannot read GET /workers (${read.refused?.code ?? "refused"}), so setup cannot confirm it connected: run \`${c.status()}\` signed in as an Account Owner or Administrator.`,
-      host_id: host,
+          ? `${hostId} is enrolled, running, and connected to the App Service.`
+          : `${hostId} is enrolled and running. This credential cannot read GET /workers (${read.refused?.code ?? "refused"}), so setup cannot confirm it connected: run \`${c.status()}\` signed in as an Account Owner or Administrator.`,
+      // The enroll command names the worker's name, which is known only now.
+      command: `${enroll} && ${c.start()}`,
+      host_id: hostId,
       connected,
+      ...(capacity !== null ? { capacity } : {}),
     };
   }
 
   /**
-   * The context worker commands run in: when `pidgen-worker` is not on `PATH` (uv's tool directory
-   * often is not), `PIDGEN_WORKER_BIN` names the installed one, and the printed commands say so.
+   * Whether this install's worker is enrolled: its worker home holds a credential (`worker.env`
+   * with `PIDGEN_NODE_TOKEN`) for the configured server, and `GET /workers` lists its host id
+   * unrevoked (a credential that cannot read the list leaves the local credential to decide).
    */
-  private async workerContext(): Promise<{ ctx: RunContext; prefix: string }> {
-    if ((await findWorker(this.ctx, this.ctx.workerRuntime)) !== null) {
-      return { ctx: this.ctx, prefix: "" };
-    }
-    const record = await readInstallRecord(this.ctx);
-    if (record === null) return { ctx: this.ctx, prefix: "" };
-    this.say(
-      `pidgen-worker is not on PATH; using ${record.location}. Add its directory to PATH (\`uv tool update-shell\`) to run it by name.`,
-    );
+  private async enrollmentState(): Promise<{
+    read: WorkersRead;
+    enrolled: boolean;
+    revoked: boolean;
+    hostId: string;
+  }> {
+    const home = await readWorkerCredential(this.quiet);
+    const ours =
+      home.credential && home.serviceUrl !== null && sameServer(home.serviceUrl, this.answers.url);
+    const read = await this.readWorkers();
+    const hostId = ours && home.hostId !== null ? home.hostId : this.answers.label;
+    if (read.list === null) return { read, enrolled: ours, revoked: false, hostId };
+    const view = ours && home.hostId !== null ? serverView(read.list, home.hostId) : null;
     return {
-      ctx: { ...this.ctx, env: { ...this.ctx.env, PIDGEN_WORKER_BIN: record.location } },
-      prefix: `PIDGEN_WORKER_BIN=${displayArgument(record.location)} `,
+      read,
+      enrolled: view?.enrolled === true,
+      revoked: view !== null && !view.enrolled && view.worker !== null,
+      hostId,
     };
   }
 
-  /** `GET /workers`, this host's entry in it, or the refusal of a credential that cannot read it. */
+  /** The Account's name, as the person knows it, else its id. */
+  private accountName(): string {
+    const account = this.signedIn?.target.account ?? null;
+    const membership = this.signedIn?.me.memberships.find((entry) => entry.account_id === account);
+    return membership?.account_name ?? account ?? "the Account";
+  }
+
+  /** Asks whether to enroll a worker the Account revoked again (default yes); no stops setup. */
+  private async confirmEnrollAgain(enroll: string): Promise<void> {
+    const again = await this.prompter.confirm({
+      message: `This machine's worker was removed from ${this.accountName()}. Enroll it again?`,
+    });
+    if (again) return;
+    throw new StepFailure(
+      new CliError(
+        "SETUP_CANCELLED",
+        `This machine's worker was removed from ${this.accountName()}, and enrolling it again was declined; nothing was enrolled or started.`,
+        ExitCode.Usage,
+        {},
+      ),
+      enroll,
+      "Answer yes to enroll it again.",
+    );
+  }
+
+  /**
+   * The worker's name, which is also its host id: `--label`, else `preferred` when the Account lists
+   * no unrevoked worker under it, else the name question, defaulting to the next free name.
+   */
+  private async chooseName(list: WorkerList | null, preferred: string): Promise<string> {
+    if (this.answers.labelGiven) {
+      const name = this.answers.label;
+      if (list !== null && nameTaken(list, name)) {
+        throw new StepFailure(
+          new CliError(
+            "CLI_USAGE",
+            `${this.accountName()} already has a worker named ${name}, and it isn't this install's; nothing was enrolled.`,
+            ExitCode.Usage,
+            { host_id: name },
+          ),
+          this.commands.enroll(name),
+          `Choose another name: \`pidgen setup --label ${displayArgument(nextFreeName(list, name))}\``,
+        );
+      }
+      return name;
+    }
+    if (list === null || !nameTaken(list, preferred)) return preferred;
+
+    const other = list.workers.find(
+      (worker) => worker.host_id === preferred && worker.revoked_at === null,
+    )!;
+    const account = this.accountName();
+    this.say(
+      [
+        `│\n▲  ${account} already has a worker named ${preferred} (${other.connected ? "connected" : "not connected"}; enrolled ${shortDate(other.created_at)}).`,
+        "   It isn't this install: it keeps its settings in another folder on this machine.",
+      ].join("\n"),
+    );
+    const fallback = nextFreeName(list, preferred);
+    const name = await this.prompter.text({
+      message: "Name for this worker",
+      defaultValue: fallback,
+      validate: (value) => {
+        const answer = value.trim();
+        if (answer === "") return "Enter a name for this worker.";
+        if (answer.length > LABEL_MAX) return `A worker's name is at most ${LABEL_MAX} characters.`;
+        if (nameTaken(list, answer)) {
+          return `${answer} is taken: ${account} already has a worker by that name.`;
+        }
+        return undefined;
+      },
+      collapse: (value) => `Worker name · ${value.trim()}`,
+    });
+    return name.trim();
+  }
+
+  /** Stops setup before `pidgen worker start` when the worker home holds no credential. */
+  private async requireCredential(ctx: RunContext, enroll: string): Promise<void> {
+    const home = await readWorkerCredential(ctx);
+    if (home.credential) return;
+    const report = "pidgen feedback --kind not-working";
+    throw new StepFailure(
+      new CliError(
+        "ENROLL_FAILED",
+        `The worker has no credential for Pidgen (${home.path} holds no PIDGEN_NODE_TOKEN), so setup did not start it. That's a setup bug. Please report it: \`${report}\`.`,
+        ExitCode.Unexpected,
+        { path: home.path },
+      ),
+      enroll,
+      `Report it with \`${report}\``,
+    );
+  }
+
+  /** `GET /workers`, or the refusal of a credential that cannot read it. */
   private async readWorkers(): Promise<WorkersRead> {
     const session = await openSession(this.ctx, this.global);
     try {
@@ -799,24 +2502,34 @@ class SetupRun {
           { route: `GET ${WORKERS_ROUTE.path}` },
         );
       }
-      return { view: serverView(list as WorkerList, this.ctx.hostName), refused: null };
+      return { list: list as WorkerList, refused: null };
     } catch (error) {
       if (error instanceof CliError && error.exitCode === ExitCode.Auth) {
-        return { view: null, refused: error };
+        return { list: null, refused: error };
       }
       throw error;
     }
   }
 
   /**
-   * Reads `GET /workers` until it reports this host connected, for up to the global `--timeout`.
-   * `null` when the credential cannot read the list; a timeout fails with `WORKER_NOT_CONNECTED`.
+   * Reads `GET /workers` until it reports the worker named `host` connected, for up to the global
+   * `--timeout`. `null` when the credential cannot read the list; a timeout fails with
+   * `WORKER_NOT_CONNECTED`.
    */
-  private async waitConnected(first: WorkersRead, ctx: RunContext): Promise<true | null> {
+  private async waitConnected(
+    first: WorkersRead,
+    ctx: RunContext,
+    host: string,
+  ): Promise<true | null> {
     if (first.refused !== null) return null;
-    const host = this.ctx.hostName;
     const seconds = this.global.timeoutSeconds;
-    this.say(`Waiting for the App Service to report ${host} connected (up to ${seconds} seconds)…`);
+    this.progress(
+      "Waiting for Pidgen to report the worker connected…",
+      `Pidgen didn't report ${host} connected`,
+    );
+    this.note(
+      `Waiting for the App Service to report ${host} connected (up to ${seconds} seconds)…`,
+    );
     const deadline = this.ctx.now() + seconds * 1000;
     let last: ServerView | null = null;
     let lastError: CliError | null;
@@ -825,9 +2538,9 @@ class SetupRun {
       try {
         const read = await this.readWorkers();
         if (read.refused !== null) return null;
-        last = read.view;
+        last = serverView(read.list, host);
         if (last.worker?.connected === true && last.worker.revoked_at === null) {
-          this.say(`${host} is connected.`);
+          this.note(`${host} is connected.`);
           return true;
         }
       } catch (error) {
@@ -856,7 +2569,16 @@ class SetupRun {
         },
       ),
       this.commands.start(),
-      `Read the worker's log${log ? ` (${log})` : ""} and run \`${this.commands.workerDoctor()}\`; fix what they name, ${AGAIN} (a longer --timeout waits longer).`,
+      `Read the worker's log${log ? ` (${log})` : ""} and run \`${this.commands.workerDoctor()}\`, and fix what they name (a longer --timeout waits longer).`,
+      {
+        headline: `The worker is running, but Pidgen hasn't seen it after ${seconds} seconds.`,
+        lines: [
+          `This is usually the network: a proxy or firewall between this machine and ${new URL(this.answers.url).host}.`,
+          "Check the worker log for the connection error.",
+          ...(log ? [`Worker log: ${this.shownPath(log)}`] : []),
+        ],
+        end: `${plainText(CONTINUE)} With --timeout ${Math.max(300, seconds * 2)} it waits longer.`,
+      },
     );
   }
 
@@ -864,24 +2586,16 @@ class SetupRun {
   // 6. Prove it
 
   private async prove(): Promise<StepResult> {
-    const { ctx, prefix } = await this.workerContext();
+    this.begin("Running the worker's checks…", "The worker's checks failed");
     const report = await this.runCommand(
       this.commands.workerDoctor(),
       workerDoctor,
       {},
-      () => `Fix what error.details (the worker's report) names, ${AGAIN}.`,
-      ctx,
-      `${prefix}${this.commands.workerDoctor()}`,
+      () => "Fix what error.details (the worker's report) names.",
     );
-    this.say("The worker's own checks passed.");
-    const next = await this.nextCommand();
-    this.say(`\nNext: ${next.why}\n  ${next.command}`);
-    return {
-      status: "done",
-      summary: "The worker's own checks passed.",
-      report,
-      next: next.command,
-    };
+    this.done("Worker checks passed");
+    // `next` is filled in when setup ends, with the one next thing to do.
+    return { status: "done", summary: "The worker's own checks passed.", report, next: null };
   }
 
   /** The one next thing to do: install the agent skills, or, with them installed, file a ticket. */
@@ -896,20 +2610,75 @@ class SetupRun {
     return current
       ? {
           command: this.commands.pidgen(["ticket", "template"]),
-          why: "file a first ticket: write it from the template, then `pidgen ticket create -f <file>`.",
+          why: "write a first ticket from the template, then file it with pidgen ticket create -f <file>",
         }
       : {
           command: this.commands.pidgen(["skills", "install"], { account: false }),
-          why: "install the Pidgen agent skills, so your coding agent can file and follow work.",
+          why: "install the agent skills so your coding agent can file and follow work",
         };
   }
+}
+
+/**
+ * The prompter, with each question and its answer also written to the setup log. A question
+ * never opens while a task's spinner runs: setup ends a task before it asks.
+ */
+function loggedPrompter(prompter: Prompter, log: SetupLog): Prompter {
+  const asked = async <T>(message: string, answer: Promise<T>, detail?: string): Promise<T> => {
+    log.event(`question: ${message}`);
+    for (const line of detail ? detail.split("\n") : []) log.line(`  ${line}`);
+    try {
+      const value = await answer;
+      log.event(`answer: ${JSON.stringify(value)}`);
+      return value;
+    } catch (error) {
+      if (error instanceof PromptCancelled) log.event("answer: cancelled (Ctrl-C)");
+      throw error;
+    }
+  };
+  return {
+    intro: (title) => {
+      log.event(title);
+      prompter.intro(title);
+    },
+    outro: (message) => {
+      log.event(message);
+      prompter.outro(message);
+    },
+    cancel: (message, next) => {
+      log.event(`${message} ${next}`);
+      prompter.cancel(message, next);
+    },
+    select: (question) => asked(question.message, prompter.select(question)),
+    multiselect: (question) => asked(question.message, prompter.multiselect(question)),
+    text: (question) => asked(question.message, prompter.text(question)),
+    confirm: (question) => asked(question.message, prompter.confirm(question), question.detail),
+    spinner: () => prompter.spinner(),
+    taskLog: (title) => prompter.taskLog(title),
+  };
+}
+
+/** A child process's exit status; one that could not start is `ExitCode.Unexpected`. */
+function exitStatus(child: ChildProcess): Promise<number> {
+  return new Promise((resolveStatus) => {
+    let settled = false;
+    const settle = (status: number) => {
+      if (settled) return;
+      settled = true;
+      resolveStatus(status);
+    };
+    child.once("error", () => settle(ExitCode.Unexpected));
+    child.once("close", (code: number | null) => settle(code ?? ExitCode.Unexpected));
+  });
 }
 
 /** The fix for a failed `pidgen worker install`. */
 function installFix(error: CliError): string {
   switch (error.code) {
+    case "SETUP_CANCELLED":
+      return "Run `pidgen setup` again and accept the licence to install the worker (or give `--accept-licence`).";
     case "RUNTIME_UNAVAILABLE":
-      return `${RUNTIME_INSTRUCTIONS.wheel.instructions.replace("pidgen worker install", "pidgen setup")}`;
+      return `Install uv: \`${UV_INSTALL_COMMAND}\`.`;
     case "RELEASE_UNSUPPORTED": {
       const accepted = error.details["accepted"];
       const list = Array.isArray(accepted) ? accepted.join(", ") : "a series the server accepts";
@@ -920,19 +2689,19 @@ function installFix(error: CliError): string {
     case "NOT_FOUND":
       return "The server does not publish its worker release list yet; ask its operator, and run `pidgen setup` again later.";
     case "INSTALL_FAILED":
-      return `Read uv's output above and fix what it names; ${AGAIN}.`;
+      return "Read uv's output (its last lines above, all of it in the setup log) and fix what it names.";
     default:
-      return `Fix the error; ${AGAIN}.`;
+      return "Fix the error.";
   }
 }
 
 /** The fix for a failed `pidgen worker enroll`. */
 function enrollFix(error: CliError): string {
   if (error.exitCode === ExitCode.Auth) {
-    return `This credential may not enroll workers here: an Account Owner or Administrator can, or a Personal API Token with ${ENROLL_SCOPE}; ${AGAIN}.`;
+    return `This credential may not enroll workers here: an Account Owner or Administrator can, or a Personal API Token with ${ENROLL_SCOPE}.`;
   }
   if (error.code === "ENTITLEMENT_LIMIT_REACHED") {
-    return `The Account has enrolled all the workers it may; revoke one in the web app, ${AGAIN}.`;
+    return "The Account has enrolled all the workers it may; revoke one in the web app.";
   }
-  return `Fix the error; ${AGAIN}. The unused enrollment expires on its own.`;
+  return "Fix the error. The unused enrollment expires on its own.";
 }

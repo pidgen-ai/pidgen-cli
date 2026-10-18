@@ -22,7 +22,8 @@ only what the person triaging has decided. Never invent an answer, a priority or
 pidgen request list --state new --format json
 ```
 
-`data` is the list of requests, newest first. Narrow it with `--kind bug`, `--target
+`data` is the list of requests, newest first. Each is named by its key in `id`, `REQ-{n}` (e.g.
+`REQ-12`); pass that key to every command below. Narrow it with `--kind bug`, `--target
 project:EXAMPLE` (or `domain:<id>`), `--source <id>` or `--query "export"`; `--page` and
 `--per-page` read one page. Also list `--state acknowledged` for requests already seen: one that
 was asked a question and no longer has `waiting_on_requester` set has its answer in the timeline.
@@ -30,7 +31,7 @@ was asked a question and no longer has `waiting_on_requester` set has its answer
 ## 2. Read one request
 
 ```console
-pidgen request show conv-EXAMPLE --format json
+pidgen request show REQ-12 --format json
 ```
 
 `data.request` carries `state`, `kind`, `title`, `body` (the requester's text, never rewritten),
@@ -49,17 +50,17 @@ When the request is understood but not yet decided, acknowledge it so the reques
 seen:
 
 ```console
-pidgen request acknowledge conv-EXAMPLE --format json
+pidgen request acknowledge REQ-12 --format json
 ```
 
 When something is missing (a bug without its steps, a feature with no outcome), ask:
 
 ```console
-pidgen request reply conv-EXAMPLE --text "Which browser were you using when the export lost a row?" --ask --format json
+pidgen request reply REQ-12 --text "Which browser were you using when the export lost a row?" --ask --format json
 ```
 
 The request then waits on the requester (`data.request.waiting_on_requester` is true); come back
-to it when they answer. `pidgen request reply conv-EXAMPLE --text "..." --format json` without `--ask` sends a
+to it when they answer. `pidgen request reply REQ-12 --text "..." --format json` without `--ask` sends a
 reply that asks nothing. `REQUEST_REPLIES_OFF` (exit 5) means the request's source does not carry
 replies to the requester: you cannot ask through Pidgen, so decide with what the request already
 holds, accepting a bug's missing details as unknown (step 4) or closing it (step 5).
@@ -69,14 +70,14 @@ holds, accepting a bug's missing details as unknown (step 4) or closing it (step
 Accept a request the team will do, with a priority when the person gave one:
 
 ```console
-pidgen request accept conv-EXAMPLE --priority P2 --format json
+pidgen request accept REQ-12 --priority P2 --format json
 ```
 
 A bug is accepted only with its steps, expected and actual results. When the requester cannot give
 one and the bug is still worth doing, name the missing ones as unknown:
 
 ```console
-pidgen request accept conv-EXAMPLE --priority P3 --unknown steps --format json
+pidgen request accept REQ-12 --priority P3 --unknown steps --format json
 ```
 
 `REQUEST_BUG_DETAILS_REQUIRED` (exit 5) means a detail is missing and not named unknown: ask the
@@ -89,8 +90,8 @@ Close a request that will not be done. `--reason` is required, one of `cannot_re
 `duplicate` names the request it duplicates, and `other` carries a note:
 
 ```console
-pidgen request close conv-EXAMPLE --reason duplicate --duplicate-of conv-EXAMPLE2 --format json
-pidgen request close conv-EXAMPLE --reason other --note "Covered by the export rewrite already planned." --format json
+pidgen request close REQ-12 --reason duplicate --duplicate-of REQ-11 --format json
+pidgen request close REQ-12 --reason other --note "Covered by the export rewrite already planned." --format json
 ```
 
 Find the original with `pidgen request list --query "<words from the title>" --format json` before closing as a
@@ -103,13 +104,14 @@ Promote an accepted request when the team is ready to plan it. The ticket goes t
 request targets; `--project` confirms it:
 
 ```console
-pidgen request promote conv-EXAMPLE --format json
-pidgen request promote conv-EXAMPLE --project EXAMPLE --format json
-pidgen request promote conv-EXAMPLE --project EXAMPLE --workflow-type implementation --no-refine --format json
+pidgen request promote REQ-12 --format json
+pidgen request promote REQ-12 --project EXAMPLE --format json
+pidgen request promote REQ-12 --project EXAMPLE --workflow-type implementation --no-refine --format json
 ```
 
 Promotion carries every attachment to the ticket and starts refinement unless `--no-refine`.
-`data.ticket_id` is the new ticket; read it with `pidgen ticket show --format json`. A retry answers the same
+`data.ticket_key` names the new ticket (`data.ticket_id` is its id); read it with
+`pidgen ticket show <ticket_key> --format json`. A retry answers the same
 ticket, so repeating a promote after a network failure is safe. Use `pidgen project list --format json` to find
 the Project and `pidgen ticket types --format json` for a workflow type. `REQUEST_TARGET_NEEDS_PROJECT` (exit 5)
 means the request targets a Domain or nothing, or not the `--project` given: it must target a

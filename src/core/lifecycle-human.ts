@@ -19,6 +19,7 @@ export const LIFECYCLE_PRESENTATIONS: Readonly<Record<string, string>> = {
   "worker status": "Worker status",
   "worker verify": "Worker verification",
   "worker doctor": "Worker diagnostics",
+  "worker login": "Coding agent signed in.",
   "worker subscriptions": "Worker subscriptions",
   "worker subscriptions use": "Primary subscription changed.",
   setup: "Setup complete.",
@@ -38,15 +39,20 @@ export function renderLifecycle(
   data: unknown,
   columns?: number,
   now?: number,
+  /** Lines the command adds under the heading, such as why nothing was updated. */
+  extraNotes: readonly string[] = [],
 ): string | undefined {
   let heading = LIFECYCLE_PRESENTATIONS[command];
   if (!heading) return undefined;
   const row = isRecord(data) ? data : {};
-  const notes: string[] = [];
+  const notes: string[] = [...extraNotes];
   if (command === "worker install" && row["installed"] === false)
     heading = "Worker already installed.";
   if (command === "worker update" && row["updated"] === false)
     heading = "Worker already up to date.";
+  if (command === "worker login" && row["login"] === "unknown") {
+    heading = "Coding agent login finished; it cannot report whether it is signed in.";
+  }
   if (command === "worker subscriptions use" && row["outcome"] !== "applied") {
     heading = "Outcome unknown — check the worker's subscriptions before retrying.";
   }

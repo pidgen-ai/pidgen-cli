@@ -7,6 +7,12 @@ export class CliError extends Error {
   readonly code: string;
   readonly exitCode: ExitCode;
   readonly details: ErrorDetails;
+  /**
+   * What a terminal shows on standard output in place of the generic rendering of this error, when
+   * the command has already told the person (as `pidgen setup` draws its own failure block). JSON
+   * output is unaffected.
+   */
+  human?: string;
 
   constructor(code: string, message: string, exitCode: ExitCode, details: ErrorDetails = {}) {
     super(message);

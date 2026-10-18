@@ -22,23 +22,28 @@ the machine is documented by the worker itself:
 ## Set up a worker
 
 ```console
-$ pidgen setup [--runtime wheel] [--version <version>] [--label <label>] [--url <url>]
+$ pidgen setup [--runtime wheel] [--version <version>] [--label <label>] [--url <url>] [--agent claude|codex]… [--plan <agent>=<plan>]…
 ```
 
 `pidgen setup` is the guided path from a fresh machine to a verified worker running your Account's
 work, and the CLI's one interactive command. It checks the machine (`pidgen doctor`), signs you in
-with a device code, lets you choose an Account when you belong to several, asks which runtime
+with a device code, lets you choose an Account when you belong to several, asks which coding
+agents the worker runs (Claude Code, Codex; those on `PATH` pre-checked, or `--agent`), installs a
+chosen one that is missing with npm when you say yes, signs in to each that is not signed in
+(`pidgen worker login claude|codex`), asks each chosen agent's subscription plan (or `--plan`,
+such as `--plan claude=max-5x`) and turns it into that agent's concurrent-session cap, asks which runtime
 to install (currently `wheel`, with the licence notice), installs and verifies the worker (`pidgen
-worker install`, `pidgen worker verify`), enrolls and starts it (`pidgen worker enroll`, `pidgen
-worker start --detach`), waits until the App Service reports it connected, and proves it (`pidgen
+worker install`, `pidgen worker verify`), enrolls it (`pidgen worker enroll`), applies the caps
+(`pidgen-worker capacity set`), starts it (`pidgen worker start --detach`), waits until the App Service reports it connected, and proves it (`pidgen
 worker doctor`). Before enrolling it says whether your credential may enroll workers and, when it
 may not, which roles can and how to sign in with a Personal API Token that has `workers:enroll`.
 
 Guided container setup is *planned*. Use the wheel runtime for the complete installation,
 enrollment, and startup path through this CLI.
 
-It prints each step as the `pidgen` command it runs, so the path can be scripted from the commands
-on this page. Running it again resumes: a signed-in profile, an installed worker and an enrolled
+Each step is one of the `pidgen` commands on this page, so the path can be scripted from them; setup
+shows each action as one line and records the commands it runs, with their output, in its setup log
+(`~/.pidgen/logs/setup-<start time>.log`; `--verbose` shows them as they run). Running it again resumes: a signed-in profile, an installed worker and an enrolled
 host are skipped. Without a terminal it exits 2 with `TERMINAL_REQUIRED` and lists those commands
 in `error.details.commands` ([Commands](commands.md#setup)).
 
@@ -98,12 +103,17 @@ else the hosted server, `https://api.pidgen.ai`.
 3. It asks the package index for the series: PyPI, or TestPyPI with `--test`. It takes the newest
    release of the series (or exactly `--version`), skipping yanked files, and that release's wheel
    for this machine: the CPython 3.12 wheel for Linux x86_64 or aarch64, or macOS on Apple silicon
-   or Intel. Development builds (`X.Y.Z.devN`) are candidates only on TestPyPI. A series the index
-   has no release of exits 5 with `RELEASE_UNSUPPORTED`.
+   or Intel. Only final releases are taken by default. A pre-release (an alpha, beta or release
+   candidate: `X.Y.ZaN`, `X.Y.ZbN`, `X.Y.ZrcN`) is installed only when `--version` names it
+   exactly, for example `--version 2.11.0b1`. Development builds (`X.Y.Z.devN`) are candidates
+   only on TestPyPI. A series the index has no release of exits 5 with `RELEASE_UNSUPPORTED`;
+   when the series has only pre-releases, `error.details.pre_release` names the newest, the one
+   `--version` would install.
 4. When the install record already names that version, it does nothing and exits 0 with
    `installed: false`. `--force` reinstalls it.
-5. It prints the worker's licence notice to standard error. Installing accepts the licence; there
-   is no licence prompt and no flag.
+5. It prints the worker's licence notice to standard error, ending with the link to the licence's
+   full text, `Read it: https://pidgen.ai/legal/eula`. Installing accepts the licence; there is no
+   licence prompt and no flag.
 6. It verifies the release's artifact ([below](#verifying-where-the-worker-came-from)) before
    anything runs. A missing or failing attestation or signature, or an artifact whose digest
    differs from the index's, exits 5 with `PROVENANCE_INVALID`, names what failed in
@@ -115,9 +125,16 @@ else the hosted server, `https://api.pidgen.ai`.
      `<repository>@<digest>`. The image is always named by that digest from then on.
 7. Only then does it install the verified artifact. A failing install exits 1 with
    `INSTALL_FAILED`.
-   - **Wheel:** `uv tool install --python 3.12 <verified wheel>`, which gives the worker its own
-     environment on the interpreter the wheel was built for, and `uv tool dir --bin` to find the
-     installed `pidgen-worker`.
+   - **Wheel:** `uv tool install --python 3.12 --python-preference only-managed <verified wheel>`,
+     which gives the worker its own environment on a uv-managed Python 3.12, the interpreter the
+     wheel was built for (never a system Python, which may lack CA certificates), and `uv tool dir --bin` to find the
+     installed `pidgen-worker`. Both run with `UV_TOOL_DIR=$PIDGEN_HOME/worker/tools` and
+     `UV_TOOL_BIN_DIR=$PIDGEN_HOME/worker/bin`, so the worker is installed in the worker home and
+     never in uv's shared `pidgen-worker` tool slot (`uv tool dir`, `~/.local/bin`): it cannot
+     replace a `pidgen-worker` installed some other way, or one that is running. An earlier CLI's
+     install in uv's shared slot is removed once the new one is in place, unless a worker is
+     running from it or the slot now holds another install's worker; either is said in one line
+     and that one is left alone.
    - **Container:** `docker pull <repository>@<digest>`, then `docker volume create
      pidgen-worker-home` for the worker home. Installing runs no container.
 
@@ -148,13 +165,18 @@ human-readable output for terminal stdout, or a JSON envelope for nonterminal st
 | `digest` | `sha256:<hex>` of the verified wheel, or the verified image's manifest digest |
 | `identity` | The signer (`issuer`, `subject`) the attestation or signature named, which matched an accepted publisher |
 | `verified_at`, `installed_at` | When it was verified and installed |
-| `location` | The installed `pidgen-worker`, or the container's name, `pidgen-worker` |
+| `location` | The installed `pidgen-worker` (`$PIDGEN_HOME/worker/bin/pidgen-worker`), or the container's name, `pidgen-worker` |
 | `file` | The verified wheel, kept under `$PIDGEN_HOME/worker/` with its attestation so `worker verify` can re-check it; `null` for the container |
 | `volume` | Container only: the Docker volume holding the worker home, `pidgen-worker-home` |
 | `installed` | `true` when this run installed it; `false` for the no-op |
 
 The record is written to `$PIDGEN_HOME/run/pidgen-install.json`, beside the detached worker's run
-record. Later commands read it, so none of them needs `--runtime`.
+record. Later commands read it, so none of them needs `--runtime`, and every `pidgen worker`
+command runs the `pidgen-worker` its `location` names.
+
+`pidgen-worker` is not on `PATH` by name after the install: the CLI runs it by path. To run it by
+name yourself, put its bin directory on `PATH` (`export PATH="$HOME/.pidgen/worker/bin:$PATH"`,
+or `$PIDGEN_HOME/worker/bin`), or run `~/.pidgen/worker/bin/pidgen-worker`.
 
 ## Verify the installed worker
 
@@ -177,13 +199,30 @@ install --force`. A failed check exits 5 with `PROVENANCE_INVALID` and the same 
 $ pidgen worker update [--version <version>] [--restart] [--test]
 ```
 
-Installs the newest release of the server's `current` series, or `--version`, in the recorded form
-with the same verification as `worker install` (steps 1–3 and 5–7 [above](#install-the-worker);
-for a container, the cosign signature before `docker pull`), and updates the install record. It
-looks on TestPyPI with `--test`, or when the installed worker came from there. It
-needs an install record; without one it exits 4 with `WORKER_NOT_INSTALLED`. When the record
-already names the release it does nothing and exits 0 with `updated: false`. Nothing updates on
-its own: the worker is only updated when you run this command.
+Installs `--version`, or else the newest release of the server's `current` series that is newer
+than the installed one, in the recorded form with the same verification as `worker install`
+(steps 1–3 and 5–7 [above](#install-the-worker); for a container, the cosign signature before
+`docker pull`), and updates the install record. It looks on TestPyPI with `--test`, or when the
+installed worker came from there. It needs an install record; without one it exits 4 with
+`WORKER_NOT_INSTALLED`. Nothing updates on its own: the worker is only updated when you run this
+command.
+
+Without `--version`, the update follows the installed version's track and never moves backwards:
+
+- On a final release (`2.11.0`), the candidates are the series' final releases newer than it.
+  Alphas, betas and release candidates are ignored.
+- On a pre-release (`2.11.1b1`, installed with `--version`), the candidates are the series' final
+  releases and pre-releases newer than it, in PEP 440 order
+  (`2.11.1a1` < `2.11.1b1` < `2.11.1b2` < `2.11.1rc1` < `2.11.1`); the newest wins. So a beta
+  moves to the next beta, then the release candidate, then the final release. Once a final release
+  is installed, later updates follow final releases only, as pip does.
+- Development builds are candidates only on TestPyPI.
+
+When no candidate is newer than the installed version it installs nothing, prints no licence
+notice, and exits 0 with `updated: false` and the install record; in a terminal it says the
+installed version is already the newest on its track. Only `--version` installs an older release:
+it installs exactly the release it names, newer or older, pre-release or final. A series with no
+release on the track at all exits 5 with `RELEASE_UNSUPPORTED`, as `worker install` does.
 
 A worker started with `--detach`, or a running container, keeps running the old version until it
 is restarted. `--restart` stops it after the install (`SIGTERM`, waiting for the global
@@ -193,9 +232,10 @@ new version installed and the old worker still running until it is restarted. If
 CLI rolls back:
 
 1. It checks that the previous version's kept wheel still has the digest it was verified with, and
-   reinstalls it with `uv tool install --python 3.12 --reinstall <kept wheel>`; for a container, it verifies the
+   reinstalls it with `uv tool install --python 3.12 --python-preference only-managed --reinstall <kept wheel>`; for a container, it verifies the
    previous image's cosign signature again and pulls `<reference>@<digest>`.
-2. It restores the previous install record and removes the new version's kept wheel.
+2. It restores the previous install record (its `location` the worker home's
+   `pidgen-worker`, where the previous version now is) and removes the new version's kept wheel.
 3. It starts the worker again, with the same arguments, on the previous version.
 4. It exits 1 with `UPDATE_ROLLED_BACK`. `error.details` has `version` (the release that did not
    start), `previous_version`, `log_tail` (the last log lines of the failed start), `record` (the
@@ -220,8 +260,11 @@ Stops a detached worker or the running container (`SIGTERM`, then `SIGKILL` afte
 `--timeout`, since the worker is being removed), removes what the install put on the machine, by
 the recorded form, then the install record, and exits 0:
 
-- **Wheel:** `uv tool uninstall pidgen-worker`, and the kept wheel and attestation. A worker that
-  was already removed outside the CLI is not an error. When `uv` fails while the worker is still
+- **Wheel:** `uv tool uninstall pidgen-worker` in the worker home's tool environment, and the
+  kept wheel and attestation; a `pidgen-worker` in uv's shared tool slot is never touched. A
+  record an earlier CLI made names uv's shared slot: then the shared tool is uninstalled only
+  while the slot still holds the recorded version at the recorded path, and is otherwise left in
+  place with a line saying so. A worker that was already removed outside the CLI is not an error. When `uv` fails while the worker is still
   installed, it exits 1 with `UNINSTALL_FAILED` and keeps the record.
 - **Container:** the stopped `pidgen-worker` container (`docker rm`) and the pinned image
   (`docker image rm <reference>@<digest>`). A failing docker command exits 1 with `DOCKER_FAILED`
@@ -246,7 +289,8 @@ $ pidgen worker enroll [--label <label>] [--install | --no-install] [-- args]
 One command takes a machine with a worker installed, or one it may install, to an enrolled worker.
 The install comes first, so the enrollment is created only once a verified worker is present:
 
-1. When `pidgen-worker` is already on `PATH` (or at `PIDGEN_WORKER_BIN`), it skips to step 3.
+1. When `pidgen-worker` is already installed (the worker the install record names, at
+   `PIDGEN_WORKER_BIN`, or with no record on `PATH`), it skips to step 3.
 2. Otherwise, with `--install`, it runs the same install as `pidgen worker install`
    ([above](#install-the-worker)), with the same verification and the same commands printed to
    standard error: it reads the server's release list, picks the `current` release, shows the
@@ -263,8 +307,9 @@ The install comes first, so the enrollment is created only once a verified worke
    - The install fails as `pidgen worker install` does: without `uv` it exits 2 with
      `RUNTIME_UNAVAILABLE`; a wheel that does not verify exits 5 with `PROVENANCE_INVALID`
      and installs nothing; a failing `uv tool install` exits 1 with `INSTALL_FAILED`.
-   - An install that leaves `pidgen-worker` off `PATH` exits 2 with `WORKER_NOT_FOUND` and the
-     install record in `error.details.installed`; add its directory to `PATH` and enroll again.
+   - The installed worker is run by the path its install record names, so it need not be on
+     `PATH`. An install whose worker cannot be run from there exits 2 with `WORKER_NOT_FOUND` and
+     the install record in `error.details.installed`.
 3. Only now it creates an enrollment in the current Account (`POST /api/v1/workers/enrollments`,
    with `--label` as its name). This needs the Account Owner or Administrator role, or a Personal
    API Token with `workers:enroll`; any other caller exits 3 with `FORBIDDEN` and no worker is
@@ -285,7 +330,7 @@ never through a shell. The install's and the worker's output go to standard erro
 output carries only the CLI result (an envelope in JSON mode). An enrollment the CLI created but could not hand to a worker is
 not used and expires on its own.
 
-`pidgen worker enroll` enrolls a `pidgen-worker` on this machine's `PATH`. Enrolling a worker
+`pidgen worker enroll` enrolls the `pidgen-worker` the CLI runs (see [below](#run-and-check-a-worker)). Enrolling a worker
 installed in the container form through `pidgen worker enroll` is *planned*.
 
 The one-time token goes only to `pidgen-worker`. It is never printed, never in the envelope (success
@@ -302,7 +347,11 @@ credential.
 | `pidgen worker status [--host <host_id>]` | Shows the detached worker record, whether that process is still the recorded `pidgen-worker`, and the App Service's record of this worker ([below](#the-app-services-view)) |
 | `pidgen worker doctor [-- args]` | Runs `pidgen-worker doctor --json` and returns the report using the selected output format (an envelope in JSON mode); for this machine before a worker is installed, use [`pidgen doctor`](#check-this-machine) |
 
-The CLI finds `pidgen-worker` on `PATH`, or at `PIDGEN_WORKER_BIN`. It sets `PIDGEN_HOME` for the worker,
+The CLI runs the `pidgen-worker` at `PIDGEN_WORKER_BIN` when it is set; otherwise the one the
+install record names (`$PIDGEN_HOME/worker/bin/pidgen-worker` for an install by this CLI); and
+only when there is no install record, the first `pidgen-worker` on `PATH`. A recorded worker that is
+missing exits 2 with `WORKER_NOT_FOUND` and its path in `error.details.location`; the CLI does not
+fall back to another one on `PATH`. It sets `PIDGEN_HOME` for the worker,
 using `~/.pidgen` when the variable is unset, and removes `PIDGEN_TOKEN` from the worker's environment:
 the worker never receives a person's credential. Worker commands are supported on Linux and macOS. A
 missing worker or unsupported platform is a usage error.

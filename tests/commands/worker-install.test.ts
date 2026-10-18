@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { access, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, join, sep } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { runCli } from "../../src/cli.js";
 import { ExitCode } from "../../src/core/exit-codes.js";
@@ -210,8 +210,8 @@ describe("pidgen worker install (wheel)", () => {
   // AC-8b245945ccbd: the licence notice is printed before installing; no prompt and no flag.
   it("prints the licence notice before installing, and never asks", async () => {
     const setup = await installContext();
-    const ask = vi.fn(async () => "y");
-    setup.ctx.ask = ask;
+    const ask = vi.fn(() => Promise.reject(new Error("worker install must never ask")));
+    setup.ctx.prompter = ask;
 
     expect(await runCli(["worker", "install"], setup.ctx)).toBe(ExitCode.Ok);
 
@@ -223,6 +223,26 @@ describe("pidgen worker install (wheel)", () => {
     const stderr = setup.ctx.err.join("");
     expect(stderr.indexOf(eula.notice)).toBeLessThan(stderr.indexOf(" tool install "));
     expect(ask).not.toHaveBeenCalled();
+  });
+
+  // AC-19837bb35b50: the notice ends with the link to the licence's full text, on stderr only.
+  it("ends the licence notice with the licence's link, on standard error only", async () => {
+    const setup = await installContext();
+
+    expect(await runCli(["worker", "install", "--format", "json"], setup.ctx)).toBe(ExitCode.Ok);
+
+    const { eula } = releaseList();
+    const stderr = setup.ctx.err.join("");
+    expect(stderr).toContain(
+      `${eula.notice}\nInstalling it accepts the licence.\nRead it: https://pidgen.ai/legal/eula\n`,
+    );
+    expect(stderr.indexOf("Read it: https://pidgen.ai/legal/eula")).toBeLessThan(
+      stderr.indexOf(" tool install "),
+    );
+    const stdout = setup.ctx.out.join("");
+    expect(stdout).not.toContain("pidgen.ai/legal/eula");
+    expect(stdout).not.toContain("Read it");
+    expect(envelope(setup.ctx)).toMatchObject({ ok: true, data: { installed: true } });
   });
 
   it.each([["--accept-licence"], ["--accept-license"], ["--yes"], ["--no-licence"]])(
@@ -306,10 +326,11 @@ describe("pidgen worker install (wheel)", () => {
     setup.ctx.out.length = 0;
     expect(await runCli(["worker", "install"], setup.ctx)).toBe(ExitCode.Ok);
     expect(envelope(setup.ctx)).toMatchObject({ data: { version: "1.0.0", installed: true } });
-    expect((await listFiles(join(setup.pidgenHome, "worker"))).sort()).toEqual([
-      WHEEL,
-      `${WHEEL}.provenance.json`,
-    ]);
+    // The worker directory also holds the worker's uv tool environment (bin/, tools/).
+    const kept = (await listFiles(join(setup.pidgenHome, "worker"))).filter((name) =>
+      name.includes(".whl"),
+    );
+    expect(kept.sort()).toEqual([WHEEL, `${WHEEL}.provenance.json`]);
     const installs = (await setup.uvRuns()).filter((run) => run.args[1] === "install");
     expect(installs[1]!.args).toContain("--reinstall");
   });
@@ -380,6 +401,30 @@ describe("pidgen worker install (wheel)", () => {
     expect(setup.spawns).toEqual([]);
   });
 
+  it("installs the newest final release of the series, past a newer beta", async () => {
+    const setup = await installContext({
+      index: { "1.0.0": [RECORDED_WHEEL], "1.0.1b1": [indexWheel("1.0.1b1")] },
+    });
+
+    expect(await runCli(["worker", "install"], setup.ctx)).toBe(ExitCode.Ok);
+    expect(envelope(setup.ctx)).toMatchObject({ ok: true, data: { version: "1.0.0" } });
+  });
+
+  it("exits 5 with RELEASE_UNSUPPORTED for a series with only a beta, naming the beta", async () => {
+    const setup = await installContext({ index: { "1.0.0b1": [indexWheel("1.0.0b1")] } });
+
+    expect(await runCli(["worker", "install"], setup.ctx)).toBe(ExitCode.Refused);
+    expect(envelope(setup.ctx)).toMatchObject({
+      ok: false,
+      error: {
+        code: "RELEASE_UNSUPPORTED",
+        message: expect.stringContaining("--version 1.0.0b1"),
+        details: { series: "1.0", index: "pypi", pre_release: "1.0.0b1" },
+      },
+    });
+    expect(setup.spawns).toEqual([]);
+  });
+
   it("installs from TestPyPI with --test, where a development build of the series is a candidate", async () => {
     const setup = await installContext({ index: { "1.0.0": [RECORDED_WHEEL] } });
 
@@ -394,12 +439,69 @@ describe("pidgen worker install (wheel)", () => {
     expect(urls).not.toContain(PYPI_JSON_URL);
   });
 
-  it("installs the wheel with Python 3.12, the interpreter it was chosen for", async () => {
+  // c1-managed-python: a uv-managed Python 3.12, so a stray system Python cannot be picked.
+  it("installs the wheel with uv's managed Python 3.12, the interpreter it was chosen for", async () => {
     const setup = await installContext();
 
     expect(await runCli(["worker", "install"], setup.ctx)).toBe(ExitCode.Ok);
     const install = (await setup.uvRuns()).find((run) => run.args[1] === "install")!;
-    expect(install.args.slice(0, 4)).toEqual(["tool", "install", "--python", "3.12"]);
+    expect(install.args.slice(0, 6)).toEqual([
+      "tool",
+      "install",
+      "--python",
+      "3.12",
+      "--python-preference",
+      "only-managed",
+    ]);
+  });
+
+  // home-isolated: uv installs into an environment under the worker home, and nowhere else.
+  it("installs into a uv tool environment under the worker home and leaves uv's shared tool slot alone", async () => {
+    const setup = await installContext();
+    // Another install's worker already holds uv's shared slot.
+    const other = join(setup.sharedBinDir, "pidgen-worker");
+    const otherScript = "#!/bin/sh\n# installed from pidgen_worker-2.10.0-py3-none-any.whl\n";
+    await mkdir(setup.sharedBinDir, { recursive: true });
+    await writeFile(other, otherScript, { mode: 0o755 });
+
+    expect(await runCli(["worker", "install"], setup.ctx)).toBe(ExitCode.Ok);
+
+    const workerDir = join(setup.pidgenHome, "worker") + sep;
+    const uvSpawns = setup.spawns.filter((spawn) => spawn.command === join(setup.pathDir, "uv"));
+    expect(uvSpawns.map((spawn) => spawn.args.slice(0, 2))).toEqual([
+      ["tool", "install"],
+      ["tool", "dir"],
+    ]);
+    for (const spawn of uvSpawns) {
+      const env = spawn.options.env as Record<string, string>;
+      expect(env["UV_TOOL_DIR"]?.startsWith(workerDir), "UV_TOOL_DIR").toBe(true);
+      expect(env["UV_TOOL_BIN_DIR"]?.startsWith(workerDir), "UV_TOOL_BIN_DIR").toBe(true);
+    }
+    const record = await readRecord(setup.pidgenHome);
+    expect(record["location"]).toBe(join(setup.pidgenHome, "worker", "bin", "pidgen-worker"));
+    expect((record["location"] as string).startsWith(workerDir)).toBe(true);
+    expect(await exists(record["location"] as string)).toBe(true);
+    // uv's shared slot and ~/.local/bin are untouched.
+    expect(await readFile(other, "utf8")).toBe(otherScript);
+    expect(await exists(setup.sharedToolDir)).toBe(false);
+    expect(await exists(join(setup.directory, ".local"))).toBe(false);
+  });
+
+  // home-lookup: worker commands run the recorded worker, never another pidgen-worker on PATH.
+  it("runs the worker the install record names, not another pidgen-worker first on PATH", async () => {
+    const setup = await installContext();
+    expect(await runCli(["worker", "install"], setup.ctx)).toBe(ExitCode.Ok);
+    delete setup.ctx.env["PIDGEN_WORKER_BIN"];
+    const decoy = join(setup.pathDir, "pidgen-worker");
+    await writeFile(decoy, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    setup.spawns.length = 0;
+
+    expect(await runCli(["worker", "start", "--detach"], setup.ctx)).toBe(ExitCode.Ok);
+    expect(setup.workerStarts).toHaveLength(1);
+    await runCli(["worker", "doctor"], setup.ctx);
+    const doctor = setup.spawns.find((spawn) => spawn.args[0] === "doctor");
+    expect(doctor?.command).toBe(setup.workerBin);
+    expect(setup.spawns.map((spawn) => spawn.command)).not.toContain(decoy);
   });
 
   it("reports a failing uv install and records nothing", async () => {
@@ -613,6 +715,23 @@ describe("pidgen worker update", () => {
     expect(await readFile(setup.workerBin, "utf8")).toContain(WHEEL);
   });
 
+  // AC-19837bb35b50: update prints the same notice, ending with the link, on stderr only.
+  it("ends the licence notice with the licence's link, on standard error only", async () => {
+    const setup = await installContext();
+    await previousInstall(setup);
+
+    expect(await runCli(["worker", "update", "--format", "json"], setup.ctx)).toBe(ExitCode.Ok);
+
+    const stderr = setup.ctx.err.join("");
+    expect(stderr).toContain(
+      "Installing it accepts the licence.\nRead it: https://pidgen.ai/legal/eula\n",
+    );
+    const stdout = setup.ctx.out.join("");
+    expect(stdout).not.toContain("pidgen.ai/legal/eula");
+    expect(stdout).not.toContain("Read it");
+    expect(envelope(setup.ctx)).toMatchObject({ ok: true, data: { updated: true } });
+  });
+
   it("refuses a release whose attestation fails and keeps the previous install", async () => {
     const setup = await installContext({ provenance: fixture("provenance-wrong-identity.json") });
     const previous = await previousInstall(setup);
@@ -650,6 +769,135 @@ describe("pidgen worker update", () => {
       data: { version: "1.0.0", updated: false, previous_version: "1.0.0", restarted: false },
     });
     expect((await setup.uvRuns()).filter((run) => run.args[1] === "install")).toHaveLength(1);
+  });
+
+  /** Rewrites the install record so the installed worker is `version`. */
+  async function installedAs(setup: InstallContext, version: string): Promise<void> {
+    const record = await readRecord(setup.pidgenHome);
+    await writeFile(
+      join(setup.pidgenHome, "run", "pidgen-install.json"),
+      JSON.stringify({ ...record, version, artifact: `pidgen-worker==${version}` }),
+    );
+  }
+  const installs = async (setup: InstallContext) =>
+    (await setup.uvRuns()).filter((run) => run.args[1] === "install");
+
+  // AC-354e6e8d93d3: an installed final release ignores newer pre-releases.
+  it("leaves a final release installed when only newer pre-releases are published", async () => {
+    const setup = await installContext({
+      index: {
+        "1.0.0": [RECORDED_WHEEL],
+        "1.0.1b1": [indexWheel("1.0.1b1")],
+        "1.0.1rc1": [indexWheel("1.0.1rc1")],
+      },
+    });
+    expect(await runCli(["worker", "install"], setup.ctx)).toBe(ExitCode.Ok);
+    reset(setup);
+
+    expect(await runCli(["worker", "update"], setup.ctx)).toBe(ExitCode.Ok);
+    expect(envelope(setup.ctx)).toMatchObject({
+      ok: true,
+      data: { version: "1.0.0", updated: false, previous_version: "1.0.0" },
+    });
+    // Only the first install ran uv.
+    expect(await installs(setup)).toHaveLength(1);
+  });
+
+  // AC-459320f81622: an installed pre-release takes a newer final release.
+  it("updates an installed pre-release to a newer final release", async () => {
+    const setup = await installContext({
+      index: { "1.0.0b1": [indexWheel("1.0.0b1")], "1.0.0": [RECORDED_WHEEL] },
+    });
+    await previousInstall(setup);
+    await installedAs(setup, "1.0.0b1");
+
+    expect(await runCli(["worker", "update"], setup.ctx)).toBe(ExitCode.Ok);
+    expect(envelope(setup.ctx)).toMatchObject({
+      ok: true,
+      data: { version: "1.0.0", updated: true, previous_version: "1.0.0b1" },
+    });
+    expect(await installs(setup)).toHaveLength(1);
+  });
+
+  // AC-6dc48c17df0b: never installs an older release than the installed pre-release.
+  it("never moves an installed pre-release back to an older release, and says so in a terminal", async () => {
+    const index = {
+      "1.0.0": [RECORDED_WHEEL],
+      "1.0.0b1": [indexWheel("1.0.0b1")],
+      "1.0.1a1": [indexWheel("1.0.1a1")],
+    };
+    const setup = await installContext({ index });
+    const previous = await previousInstall(setup);
+    await installedAs(setup, "1.0.1b1");
+
+    expect(await runCli(["worker", "update"], setup.ctx)).toBe(ExitCode.Ok);
+    expect(envelope(setup.ctx)).toMatchObject({
+      ok: true,
+      data: {
+        version: "1.0.1b1",
+        updated: false,
+        previous_version: "1.0.1b1",
+        running: false,
+        restarted: false,
+      },
+    });
+    expect(await installs(setup)).toEqual([]);
+    expect(setup.ctx.err.join("")).not.toContain(releaseList().eula.notice);
+    expect(await readRecord(setup.pidgenHome)).toMatchObject({ version: "1.0.1b1" });
+    expect(await exists(previous["file"] as string)).toBe(true);
+
+    reset(setup);
+    setup.ctx.io.stdoutIsTTY = true;
+    expect(await runCli(["worker", "update"], setup.ctx)).toBe(ExitCode.Ok);
+    // The note wraps at the terminal's width.
+    const stdout = setup.ctx.out.join("").replace(/\s+/g, " ");
+    expect(stdout).toContain("Worker already up to date.");
+    expect(stdout).toContain(
+      "pidgen-worker 1.0.1b1 is already the newest on its track: the pre-releases and final releases of series 1.0.",
+    );
+    expect(await installs(setup)).toEqual([]);
+  });
+
+  // AC-36b3cb5005d0: once on a final release, a plain update follows final releases only.
+  it("follows final releases only once a pre-release was updated to a final release", async () => {
+    const index: Record<string, IndexFile[]> = {
+      "1.0.0b1": [indexWheel("1.0.0b1")],
+      "1.0.0": [RECORDED_WHEEL],
+    };
+    const setup = await installContext({ index });
+    await previousInstall(setup);
+    await installedAs(setup, "1.0.0b1");
+    expect(await runCli(["worker", "update"], setup.ctx)).toBe(ExitCode.Ok);
+    expect(envelope(setup.ctx)).toMatchObject({ data: { version: "1.0.0", updated: true } });
+    reset(setup);
+
+    index["1.0.1b1"] = [indexWheel("1.0.1b1")];
+    expect(await runCli(["worker", "update"], setup.ctx)).toBe(ExitCode.Ok);
+    expect(envelope(setup.ctx)).toMatchObject({ data: { version: "1.0.0", updated: false } });
+    expect(await installs(setup)).toHaveLength(1);
+    reset(setup);
+
+    setup.ctx.io.stdoutIsTTY = true;
+    expect(await runCli(["worker", "update"], setup.ctx)).toBe(ExitCode.Ok);
+    expect(setup.ctx.out.join("").replace(/\s+/g, " ")).toContain(
+      "pidgen-worker 1.0.0 is already the newest on its track: the final releases of series 1.0.",
+    );
+  });
+
+  // AC-5134f68c3ab6: --version installs exactly what it names, older than a pre-release too.
+  it("installs an older release named with --version over an installed pre-release", async () => {
+    const setup = await installContext({
+      index: { "1.0.0": [RECORDED_WHEEL], "1.0.1b2": [indexWheel("1.0.1b2")] },
+    });
+    await previousInstall(setup);
+    await installedAs(setup, "1.0.1b1");
+
+    expect(await runCli(["worker", "update", "--version", "1.0.0"], setup.ctx)).toBe(ExitCode.Ok);
+    expect(envelope(setup.ctx)).toMatchObject({
+      ok: true,
+      data: { version: "1.0.0", updated: true, previous_version: "1.0.1b1" },
+    });
+    expect(await installs(setup)).toHaveLength(1);
   });
 
   // AC-c3370be74b85: a running detached worker restarts only with --restart.
@@ -718,6 +966,8 @@ describe("pidgen worker update", () => {
       "install",
       "--python",
       "3.12",
+      "--python-preference",
+      "only-managed",
       "--reinstall",
       previous["file"],
     ]);
@@ -730,10 +980,58 @@ describe("pidgen worker update", () => {
     expect(setup.processes.has(setup.workerStarts[2]!.pid)).toBe(true);
     expect(await readRecord(setup.pidgenHome)).toEqual(previous);
     expect(await exists(previous["file"] as string)).toBe(true);
-    expect((await listFiles(join(setup.pidgenHome, "worker"))).sort()).toEqual([
-      PREVIOUS_WHEEL,
-      `${PREVIOUS_WHEEL}.provenance.json`,
-    ]);
+    // The worker directory also holds the worker's uv tool environment (bin/, tools/).
+    const kept = (await listFiles(join(setup.pidgenHome, "worker"))).filter((name) =>
+      name.includes(".whl"),
+    );
+    expect(kept.sort()).toEqual([PREVIOUS_WHEEL, `${PREVIOUS_WHEEL}.provenance.json`]);
+  });
+
+  // home-migrate: a record an earlier CLI made names uv's shared tool slot.
+  it("moves an earlier CLI's install out of uv's shared tool slot into the worker home", async () => {
+    const setup = await installContext();
+    const previous = await previousInstall(setup, { legacy: true });
+    const legacy = previous["location"] as string;
+
+    expect(await runCli(["worker", "update"], setup.ctx)).toBe(ExitCode.Ok);
+
+    expect(envelope(setup.ctx)).toMatchObject({
+      ok: true,
+      data: {
+        version: "1.0.0",
+        updated: true,
+        previous_version: "0.8.0",
+        location: setup.workerBin,
+      },
+    });
+    const install = (await setup.uvRuns()).find((run) => run.args[1] === "install")!;
+    expect(install.env).toEqual({
+      UV_TOOL_DIR: join(setup.pidgenHome, "worker", "tools"),
+      UV_TOOL_BIN_DIR: join(setup.pidgenHome, "worker", "bin"),
+    });
+    expect(await readRecord(setup.pidgenHome)).toMatchObject({
+      version: "1.0.0",
+      location: setup.workerBin,
+    });
+    expect(await readFile(setup.workerBin, "utf8")).toContain(WHEEL);
+    // Nothing runs from the earlier install, so the tool the record named is removed from uv's slot.
+    const uninstall = (await setup.uvRuns()).find((run) => run.args[1] === "uninstall");
+    expect(uninstall).toMatchObject({ args: ["tool", "uninstall", "pidgen-worker"], env: {} });
+    expect(await exists(legacy)).toBe(false);
+  });
+
+  it("leaves uv's shared slot alone when it no longer holds the worker an earlier CLI recorded", async () => {
+    const setup = await installContext();
+    const previous = await previousInstall(setup, { legacy: true });
+    const legacy = previous["location"] as string;
+    // Another install has since replaced the shared tool with its own version.
+    const otherScript = "#!/bin/sh\n# installed from pidgen_worker-2.10.0-py3-none-any.whl\n";
+    await writeFile(legacy, otherScript);
+
+    expect(await runCli(["worker", "update"], setup.ctx)).toBe(ExitCode.Ok);
+    expect(await readRecord(setup.pidgenHome)).toMatchObject({ location: setup.workerBin });
+    expect((await setup.uvRuns()).filter((run) => run.args[1] === "uninstall")).toEqual([]);
+    expect(await readFile(legacy, "utf8")).toBe(otherScript);
   });
 
   it("refuses to roll back onto a kept wheel that no longer has its recorded digest", async () => {
@@ -887,6 +1185,54 @@ describe("pidgen worker uninstall", () => {
       error: { code: "WORKER_NOT_INSTALLED" },
     });
     expect(setup.spawns).toEqual([]);
+  });
+
+  // home-migrate: uninstall removes only what the record names.
+  it("removes only the worker home's tool environment, never uv's shared pidgen-worker", async () => {
+    const { setup } = await installed();
+    const other = join(setup.sharedBinDir, "pidgen-worker");
+    await mkdir(setup.sharedBinDir, { recursive: true });
+    await writeFile(other, "#!/bin/sh\n# installed from pidgen_worker-2.10.0-py3-none-any.whl\n");
+
+    expect(await runCli(["worker", "uninstall"], setup.ctx)).toBe(ExitCode.Ok);
+    const uninstall = (await setup.uvRuns()).find((run) => run.args[1] === "uninstall")!;
+    expect(uninstall.env).toEqual({
+      UV_TOOL_DIR: join(setup.pidgenHome, "worker", "tools"),
+      UV_TOOL_BIN_DIR: join(setup.pidgenHome, "worker", "bin"),
+    });
+    expect(await exists(setup.workerBin)).toBe(false);
+    expect(await exists(other)).toBe(true);
+  });
+
+  it("uninstalls an earlier CLI's worker from uv's shared slot, the location its record names", async () => {
+    const setup = await installContext();
+    const previous = await previousInstall(setup, { legacy: true });
+
+    expect(await runCli(["worker", "uninstall"], setup.ctx)).toBe(ExitCode.Ok);
+    expect(envelope(setup.ctx)).toMatchObject({
+      ok: true,
+      data: { removed: ["tool pidgen-worker", `file ${previous["file"] as string}`] },
+    });
+    const uninstall = (await setup.uvRuns()).find((run) => run.args[1] === "uninstall")!;
+    expect(uninstall).toMatchObject({ args: ["tool", "uninstall", "pidgen-worker"], env: {} });
+    expect(await exists(previous["location"] as string)).toBe(false);
+    expect(await exists(join(setup.pidgenHome, "run", "pidgen-install.json"))).toBe(false);
+  });
+
+  it("leaves uv's shared pidgen-worker alone when it is not the one an earlier CLI's record names", async () => {
+    const setup = await installContext();
+    const previous = await previousInstall(setup, { legacy: true });
+    const otherScript = "#!/bin/sh\n# installed from pidgen_worker-2.10.0-py3-none-any.whl\n";
+    await writeFile(previous["location"] as string, otherScript);
+
+    expect(await runCli(["worker", "uninstall"], setup.ctx)).toBe(ExitCode.Ok);
+    expect(envelope(setup.ctx)).toMatchObject({
+      ok: true,
+      data: { removed: [`file ${previous["file"] as string}`] },
+    });
+    expect((await setup.uvRuns()).filter((run) => run.args[1] === "uninstall")).toEqual([]);
+    expect(await readFile(previous["location"] as string, "utf8")).toBe(otherScript);
+    expect(setup.ctx.err.join("")).toContain("left it in place");
   });
 
   it("keeps the install record when uv cannot remove the tool", async () => {
