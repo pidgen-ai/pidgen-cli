@@ -1,6 +1,6 @@
 {
   "name": "pidgen",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-alpha.3",
   "description": "Command-line client and agent skills for Pidgen",
   "license": "Apache-2.0",
   "repository": {

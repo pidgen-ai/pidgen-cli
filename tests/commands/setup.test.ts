@@ -44,6 +44,8 @@ const PAT = "pidgen_pat_fake_setup_token";
 const ENROLL_TOKEN = "pidgen_enroll_fake_setup_one_time";
 const HARNESS_COMMANDS = releaseList().harnesses.map((harness) => harness.command);
 const ADMIN_SCOPES = ["tickets:read", "tickets:write", "workers:enroll"];
+/** The running Node.js's `major.minor`, as the check step's line shows it. */
+const NODE = process.versions.node.split(".").slice(0, 2).join(".");
 const MEMBER_SCOPES = ["tickets:read", "tickets:write"];
 
 type Role = "owner" | "administrator" | "member";
@@ -2649,7 +2651,6 @@ describe("pidgen setup prompts", () => {
 
 describe("pidgen setup output", () => {
   const ANSWERS = ["", "", "", ""];
-  const NODE = process.versions.node.split(".").slice(0, 2).join(".");
   /** Standard error's lines that end with `text`. */
   const linesEnding = (stderr: string, text: string) =>
     stderr.split("\n").filter((line) => line.endsWith(text));
@@ -3261,7 +3262,7 @@ describe("pidgen setup, one action at a time", () => {
   const FIRST_RUN_STDERR = [
     "┌  Pidgen setup",
     "│",
-    "◇  This machine is ready · Linux · Node.js 24.16 · git 2.43",
+    `◇  This machine is ready · Linux · Node.js ${NODE} · git 2.43`,
     "│",
     "◆  Sign in to Pidgen",
     "│  Open this link and approve the sign-in:",

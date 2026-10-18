@@ -2,13 +2,29 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.3
+
+The third alpha, published to npm under `alpha` and `latest`. It publishes the changes listed under
+0.1.0-alpha.2, which was tagged but never reached npm, with one test fix. Its focus is
+`pidgen setup`: one action at a time from a fresh machine to a running worker, with the worker
+installed in its own environment, a setup log, `--verbose`, a summary card at the end, and the
+worker's licence linked before it is installed. `pidgen worker update` now follows a beta's
+pre-release track and never moves backwards.
+
+### A setup test no longer depends on the Node.js version that runs it
+
+- The test of setup's whole first-run screen expected the check line to read `Node.js 24.16`, the
+  version it was written on, so it failed on every other Node.js release, and 0.1.0-alpha.2's
+  release run stopped before publishing. It now expects the running Node.js's `major.minor`, as
+  the other setup output tests do. The CLI's behaviour is unchanged.
+
 ## 0.1.0-alpha.2
 
-The second alpha, published to npm under `alpha` and `latest`. Its focus is `pidgen setup`: one
-action at a time from a fresh machine to a running worker, with the worker installed in its own
-environment, a setup log, `--verbose`, a summary card at the end, and the worker's licence linked
-before it is installed. `pidgen worker update` now follows a beta's pre-release track and never
-moves backwards.
+Tagged but not published to npm: its release run failed the setup test fixed in 0.1.0-alpha.3,
+which publishes these changes. Its focus is `pidgen setup`: one action at a time from a fresh
+machine to a running worker, with the worker installed in its own environment, a setup log,
+`--verbose`, a summary card at the end, and the worker's licence linked before it is installed.
+`pidgen worker update` now follows a beta's pre-release track and never moves backwards.
 
 ### Worker update never moves backwards and follows a beta's track
 
