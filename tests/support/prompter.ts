@@ -192,6 +192,7 @@ export function scriptedPrompter(
         message: (message) => void spinners.push(message),
         stop: (message) => write(`${drawCollapsed(message)}\n`),
         error: (message) => write(`${drawFailed(message)}\n`),
+        clear: () => undefined,
       };
     },
 

@@ -55,7 +55,7 @@ src/
     version.ts           CLI version and the API version it speaks
   generated/api.d.ts     types generated from contracts/openapi.json — never edited by hand
 contracts/openapi.json   committed copy of the App Service's public API document
-contracts/pending/       agreed routes the server has not published yet (one fragment per feature; none today)
+contracts/pending/       agreed routes the server has not published yet (one fragment per feature)
 scripts/                 contract pull and check, release check
 skills/<name>/SKILL.md   bundled agent skills
 docs/                    user documentation
@@ -76,6 +76,7 @@ it.
 |---|---|
 | `npm run build` | Bundle to `dist/pidgen.js` |
 | `npm test` | Unit, command, and skill-lint tests |
+| `npm run test:tmp-check` | `npm test` with a private temporary directory; fails if the run leaves anything in it (CI runs this) |
 | `npm run test:contract` | Contract tests against a Prism mock server (kept out of `npm test`) |
 | `npm run lint` | ESLint and Prettier check |
 | `npm run typecheck` | `tsc --noEmit` |
@@ -128,6 +129,17 @@ Run `npm test`, `npm run lint`, and `npm run typecheck` before proposing a chang
   test context's `docker` and `cosign` reject any call.
 - Every command gets tests for success, one server refusal, and its usage errors, and checks the
   envelope and exit code.
+- **Temporary directories**: a test makes them with `tempDir()` or `tempDirSync()`
+  (`tests/support/temp.ts`, also exported by `tests/support/context.ts`), never with `mkdtemp`
+  directly. Each one is recorded, and `tests/support/setup.ts` (`setupFiles` in both vitest
+  configs) removes them all (`rm -r`, force) when the test file finishes;
+  `tests/support/global-setup.ts` removes the directory vitest itself makes in the temporary
+  directory for each run. Set `PIDGEN_KEEP_TEST_DIRS=1` to keep them for debugging, for example
+  `PIDGEN_KEEP_TEST_DIRS=1 npx vitest run tests/commands/worker.test.ts`; the kept paths are
+  printed when each file finishes. `npm run test:tmp-check` (`scripts/test-tmp-check.mjs`) runs
+  the tests with `TMPDIR` set to an empty private directory and fails if anything is left in it
+  (Node's shared `node-compile-cache` is not counted). `tests/support/temp.test.ts` proves the
+  cleanup and the keep switch on a fixture test file.
 
 Tests never call a real Pidgen server and never contain real credentials, hostnames, or Account ids.
 
@@ -223,7 +235,11 @@ prompts, capture foreground streams, or infer success from an unknown outcome or
 | `plan promote` | mutation | Preview requirements, actual application state and complete result details. |
 | `plan show` | detail | Child plan; resource sections with compact collections where appropriate. |
 | `plan template` | text | Copyable template text and labeled fields. |
+| `project doctor` | status | The frame's title, one line per group with the failures beneath by Ticket key, then the verdict line, its sentence and the fix; the same on failure when the setup is the problem. |
+| `project inspect` | detail | One row per area with its state word and summary, then each open question with its evidence and `--answer`. |
 | `project list` | list | Projects; resource sections with compact collections where appropriate. |
+| `project rehearse` | status | Each step on stdout as it is reported (stderr under JSON on a terminal), the verdict last; a failed rehearsal's verdict on failure. |
+| `project setup` | mutation | The proposed files; with `--write` each file's status under `.pidgen/`; with `--pull-request` the pull request. |
 | `project show` | detail | Project; resource sections with compact collections where appropriate. |
 | `request accept` | mutation | Preview requirements, actual application state and complete result details. |
 | `request acknowledge` | mutation | Preview requirements, actual application state and complete result details. |
@@ -277,6 +293,7 @@ prompts, capture foreground streams, or infer success from an unknown outcome or
 | `worker start` | exception | Foreground inherits worker streams/status with no CLI result; --detach renders lifecycle details. |
 | `worker status` | status | Labeled lifecycle details; all supplied qualifications retained. |
 | `worker stop` | mutation | Labeled lifecycle details; all supplied qualifications retained. |
+| `worker restart` | mutation | Labeled lifecycle details with the new pid or container name in the heading; all supplied qualifications retained. |
 | `worker subscriptions use` | mutation | Labeled lifecycle details; all supplied qualifications retained. |
 | `worker subscriptions` | status | Labeled lifecycle details; all supplied qualifications retained. |
 | `worker uninstall` | mutation | Labeled lifecycle details; all supplied qualifications retained. |
@@ -328,11 +345,20 @@ merged into `contracts/openapi.json`. When the server publishes the route, pull 
 usual, switch the command to the published types, and delete the fragment and its generated file
 in the same change; `tests/scripts/contract-generate.test.ts` fails once the published document
 has one of its routes, as a reminder. Each fragment is listed with its routes in that test's
-`PENDING_ROUTES`, the published schemas it copies in `COPIED_SCHEMAS`, and its
-`openapi-typescript` line is in `contract:generate`. There are none today: the worker release,
-domain, Domain Epic, contract, contract creation, contract publishing and Request fragments were
-deleted when the server published their routes, and that test's `RETIRED_FRAGMENTS` checks nothing
-names them again.
+`PENDING_ROUTES`, the published schemas it copies in `COPIED_SCHEMAS`, a published route it holds
+with a field added in `EXTENDED_ROUTES` and that field in `EXTENDED_SCHEMAS` (the schema keeps its
+published name and is otherwise the published one), and its `openapi-typescript` line is in
+`contract:generate`. There are two today. `contracts/pending/worker-enrollments.json`: `install_id`
+on `POST /api/v1/workers/enrollments` and `GET /api/v1/workers`, and
+`GET /api/v1/workers/enrollments` and `DELETE /api/v1/workers/enrollments/{enrollment_id}`, typed
+in `src/generated/worker-enrollments.d.ts` and used through `src/core/worker-enrollments.ts`.
+`contracts/pending/project-readiness.json`: the five routes under
+`/api/v1/projects/{project_ref}/readiness` (the readiness, the proposal archive, the setup pull
+request, the answers and the rehearsal), typed in `src/generated/project-readiness.d.ts` and used
+through `src/core/readiness.ts`; its fixtures are under `tests/fixtures/readiness/`. The
+worker release, domain, Domain Epic, contract, contract creation, contract publishing and Request
+fragments were deleted when the server published their routes, and that test's
+`RETIRED_FRAGMENTS` checks nothing names them again.
 
 The published document states those routes with schemas and no response examples. Their command
 tests answer with fixtures typed from the generated types and checked against the published
@@ -444,7 +470,11 @@ A skill runs on an end user's machine against the hosted service. It therefore:
    is a new command backed by a public API route. **One exception:** a skill may run the installed
    worker's own configuration commands (`pidgen-worker capacity` and `pidgen-worker subscriptions`)
    to change that worker's local `node.yaml`, which no API route reaches. Those commands print text,
-   not a JSON envelope, so the skill says what their output and exit status mean.
+   not a JSON envelope, so the skill says what their output and exit status mean. Where those
+   commands do not cover a setting, a skill may edit the worker's local `node.yaml` or
+   `worker-policy.yaml` using the published worker documentation, preserve unrelated settings and
+   validate with the installed worker. Browsing public documentation does not authorize direct
+   API calls or access to server internals.
 2. **Names only commands that exist.** Every `pidgen …` invocation must match the command registry.
 3. **Follows preview → apply.** Preview, reason about the plan, then apply with the digest received.
    Never pass `--ack` unless the preview listed that code and the skill says when accepting it is
@@ -470,6 +500,46 @@ A skill runs on an end user's machine against the hosted service. It therefore:
    contracts or authorized QA evidence.
 
 Rules 1, 2, 5 and 6 are checked automatically before every release.
+
+### Reviewing worker support guidance
+
+`pidgen-setup-worker` uses `https://docs.pidgen.ai` for current procedures and installed command
+help for version compatibility. Keep its documentation links and scope aligned with the public
+worker guides; do not copy a model catalog or a complete policy schema into the skill. Check links
+when reviewing changes, separately from the test suite, which must never contact a real server.
+Record missing public procedures instead of filling them from private implementation knowledge.
+
+Skill lint checks syntax and command names, not operational judgment. For substantive worker-skill
+changes, evaluate realistic requests against fake command results and documentation snapshots in
+an isolated environment. Compare the proposed actions and reported evidence with these outcomes;
+do not execute installs, logins, configuration edits or feedback against a customer's worker.
+The reproducible cases in [worker-support-scenarios.json](tests/skills/worker-support-scenarios.json)
+separate the request and observations from the grading expectations. Give the evaluator the
+skill, named documentation snapshots, request and observations only; grade its concrete actions
+afterwards. These are behavioral evaluations, not assertions that the skill contains certain words,
+and they are not automatically run by `npm test`.
+
+| Request and evidence | Expected behavior |
+|---|---|
+| Setup fails without a terminal; `TERMINAL_REQUIRED` includes commands | Uses the scriptable steps; does not claim that setup flags make it headless |
+| Worker status exits 0, server view is unavailable, and a warning explains why | Reports local status and the missing connection evidence; does not re-enroll |
+| A service runs the worker, but the shell resolves a different executable | Identifies the service's user, home and executable before proposing changes; starts no second manager |
+| Raise a harness cap; the shared prompt pool is already saturated | Explains both limits, preserves other harnesses, and checks applied capacity rather than only command exit status |
+| Capacity set exits 0 with `saved, apply pending` | Reads back the digest within the documented interval and reports pending if still unapplied; no endless polling or unnecessary restart |
+| Enable a newly announced model; no Pidgen model procedure is documented | Separates provider, harness, worker and Account support; does not invent a model command, YAML key or successful execution |
+| A new model works in shell Claude but not on the worker | Checks the actual service user and selected executable; uses the version-supported Claude `cli_path` policy, validates and restarts through the existing launch method |
+| Customize a harness option whose policy key is undocumented | Requests the missing public reference; does not infer policy keys from provider CLI flags or weaken sandboxing |
+| Add a second subscription; results include `duplicate` or `unknown` | Rejects duplicate quota assumptions, distinguishes unknown from logged out, preserves order and explains plan-dependent fallback |
+| Remote primary selection returns `unknown` or `SUBSCRIPTION_STALE` | Reads subscriptions again before considering another change; does not blindly repeat a mutation |
+| Documentation is unavailable or newer than installed help | States the limitation, continues supported diagnosis, and leaves unverified changes unresolved |
+| Diagnosis fails and the user has not asked to send a report | Prepares a redacted support summary without submitting feedback |
+
+After a CLI upgrade, verify skill installation and status using the existing command tests. The
+model and policy guides are versioned against the public worker release's schema and annotated
+example. When updating them, compare all documented keys, bounds and example values with those
+public artifacts and validate the YAML snippets against that schema. Keep the worker package out
+of this repository and its dependencies; do this source check separately from offline tests.
+Update the skill's routing and the scenarios whenever the supported procedure changes.
 
 ## Documentation
 

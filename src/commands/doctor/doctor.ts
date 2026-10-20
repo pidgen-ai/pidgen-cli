@@ -36,7 +36,7 @@ export type { CheckStatus, DoctorCheck } from "../../core/doctor.js";
 export const MINIMUM_NODE = { major: 22, minor: 12 } as const;
 
 /** The oldest git the worker's coding agents work with. */
-export const MINIMUM_GIT = { major: 2, minor: 25 } as const;
+export const MINIMUM_GIT = { major: 2, minor: 38 } as const;
 
 /** Where to get each tool a check may find missing. */
 export const FIXES = {
@@ -46,21 +46,116 @@ export const FIXES = {
   uv: "https://docs.astral.sh/uv/getting-started/installation/",
   docker: "https://docs.docker.com/get-started/get-docker/",
   cosign: "https://docs.sigstore.dev/cosign/system_config/installation/",
-  /** git on macOS comes with the Command Line Tools. */
-  gitMacos: "xcode-select --install",
-  gitLinux: "install git with your package manager",
 } as const;
+
+const GIT_MINIMUM = `${MINIMUM_GIT.major}.${MINIMUM_GIT.minor}`;
+
+const UBUNTU_GIT_FIX = `Install git from the git-core PPA, since Ubuntu's own git can be older than ${GIT_MINIMUM} (22.04 packages 2.34): \`sudo add-apt-repository ppa:git-core/ppa && sudo apt update && sudo apt install git\``;
+
+/** The systems whose way to get git the `git` check names: macOS and Linux distribution families. */
+export type GitSystem =
+  "macos" | "ubuntu" | "debian" | "fedora" | "arch" | "alpine" | "suse" | "linux" | "other";
+
+/**
+ * How to get git `MINIMUM_GIT` or later on each system: `missing` when git is not on `PATH` (or did
+ * not report a version), `old` when it is older. Each is one sentence, with no closing full stop, its
+ * commands in backticks (setup prints it after "Fix:" and drops the backticks on screen).
+ */
+export const GIT_FIXES: Record<GitSystem, { missing: string; old: string }> = {
+  macos: {
+    missing:
+      "Install Apple's Command Line Tools with `xcode-select --install`, or git from Homebrew (https://brew.sh) with `brew install git`",
+    old: `Install git ${GIT_MINIMUM} or later from Homebrew (https://brew.sh) with \`brew install git\` and put Homebrew's bin directory before /usr/bin on PATH, or update the Command Line Tools through Software Update`,
+  },
+  // Ubuntu 22.04 packages git 2.34, so its own apt does not reach 2.38: the git-core PPA does.
+  ubuntu: { missing: UBUNTU_GIT_FIX, old: UBUNTU_GIT_FIX },
+  debian: {
+    missing: "Install git with `sudo apt update && sudo apt install git`",
+    old: `Debian 12 or later packages git ${GIT_MINIMUM} or later, so there run \`sudo apt update && sudo apt install git\`, and on older Debian see https://git-scm.com/downloads/linux`,
+  },
+  fedora: {
+    missing: "Install git with `sudo dnf install git`",
+    old: "Upgrade git with `sudo dnf upgrade git`",
+  },
+  arch: {
+    missing: "Install git with `sudo pacman -S git`",
+    old: "Upgrade git with `sudo pacman -S git`",
+  },
+  alpine: {
+    missing: "Install git with `sudo apk add git`",
+    old: "Upgrade git with `sudo apk upgrade git`",
+  },
+  suse: {
+    missing: "Install git with `sudo zypper install git`",
+    old: "Upgrade git with `sudo zypper install git`",
+  },
+  linux: {
+    missing: `install git ${GIT_MINIMUM} or later with your package manager: https://git-scm.com/downloads/linux`,
+    old: `install git ${GIT_MINIMUM} or later with your package manager: https://git-scm.com/downloads/linux`,
+  },
+  other: {
+    missing: `install git ${GIT_MINIMUM} or later: https://git-scm.com/downloads`,
+    old: `install git ${GIT_MINIMUM} or later: https://git-scm.com/downloads`,
+  },
+};
+
+/** The distribution family an os-release `ID` or `ID_LIKE` entry names, or `null`. */
+function distributionFamily(id: string): GitSystem | null {
+  if (["ubuntu", "linuxmint", "pop"].includes(id)) return "ubuntu";
+  if (id === "debian") return "debian";
+  if (["fedora", "rhel", "centos", "rocky", "almalinux", "amzn"].includes(id)) return "fedora";
+  if (["arch", "manjaro"].includes(id)) return "arch";
+  if (id === "alpine") return "alpine";
+  if (["opensuse", "sles", "suse"].includes(id) || id.startsWith("opensuse-")) return "suse";
+  return null;
+}
+
+/** The `KEY=value` lines of an os-release file, with quoted values unquoted. */
+export function parseOsRelease(text: string): Record<string, string> {
+  const fields: Record<string, string> = {};
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*([A-Za-z0-9_]+)=(.*)$/.exec(line);
+    if (match === null) continue;
+    let value = match[2]!.trim();
+    const quote = value[0];
+    if ((quote === '"' || quote === "'") && value.length >= 2 && value.endsWith(quote)) {
+      value = value.slice(1, -1);
+      if (quote === '"') value = value.replace(/\\(["$`\\])/g, "$1");
+    }
+    fields[match[1]!] = value;
+  }
+  return fields;
+}
+
+/**
+ * The system whose git fix applies: macOS; on Linux, the family of the os-release `ID`, else of its
+ * first `ID_LIKE` entry that names one, else plain `linux` (also when os-release is unreadable).
+ */
+export function gitSystem(platform: NodeJS.Platform, osRelease: string | null): GitSystem {
+  if (platform === "darwin") return "macos";
+  if (platform !== "linux") return "other";
+  if (osRelease === null) return "linux";
+  const fields = parseOsRelease(osRelease);
+  const ids = [(fields["ID"] ?? "").trim(), ...(fields["ID_LIKE"] ?? "").split(/\s+/)].map((id) =>
+    id.toLowerCase(),
+  );
+  for (const id of ids) {
+    const family = id === "" ? null : distributionFamily(id);
+    if (family !== null) return family;
+  }
+  return "linux";
+}
 
 /**
  * `pidgen doctor`: diagnoses this machine and its connection to Pidgen before anything is changed,
  * and works with nothing configured and no worker installed. `data.checks` is, in order:
- * `node` (the Node.js version), `git` (on `PATH`, 2.25 or later), `server` (`GET /health` answers as Pidgen and accepts this CLI's
+ * `node` (the Node.js version), `git` (on `PATH`, 2.38 or later), `server` (`GET /health` answers as Pidgen and accepts this CLI's
  * API version), `credential` (`GET /me` accepts the credential; the Account's role, the token kind
  * and scopes, and whether it may enroll workers), `runtime` (`uv` for the wheel runtime; `docker`
  * and `cosign` for the container runtime), then the checks the server's worker release list gives,
  * read with no credential: `releases`, one `harness:<kind>` per harness it names, and `worker` (the
- * installed worker against the accepted releases). A check that cannot run because an earlier one
- * failed is `skip`. Any `fail` exits 1 with `DOCTOR_FAILED` and the report in `error.details`;
+ * installed worker against the accepted releases, and whether `pidgen-worker` first on `PATH` is
+ * it). A check that cannot run because an earlier one failed is `skip`. Any `fail` exits 1 with `DOCTOR_FAILED` and the report in `error.details`;
  * `warn` exits 0.
  */
 export const doctor: CommandSpec = {
@@ -97,7 +192,7 @@ export async function doctorChecks(
       : null;
   const checks: DoctorCheck[] = [
     nodeCheck(process.versions.node),
-    gitCheck(await findGit(ctx), ctx.workerRuntime.platform),
+    await gitDoctorCheck(ctx),
     connection.server,
     connection.credential,
     await runtimeCheck(ctx),
@@ -130,15 +225,20 @@ export interface FoundGit {
 }
 
 /**
- * The `git` check: git on `PATH`, 2.25 or later. The fix is the platform's way to install it: the
- * Command Line Tools on macOS, the package manager elsewhere.
+ * The `git` check: git on `PATH`, 2.38 or later (`MINIMUM_GIT`), compared numerically. A failing
+ * check's fix is the system's way to get it (`GIT_FIXES`): on macOS the Command Line Tools or
+ * Homebrew; on Linux the distribution's, from `osRelease` (the contents of `/etc/os-release`, `null`
+ * when unreadable), with distinct fixes for a missing and a too old git where the commands differ.
  */
-export function gitCheck(git: FoundGit | null, platform: NodeJS.Platform): DoctorCheck {
-  const fix = platform === "darwin" ? FIXES.gitMacos : FIXES.gitLinux;
-  const minimum = `${MINIMUM_GIT.major}.${MINIMUM_GIT.minor}`;
-  if (git === null) return check("git", "fail", "git is not on PATH.", fix);
+export function gitCheck(
+  git: FoundGit | null,
+  platform: NodeJS.Platform,
+  osRelease: string | null = null,
+): DoctorCheck {
+  const fixes = GIT_FIXES[gitSystem(platform, osRelease)];
+  if (git === null) return check("git", "fail", "git is not on PATH.", fixes.missing);
   if (git.version === null) {
-    return check("git", "fail", `${git.path} did not report a git version.`, fix);
+    return check("git", "fail", `${git.path} did not report a git version.`, fixes.missing);
   }
   const [major = 0, minor = 0] = git.version.split(".").map((part) => Number.parseInt(part, 10));
   const supported =
@@ -147,14 +247,23 @@ export function gitCheck(git: FoundGit | null, platform: NodeJS.Platform): Docto
     ? check(
         "git",
         "ok",
-        `git ${git.version} at ${git.path} (the worker needs ${minimum} or later).`,
+        `git ${git.version} at ${git.path} (the worker needs ${GIT_MINIMUM} or later).`,
       )
     : check(
         "git",
         "fail",
-        `git ${git.version} at ${git.path} is older than ${minimum}, the oldest the worker supports.`,
-        fix,
+        `git ${git.version} at ${git.path} is older than ${GIT_MINIMUM}, the oldest the worker supports.`,
+        fixes.old,
       );
+}
+
+/** The doctor's `git` check; `/etc/os-release` is read only on Linux and only when git fails. */
+async function gitDoctorCheck(ctx: RunContext): Promise<DoctorCheck> {
+  const runtime = ctx.workerRuntime;
+  const git = await findGit(ctx);
+  const result = gitCheck(git, runtime.platform);
+  if (result.status !== "fail" || runtime.platform !== "linux") return result;
+  return gitCheck(git, runtime.platform, await runtime.osRelease());
 }
 
 /** git on `PATH` and its version, from `git --version`; `null` when it is not on `PATH`. */

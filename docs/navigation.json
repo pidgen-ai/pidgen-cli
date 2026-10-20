@@ -16,6 +16,7 @@
         { "title": "Authentication and Accounts", "path": "authentication.md" },
         { "title": "Preview and apply", "path": "preview-and-apply.md" },
         { "title": "Planning work in cohorts", "path": "planning-cohorts.md" },
+        { "title": "Use a new model on a worker", "path": "worker-models.md" },
         { "title": "Architecture", "path": "architecture.md" }
       ]
     },
@@ -25,6 +26,7 @@
         { "title": "Commands", "path": "commands.md" },
         { "title": "Agent skills", "path": "skills.md" },
         { "title": "Workers", "path": "workers.md" },
+        { "title": "Worker policy", "path": "worker-policy.md" },
         { "title": "Output and exit codes", "path": "output-and-exit-codes.md" },
         { "title": "API compatibility", "path": "api-compatibility.md" }
       ]

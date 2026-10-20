@@ -1,0 +1,12 @@
+{
+  "rehearsal_id": "reh-example-1",
+  "state": "queued",
+  "ref": "pidgen/setup",
+  "commit": null,
+  "worker": null,
+  "steps": [],
+  "verdict": null,
+  "requested_at": "2026-10-19T09:10:00Z",
+  "finished_at": null,
+  "log_artifact_id": null
+}

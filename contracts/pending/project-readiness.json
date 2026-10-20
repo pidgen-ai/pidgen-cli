@@ -1,0 +1,2831 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Pidgen Public API: pending project readiness routes",
+    "version": "1.0",
+    "description": "A Project's readiness, as the App Service states it: the inspection of its repository, the findings (one per area), the questions it could not answer, the proposed setup (`.pidgen/pidgen.toml` and the scripts it names), and the rehearsal that proves it on a worker. GET …/readiness reads it; GET …/readiness/proposal/archive downloads the proposed files as a gzip-compressed tar archive, each entry a path under `.pidgen/` from the repository root with its mode; POST …/readiness/proposal/pull-request opens the pull request that proposes them; POST …/readiness/answers answers questions and inspects again; POST …/readiness/rehearse requests a rehearsal, followed by reading …/readiness until its `rehearsal` settles; POST …/readiness/doctor runs the Project doctor, which answers whether the setup is why work fails. Readiness never gates admission. When the server publishes them, they are pulled with contracts/openapi.json and this file is deleted. Settled here where the stated contract is silent: the schema names, the error codes, and the archive's media type. Every route takes the bearer credential and the X-PIDGEN-Account header like the published routes."
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/api/v1/projects/{project_ref}/readiness": {
+      "get": {
+        "tags": ["projects"],
+        "summary": "Read a Project's readiness",
+        "description": "The Project's readiness: the latest inspection and its findings, the questions, the proposal and the latest rehearsal. An unknown Project, and another Account's, is 404 PROJECT_NOT_FOUND.",
+        "operationId": "get_project_readiness_api_v1_projects__project_ref__readiness_get",
+        "parameters": [
+          {
+            "name": "project_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Ref"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                },
+                "examples": {
+                  "findings": {
+                    "summary": "Inspected, one question open, a draft proposed",
+                    "value": {
+                      "status": "ok",
+                      "data": {
+                        "project_id": "proj-example-sto",
+                        "project_key": "STO",
+                        "project_name": "Storefront",
+                        "repository": "example-org/storefront",
+                        "inspection": {
+                          "state": "inspected",
+                          "ref": "main",
+                          "commit": "3f2c1a9e5b7d4c6a8f0e1d2c3b4a59687f6e5d4c",
+                          "source": "forge",
+                          "started_at": "2026-10-19T09:00:00Z",
+                          "finished_at": "2026-10-19T09:00:04Z",
+                          "failure": null
+                        },
+                        "areas": [
+                          {
+                            "area": "checkout",
+                            "title": "Checkout",
+                            "state": "ok",
+                            "summary": "42 MB to clone; no submodules or LFS.",
+                            "proposal": null,
+                            "ask": null
+                          },
+                          {
+                            "area": "tools",
+                            "title": "Tools on the worker",
+                            "state": "proposed",
+                            "summary": "uv 0.4, Node 22 and Docker 24, from .python-version, .nvmrc and compose.yaml.",
+                            "proposal": "[worker] tools lists uv, node and docker.",
+                            "ask": null
+                          },
+                          {
+                            "area": "dependencies",
+                            "title": "Dependencies in each workspace",
+                            "state": "proposed",
+                            "summary": "uv.lock (84 packages) and package-lock.json (212 packages).",
+                            "proposal": "provision runs uv sync and npm ci with a worker-wide cache.",
+                            "ask": null
+                          },
+                          {
+                            "area": "services",
+                            "title": "Services",
+                            "state": "proposed",
+                            "summary": "compose.yaml starts postgres:16 and redis:7; CI uses the same two.",
+                            "proposal": "One Compose project per workspace; teardown removes it.",
+                            "ask": null
+                          },
+                          {
+                            "area": "database",
+                            "title": "Database setup",
+                            "state": "proposed",
+                            "summary": "alembic.ini and migrations/; CI runs alembic upgrade head.",
+                            "proposal": "provision migrates once the services are up.",
+                            "ask": null
+                          },
+                          {
+                            "area": "tests",
+                            "title": "Tests",
+                            "state": "proposed",
+                            "summary": "CI runs uv run pytest -m 'not slow' and npm test.",
+                            "proposal": "[tests] command runs both; timeout 900 s until a rehearsal measures it.",
+                            "ask": null
+                          },
+                          {
+                            "area": "ci",
+                            "title": "CI",
+                            "state": "ok",
+                            "summary": ".github/workflows/ci.yml runs on every pull request.",
+                            "proposal": null,
+                            "ask": null
+                          },
+                          {
+                            "area": "secrets",
+                            "title": "Secrets and data",
+                            "state": "needs_you",
+                            "summary": "CI reads STRIPE_TEST_KEY.",
+                            "proposal": null,
+                            "ask": "Add STRIPE_TEST_KEY as a Project secret, or let the tests that need it skip."
+                          }
+                        ],
+                        "questions": [
+                          {
+                            "question_id": "stripe-test-key",
+                            "area": "secrets",
+                            "question": "Should workspaces receive STRIPE_TEST_KEY, or do the tests that need it skip?",
+                            "evidence": [
+                              ".github/workflows/ci.yml passes secrets.STRIPE_TEST_KEY to the test job."
+                            ],
+                            "choices": ["pass", "skip"],
+                            "default": "skip",
+                            "answer": null
+                          }
+                        ],
+                        "proposal": {
+                          "state": "draft",
+                          "files": [
+                            {
+                              "path": ".pidgen/pidgen.toml",
+                              "executable": false,
+                              "bytes": 350
+                            },
+                            {
+                              "path": ".pidgen/scripts/provision",
+                              "executable": true,
+                              "bytes": 202
+                            },
+                            {
+                              "path": ".pidgen/scripts/activate",
+                              "executable": true,
+                              "bytes": 118
+                            },
+                            {
+                              "path": ".pidgen/scripts/teardown",
+                              "executable": true,
+                              "bytes": 131
+                            },
+                            {
+                              "path": ".pidgen/scripts/test",
+                              "executable": true,
+                              "bytes": 55
+                            }
+                          ],
+                          "assumptions": [
+                            "Tests run with uv run pytest -m 'not slow' and npm test, as CI runs them.",
+                            "postgres:16 and redis:7 start from compose.yaml, one Compose project per workspace.",
+                            "Migrations run with alembic upgrade head after the services start."
+                          ],
+                          "pull_request": null
+                        },
+                        "rehearsal": null,
+                        "updated_at": "2026-10-19T09:00:04Z"
+                      }
+                    }
+                  },
+                  "rehearsing": {
+                    "summary": "Pull request open, rehearsal running",
+                    "value": {
+                      "status": "ok",
+                      "data": {
+                        "project_id": "proj-example-sto",
+                        "project_key": "STO",
+                        "project_name": "Storefront",
+                        "repository": "example-org/storefront",
+                        "inspection": {
+                          "state": "inspected",
+                          "ref": "main",
+                          "commit": "3f2c1a9e5b7d4c6a8f0e1d2c3b4a59687f6e5d4c",
+                          "source": "forge",
+                          "started_at": "2026-10-19T09:00:00Z",
+                          "finished_at": "2026-10-19T09:00:04Z",
+                          "failure": null
+                        },
+                        "areas": [
+                          {
+                            "area": "checkout",
+                            "title": "Checkout",
+                            "state": "ok",
+                            "summary": "42 MB to clone; no submodules or LFS.",
+                            "proposal": null,
+                            "ask": null
+                          },
+                          {
+                            "area": "tools",
+                            "title": "Tools on the worker",
+                            "state": "proposed",
+                            "summary": "uv 0.4, Node 22 and Docker 24, from .python-version, .nvmrc and compose.yaml.",
+                            "proposal": "[worker] tools lists uv, node and docker.",
+                            "ask": null
+                          },
+                          {
+                            "area": "dependencies",
+                            "title": "Dependencies in each workspace",
+                            "state": "proposed",
+                            "summary": "uv.lock (84 packages) and package-lock.json (212 packages).",
+                            "proposal": "provision runs uv sync and npm ci with a worker-wide cache.",
+                            "ask": null
+                          },
+                          {
+                            "area": "services",
+                            "title": "Services",
+                            "state": "proposed",
+                            "summary": "compose.yaml starts postgres:16 and redis:7; CI uses the same two.",
+                            "proposal": "One Compose project per workspace; teardown removes it.",
+                            "ask": null
+                          },
+                          {
+                            "area": "database",
+                            "title": "Database setup",
+                            "state": "proposed",
+                            "summary": "alembic.ini and migrations/; CI runs alembic upgrade head.",
+                            "proposal": "provision migrates once the services are up.",
+                            "ask": null
+                          },
+                          {
+                            "area": "tests",
+                            "title": "Tests",
+                            "state": "proposed",
+                            "summary": "CI runs uv run pytest -m 'not slow' and npm test.",
+                            "proposal": "[tests] command runs both; timeout 900 s until a rehearsal measures it.",
+                            "ask": null
+                          },
+                          {
+                            "area": "ci",
+                            "title": "CI",
+                            "state": "ok",
+                            "summary": ".github/workflows/ci.yml runs on every pull request.",
+                            "proposal": null,
+                            "ask": null
+                          },
+                          {
+                            "area": "secrets",
+                            "title": "Secrets and data",
+                            "state": "needs_you",
+                            "summary": "CI reads STRIPE_TEST_KEY.",
+                            "proposal": null,
+                            "ask": "Add STRIPE_TEST_KEY as a Project secret, or let the tests that need it skip."
+                          }
+                        ],
+                        "questions": [
+                          {
+                            "question_id": "stripe-test-key",
+                            "area": "secrets",
+                            "question": "Should workspaces receive STRIPE_TEST_KEY, or do the tests that need it skip?",
+                            "evidence": [
+                              ".github/workflows/ci.yml passes secrets.STRIPE_TEST_KEY to the test job."
+                            ],
+                            "choices": ["pass", "skip"],
+                            "default": "skip",
+                            "answer": null
+                          }
+                        ],
+                        "proposal": {
+                          "state": "pull_request_open",
+                          "files": [
+                            {
+                              "path": ".pidgen/pidgen.toml",
+                              "executable": false,
+                              "bytes": 350
+                            },
+                            {
+                              "path": ".pidgen/scripts/provision",
+                              "executable": true,
+                              "bytes": 202
+                            },
+                            {
+                              "path": ".pidgen/scripts/activate",
+                              "executable": true,
+                              "bytes": 118
+                            },
+                            {
+                              "path": ".pidgen/scripts/teardown",
+                              "executable": true,
+                              "bytes": 131
+                            },
+                            {
+                              "path": ".pidgen/scripts/test",
+                              "executable": true,
+                              "bytes": 55
+                            }
+                          ],
+                          "assumptions": [
+                            "Tests run with uv run pytest -m 'not slow' and npm test, as CI runs them.",
+                            "postgres:16 and redis:7 start from compose.yaml, one Compose project per workspace.",
+                            "Migrations run with alembic upgrade head after the services start."
+                          ],
+                          "pull_request": {
+                            "url": "https://forge.example.com/example-org/storefront/pulls/1",
+                            "number": 1,
+                            "branch": "pidgen/setup",
+                            "state": "open"
+                          }
+                        },
+                        "rehearsal": {
+                          "rehearsal_id": "reh-example-1",
+                          "state": "running",
+                          "ref": "pidgen/setup",
+                          "commit": "9b8a7c6d5e4f30211f2e3d4c5b6a79881a2b3c4d",
+                          "worker": "build-box",
+                          "steps": [
+                            {
+                              "step": "provision",
+                              "state": "passed",
+                              "exit_code": 0,
+                              "duration_seconds": 161,
+                              "summary": null
+                            },
+                            {
+                              "step": "activate",
+                              "state": "running",
+                              "exit_code": null,
+                              "duration_seconds": null,
+                              "summary": null
+                            }
+                          ],
+                          "verdict": null,
+                          "requested_at": "2026-10-19T09:10:00Z",
+                          "finished_at": null,
+                          "log_artifact_id": null
+                        },
+                        "updated_at": "2026-10-19T09:13:01Z"
+                      }
+                    }
+                  },
+                  "rehearsed": {
+                    "summary": "Rehearsal passed",
+                    "value": {
+                      "status": "ok",
+                      "data": {
+                        "project_id": "proj-example-sto",
+                        "project_key": "STO",
+                        "project_name": "Storefront",
+                        "repository": "example-org/storefront",
+                        "inspection": {
+                          "state": "inspected",
+                          "ref": "main",
+                          "commit": "3f2c1a9e5b7d4c6a8f0e1d2c3b4a59687f6e5d4c",
+                          "source": "forge",
+                          "started_at": "2026-10-19T09:00:00Z",
+                          "finished_at": "2026-10-19T09:00:04Z",
+                          "failure": null
+                        },
+                        "areas": [
+                          {
+                            "area": "checkout",
+                            "title": "Checkout",
+                            "state": "ok",
+                            "summary": "42 MB to clone; no submodules or LFS.",
+                            "proposal": null,
+                            "ask": null
+                          },
+                          {
+                            "area": "tools",
+                            "title": "Tools on the worker",
+                            "state": "proposed",
+                            "summary": "uv 0.4, Node 22 and Docker 24, from .python-version, .nvmrc and compose.yaml.",
+                            "proposal": "[worker] tools lists uv, node and docker.",
+                            "ask": null
+                          },
+                          {
+                            "area": "dependencies",
+                            "title": "Dependencies in each workspace",
+                            "state": "proposed",
+                            "summary": "uv.lock (84 packages) and package-lock.json (212 packages).",
+                            "proposal": "provision runs uv sync and npm ci with a worker-wide cache.",
+                            "ask": null
+                          },
+                          {
+                            "area": "services",
+                            "title": "Services",
+                            "state": "proposed",
+                            "summary": "compose.yaml starts postgres:16 and redis:7; CI uses the same two.",
+                            "proposal": "One Compose project per workspace; teardown removes it.",
+                            "ask": null
+                          },
+                          {
+                            "area": "database",
+                            "title": "Database setup",
+                            "state": "proposed",
+                            "summary": "alembic.ini and migrations/; CI runs alembic upgrade head.",
+                            "proposal": "provision migrates once the services are up.",
+                            "ask": null
+                          },
+                          {
+                            "area": "tests",
+                            "title": "Tests",
+                            "state": "proposed",
+                            "summary": "CI runs uv run pytest -m 'not slow' and npm test.",
+                            "proposal": "[tests] command runs both; timeout 900 s until a rehearsal measures it.",
+                            "ask": null
+                          },
+                          {
+                            "area": "ci",
+                            "title": "CI",
+                            "state": "ok",
+                            "summary": ".github/workflows/ci.yml runs on every pull request.",
+                            "proposal": null,
+                            "ask": null
+                          },
+                          {
+                            "area": "secrets",
+                            "title": "Secrets and data",
+                            "state": "needs_you",
+                            "summary": "CI reads STRIPE_TEST_KEY.",
+                            "proposal": null,
+                            "ask": "Add STRIPE_TEST_KEY as a Project secret, or let the tests that need it skip."
+                          }
+                        ],
+                        "questions": [
+                          {
+                            "question_id": "stripe-test-key",
+                            "area": "secrets",
+                            "question": "Should workspaces receive STRIPE_TEST_KEY, or do the tests that need it skip?",
+                            "evidence": [
+                              ".github/workflows/ci.yml passes secrets.STRIPE_TEST_KEY to the test job."
+                            ],
+                            "choices": ["pass", "skip"],
+                            "default": "skip",
+                            "answer": null
+                          }
+                        ],
+                        "proposal": {
+                          "state": "pull_request_open",
+                          "files": [
+                            {
+                              "path": ".pidgen/pidgen.toml",
+                              "executable": false,
+                              "bytes": 350
+                            },
+                            {
+                              "path": ".pidgen/scripts/provision",
+                              "executable": true,
+                              "bytes": 202
+                            },
+                            {
+                              "path": ".pidgen/scripts/activate",
+                              "executable": true,
+                              "bytes": 118
+                            },
+                            {
+                              "path": ".pidgen/scripts/teardown",
+                              "executable": true,
+                              "bytes": 131
+                            },
+                            {
+                              "path": ".pidgen/scripts/test",
+                              "executable": true,
+                              "bytes": 55
+                            }
+                          ],
+                          "assumptions": [
+                            "Tests run with uv run pytest -m 'not slow' and npm test, as CI runs them.",
+                            "postgres:16 and redis:7 start from compose.yaml, one Compose project per workspace.",
+                            "Migrations run with alembic upgrade head after the services start."
+                          ],
+                          "pull_request": {
+                            "url": "https://forge.example.com/example-org/storefront/pulls/1",
+                            "number": 1,
+                            "branch": "pidgen/setup",
+                            "state": "open"
+                          }
+                        },
+                        "rehearsal": {
+                          "rehearsal_id": "reh-example-1",
+                          "state": "passed",
+                          "ref": "pidgen/setup",
+                          "commit": "9b8a7c6d5e4f30211f2e3d4c5b6a79881a2b3c4d",
+                          "worker": "build-box",
+                          "steps": [
+                            {
+                              "step": "provision",
+                              "state": "passed",
+                              "exit_code": 0,
+                              "duration_seconds": 161,
+                              "summary": null
+                            },
+                            {
+                              "step": "activate",
+                              "state": "passed",
+                              "exit_code": 0,
+                              "duration_seconds": 1,
+                              "summary": null
+                            },
+                            {
+                              "step": "database",
+                              "state": "passed",
+                              "exit_code": 0,
+                              "duration_seconds": 9,
+                              "summary": null
+                            },
+                            {
+                              "step": "tests",
+                              "state": "passed",
+                              "exit_code": 0,
+                              "duration_seconds": 192,
+                              "summary": "212 passed"
+                            }
+                          ],
+                          "verdict": "The setup works: provision 2:41, activate 0:01, database 0:09 and tests 3:12 with 212 passed on build-box.",
+                          "requested_at": "2026-10-19T09:10:00Z",
+                          "finished_at": "2026-10-19T09:16:10Z",
+                          "log_artifact_id": "art-example-rehearsal-1"
+                        },
+                        "updated_at": "2026-10-19T09:16:10Z"
+                      }
+                    }
+                  },
+                  "failed": {
+                    "summary": "Rehearsal failed",
+                    "value": {
+                      "status": "ok",
+                      "data": {
+                        "project_id": "proj-example-sto",
+                        "project_key": "STO",
+                        "project_name": "Storefront",
+                        "repository": "example-org/storefront",
+                        "inspection": {
+                          "state": "inspected",
+                          "ref": "main",
+                          "commit": "3f2c1a9e5b7d4c6a8f0e1d2c3b4a59687f6e5d4c",
+                          "source": "forge",
+                          "started_at": "2026-10-19T09:00:00Z",
+                          "finished_at": "2026-10-19T09:00:04Z",
+                          "failure": null
+                        },
+                        "areas": [
+                          {
+                            "area": "checkout",
+                            "title": "Checkout",
+                            "state": "ok",
+                            "summary": "42 MB to clone; no submodules or LFS.",
+                            "proposal": null,
+                            "ask": null
+                          },
+                          {
+                            "area": "tools",
+                            "title": "Tools on the worker",
+                            "state": "proposed",
+                            "summary": "uv 0.4, Node 22 and Docker 24, from .python-version, .nvmrc and compose.yaml.",
+                            "proposal": "[worker] tools lists uv, node and docker.",
+                            "ask": null
+                          },
+                          {
+                            "area": "dependencies",
+                            "title": "Dependencies in each workspace",
+                            "state": "proposed",
+                            "summary": "uv.lock (84 packages) and package-lock.json (212 packages).",
+                            "proposal": "provision runs uv sync and npm ci with a worker-wide cache.",
+                            "ask": null
+                          },
+                          {
+                            "area": "services",
+                            "title": "Services",
+                            "state": "proposed",
+                            "summary": "compose.yaml starts postgres:16 and redis:7; CI uses the same two.",
+                            "proposal": "One Compose project per workspace; teardown removes it.",
+                            "ask": null
+                          },
+                          {
+                            "area": "database",
+                            "title": "Database setup",
+                            "state": "proposed",
+                            "summary": "alembic.ini and migrations/; CI runs alembic upgrade head.",
+                            "proposal": "provision migrates once the services are up.",
+                            "ask": null
+                          },
+                          {
+                            "area": "tests",
+                            "title": "Tests",
+                            "state": "proposed",
+                            "summary": "CI runs uv run pytest -m 'not slow' and npm test.",
+                            "proposal": "[tests] command runs both; timeout 900 s until a rehearsal measures it.",
+                            "ask": null
+                          },
+                          {
+                            "area": "ci",
+                            "title": "CI",
+                            "state": "ok",
+                            "summary": ".github/workflows/ci.yml runs on every pull request.",
+                            "proposal": null,
+                            "ask": null
+                          },
+                          {
+                            "area": "secrets",
+                            "title": "Secrets and data",
+                            "state": "needs_you",
+                            "summary": "CI reads STRIPE_TEST_KEY.",
+                            "proposal": null,
+                            "ask": "Add STRIPE_TEST_KEY as a Project secret, or let the tests that need it skip."
+                          }
+                        ],
+                        "questions": [
+                          {
+                            "question_id": "stripe-test-key",
+                            "area": "secrets",
+                            "question": "Should workspaces receive STRIPE_TEST_KEY, or do the tests that need it skip?",
+                            "evidence": [
+                              ".github/workflows/ci.yml passes secrets.STRIPE_TEST_KEY to the test job."
+                            ],
+                            "choices": ["pass", "skip"],
+                            "default": "skip",
+                            "answer": null
+                          }
+                        ],
+                        "proposal": {
+                          "state": "pull_request_open",
+                          "files": [
+                            {
+                              "path": ".pidgen/pidgen.toml",
+                              "executable": false,
+                              "bytes": 350
+                            },
+                            {
+                              "path": ".pidgen/scripts/provision",
+                              "executable": true,
+                              "bytes": 202
+                            },
+                            {
+                              "path": ".pidgen/scripts/activate",
+                              "executable": true,
+                              "bytes": 118
+                            },
+                            {
+                              "path": ".pidgen/scripts/teardown",
+                              "executable": true,
+                              "bytes": 131
+                            },
+                            {
+                              "path": ".pidgen/scripts/test",
+                              "executable": true,
+                              "bytes": 55
+                            }
+                          ],
+                          "assumptions": [
+                            "Tests run with uv run pytest -m 'not slow' and npm test, as CI runs them.",
+                            "postgres:16 and redis:7 start from compose.yaml, one Compose project per workspace.",
+                            "Migrations run with alembic upgrade head after the services start."
+                          ],
+                          "pull_request": {
+                            "url": "https://forge.example.com/example-org/storefront/pulls/1",
+                            "number": 1,
+                            "branch": "pidgen/setup",
+                            "state": "open"
+                          }
+                        },
+                        "rehearsal": {
+                          "rehearsal_id": "reh-example-1",
+                          "state": "failed",
+                          "ref": "pidgen/setup",
+                          "commit": "9b8a7c6d5e4f30211f2e3d4c5b6a79881a2b3c4d",
+                          "worker": "build-box",
+                          "steps": [
+                            {
+                              "step": "provision",
+                              "state": "passed",
+                              "exit_code": 0,
+                              "duration_seconds": 161,
+                              "summary": null
+                            },
+                            {
+                              "step": "activate",
+                              "state": "passed",
+                              "exit_code": 0,
+                              "duration_seconds": 1,
+                              "summary": null
+                            },
+                            {
+                              "step": "database",
+                              "state": "failed",
+                              "exit_code": 1,
+                              "duration_seconds": 7,
+                              "summary": "migration 0042 needs the pgvector extension"
+                            }
+                          ],
+                          "verdict": "Database setup failed after 0:07: migration 0042 needs the pgvector extension, and the setup starts postgres:16 where CI uses pgvector/pgvector:pg16. Change the image in compose.yaml on pidgen/setup and rehearse again.",
+                          "requested_at": "2026-10-19T09:10:00Z",
+                          "finished_at": "2026-10-19T09:13:00Z",
+                          "log_artifact_id": "art-example-rehearsal-1"
+                        },
+                        "updated_at": "2026-10-19T09:13:00Z"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "PROJECT_NOT_FOUND: no such Project in the Account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                },
+                "example": {
+                  "status": "error",
+                  "error": {
+                    "code": "PROJECT_NOT_FOUND",
+                    "message": "No such project.",
+                    "details": {},
+                    "request_id": "req_example"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "INPUT_INVALID: the request failed validation; error.details.errors lists each failure (loc, msg, type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error, in the public error shape.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project_ref}/readiness/proposal/archive": {
+      "get": {
+        "tags": ["projects"],
+        "summary": "Download the proposed setup",
+        "description": "The proposed files as a gzip-compressed tar archive: one regular-file entry per file, its path from the repository root under `.pidgen/` and its mode (0755 for a script, 0644 otherwise), with directory entries for `.pidgen/` and `.pidgen/scripts/`. No links. 404 READINESS_PROPOSAL_NOT_FOUND while there is no proposal (still inspecting, or nothing to set up).",
+        "operationId": "get_project_readiness_proposal_archive_api_v1_projects__project_ref__readiness_proposal_archive_get",
+        "parameters": [
+          {
+            "name": "project_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Ref"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The archive.",
+            "content": {
+              "application/gzip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                },
+                "example": "(a gzip-compressed tar archive)"
+              }
+            }
+          },
+          "404": {
+            "description": "PROJECT_NOT_FOUND, or READINESS_PROPOSAL_NOT_FOUND: the Project has no proposal yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                },
+                "example": {
+                  "status": "error",
+                  "error": {
+                    "code": "READINESS_PROPOSAL_NOT_FOUND",
+                    "message": "Storefront has no proposed setup yet.",
+                    "details": {},
+                    "request_id": "req_example"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "INPUT_INVALID: the request failed validation; error.details.errors lists each failure (loc, msg, type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error, in the public error shape.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project_ref}/readiness/proposal/pull-request": {
+      "post": {
+        "tags": ["projects"],
+        "summary": "Open the setup pull request",
+        "description": "Create a branch with the proposed files and open a pull request for it through the Project's forge connection, answering the proposal with its `pull_request`. When one is already open it is answered unchanged. 404 READINESS_PROPOSAL_NOT_FOUND without a proposal; 409 FORGE_NOT_CONNECTED when the Project has no forge (download the archive instead); 409 READINESS_QUESTIONS_OPEN while a question is unanswered.",
+        "operationId": "open_project_readiness_pull_request_api_v1_projects__project_ref__readiness_proposal_pull_request_post",
+        "parameters": [
+          {
+            "name": "project_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Ref"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessProposalResponse"
+                },
+                "example": {
+                  "status": "ok",
+                  "data": {
+                    "state": "pull_request_open",
+                    "files": [
+                      {
+                        "path": ".pidgen/pidgen.toml",
+                        "executable": false,
+                        "bytes": 350
+                      },
+                      {
+                        "path": ".pidgen/scripts/provision",
+                        "executable": true,
+                        "bytes": 202
+                      },
+                      {
+                        "path": ".pidgen/scripts/activate",
+                        "executable": true,
+                        "bytes": 118
+                      },
+                      {
+                        "path": ".pidgen/scripts/teardown",
+                        "executable": true,
+                        "bytes": 131
+                      },
+                      {
+                        "path": ".pidgen/scripts/test",
+                        "executable": true,
+                        "bytes": 55
+                      }
+                    ],
+                    "assumptions": [
+                      "Tests run with uv run pytest -m 'not slow' and npm test, as CI runs them.",
+                      "postgres:16 and redis:7 start from compose.yaml, one Compose project per workspace.",
+                      "Migrations run with alembic upgrade head after the services start."
+                    ],
+                    "pull_request": {
+                      "url": "https://forge.example.com/example-org/storefront/pulls/1",
+                      "number": 1,
+                      "branch": "pidgen/setup",
+                      "state": "open"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "PROJECT_NOT_FOUND, or READINESS_PROPOSAL_NOT_FOUND.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "FORGE_NOT_CONNECTED, or READINESS_QUESTIONS_OPEN.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                },
+                "example": {
+                  "status": "error",
+                  "error": {
+                    "code": "FORGE_NOT_CONNECTED",
+                    "message": "Storefront has no forge connection; download the files instead.",
+                    "details": {},
+                    "request_id": "req_example"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "INPUT_INVALID: the request failed validation; error.details.errors lists each failure (loc, msg, type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error, in the public error shape.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project_ref}/readiness/answers": {
+      "post": {
+        "tags": ["projects"],
+        "summary": "Answer readiness questions",
+        "description": "Record answers to the inspection's questions and inspect the repository again with them, answering the readiness with the inspection `inspecting`. 422 READINESS_QUESTION_UNKNOWN for a question the Project does not have; 422 READINESS_ANSWER_INVALID for a value not among its `choices`.",
+        "operationId": "answer_project_readiness_questions_api_v1_projects__project_ref__readiness_answers_post",
+        "parameters": [
+          {
+            "name": "project_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Ref"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReadinessAnswersRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted: inspecting again.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                },
+                "example": {
+                  "status": "ok",
+                  "data": {
+                    "project_id": "proj-example-sto",
+                    "project_key": "STO",
+                    "project_name": "Storefront",
+                    "repository": "example-org/storefront",
+                    "inspection": {
+                      "state": "inspecting",
+                      "ref": "main",
+                      "commit": "3f2c1a9e5b7d4c6a8f0e1d2c3b4a59687f6e5d4c",
+                      "source": "forge",
+                      "started_at": "2026-10-19T09:00:00Z",
+                      "finished_at": null,
+                      "failure": null
+                    },
+                    "areas": [
+                      {
+                        "area": "checkout",
+                        "title": "Checkout",
+                        "state": "ok",
+                        "summary": "42 MB to clone; no submodules or LFS.",
+                        "proposal": null,
+                        "ask": null
+                      },
+                      {
+                        "area": "tools",
+                        "title": "Tools on the worker",
+                        "state": "proposed",
+                        "summary": "uv 0.4, Node 22 and Docker 24, from .python-version, .nvmrc and compose.yaml.",
+                        "proposal": "[worker] tools lists uv, node and docker.",
+                        "ask": null
+                      },
+                      {
+                        "area": "dependencies",
+                        "title": "Dependencies in each workspace",
+                        "state": "proposed",
+                        "summary": "uv.lock (84 packages) and package-lock.json (212 packages).",
+                        "proposal": "provision runs uv sync and npm ci with a worker-wide cache.",
+                        "ask": null
+                      },
+                      {
+                        "area": "services",
+                        "title": "Services",
+                        "state": "proposed",
+                        "summary": "compose.yaml starts postgres:16 and redis:7; CI uses the same two.",
+                        "proposal": "One Compose project per workspace; teardown removes it.",
+                        "ask": null
+                      },
+                      {
+                        "area": "database",
+                        "title": "Database setup",
+                        "state": "proposed",
+                        "summary": "alembic.ini and migrations/; CI runs alembic upgrade head.",
+                        "proposal": "provision migrates once the services are up.",
+                        "ask": null
+                      },
+                      {
+                        "area": "tests",
+                        "title": "Tests",
+                        "state": "proposed",
+                        "summary": "CI runs uv run pytest -m 'not slow' and npm test.",
+                        "proposal": "[tests] command runs both; timeout 900 s until a rehearsal measures it.",
+                        "ask": null
+                      },
+                      {
+                        "area": "ci",
+                        "title": "CI",
+                        "state": "ok",
+                        "summary": ".github/workflows/ci.yml runs on every pull request.",
+                        "proposal": null,
+                        "ask": null
+                      },
+                      {
+                        "area": "secrets",
+                        "title": "Secrets and data",
+                        "state": "needs_you",
+                        "summary": "CI reads STRIPE_TEST_KEY.",
+                        "proposal": null,
+                        "ask": "Add STRIPE_TEST_KEY as a Project secret, or let the tests that need it skip."
+                      }
+                    ],
+                    "questions": [
+                      {
+                        "question_id": "stripe-test-key",
+                        "area": "secrets",
+                        "question": "Should workspaces receive STRIPE_TEST_KEY, or do the tests that need it skip?",
+                        "evidence": [
+                          ".github/workflows/ci.yml passes secrets.STRIPE_TEST_KEY to the test job."
+                        ],
+                        "choices": ["pass", "skip"],
+                        "default": "skip",
+                        "answer": "skip"
+                      }
+                    ],
+                    "proposal": {
+                      "state": "draft",
+                      "files": [
+                        {
+                          "path": ".pidgen/pidgen.toml",
+                          "executable": false,
+                          "bytes": 350
+                        },
+                        {
+                          "path": ".pidgen/scripts/provision",
+                          "executable": true,
+                          "bytes": 202
+                        },
+                        {
+                          "path": ".pidgen/scripts/activate",
+                          "executable": true,
+                          "bytes": 118
+                        },
+                        {
+                          "path": ".pidgen/scripts/teardown",
+                          "executable": true,
+                          "bytes": 131
+                        },
+                        {
+                          "path": ".pidgen/scripts/test",
+                          "executable": true,
+                          "bytes": 55
+                        }
+                      ],
+                      "assumptions": [
+                        "Tests run with uv run pytest -m 'not slow' and npm test, as CI runs them.",
+                        "postgres:16 and redis:7 start from compose.yaml, one Compose project per workspace.",
+                        "Migrations run with alembic upgrade head after the services start."
+                      ],
+                      "pull_request": null
+                    },
+                    "rehearsal": null,
+                    "updated_at": "2026-10-19T09:05:00Z"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "PROJECT_NOT_FOUND: no such Project in the Account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                },
+                "example": {
+                  "status": "error",
+                  "error": {
+                    "code": "PROJECT_NOT_FOUND",
+                    "message": "No such project.",
+                    "details": {},
+                    "request_id": "req_example"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "INPUT_INVALID, READINESS_QUESTION_UNKNOWN or READINESS_ANSWER_INVALID.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                },
+                "example": {
+                  "status": "error",
+                  "error": {
+                    "code": "READINESS_QUESTION_UNKNOWN",
+                    "message": "Storefront has no question monorepo-packages.",
+                    "details": {},
+                    "request_id": "req_example"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error, in the public error shape.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project_ref}/readiness/rehearse": {
+      "post": {
+        "tags": ["projects"],
+        "summary": "Rehearse the setup",
+        "description": "Ask a worker to build a throwaway workspace from `ref` through the ordinary provisioning path, run provision, activate, the database step and the tests, and tear it down. Answers the rehearsal, `queued`; read …/readiness to follow it. 404 READINESS_PROPOSAL_NOT_FOUND when there is nothing to rehearse; 409 REHEARSAL_IN_PROGRESS while another runs; 409 NO_ELIGIBLE_WORKER when no connected worker can run the Project.",
+        "operationId": "rehearse_project_readiness_api_v1_projects__project_ref__readiness_rehearse_post",
+        "parameters": [
+          {
+            "name": "project_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Ref"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RehearseRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted: the rehearsal is queued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RehearsalResponse"
+                },
+                "example": {
+                  "status": "ok",
+                  "data": {
+                    "rehearsal_id": "reh-example-1",
+                    "state": "queued",
+                    "ref": "pidgen/setup",
+                    "commit": null,
+                    "worker": null,
+                    "steps": [],
+                    "verdict": null,
+                    "requested_at": "2026-10-19T09:10:00Z",
+                    "finished_at": null,
+                    "log_artifact_id": null
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "PROJECT_NOT_FOUND, or READINESS_PROPOSAL_NOT_FOUND.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "REHEARSAL_IN_PROGRESS, or NO_ELIGIBLE_WORKER.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                },
+                "example": {
+                  "status": "error",
+                  "error": {
+                    "code": "REHEARSAL_IN_PROGRESS",
+                    "message": "A rehearsal of Storefront is already running.",
+                    "details": {},
+                    "request_id": "req_example"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "INPUT_INVALID: the request failed validation; error.details.errors lists each failure (loc, msg, type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error, in the public error shape.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project_ref}/readiness/doctor": {
+      "post": {
+        "tags": ["projects"],
+        "summary": "Run the Project doctor",
+        "description": "Ask whether the workspace setup is why work in the Project fails. Reads the setup files at the base branch through a worker, the connected workers' preflight and the last `since_days` days (7 by default) of the Project's runs, and answers the report when the checks are done (under a minute). Changes nothing, except that `propose_fix` opens the fix as a pull request when the setup is the problem and the doctor has a template for it. 404 PROJECT_NOT_FOUND; 409 FORGE_NOT_CONNECTED when `propose_fix` cannot open the pull request.",
+        "operationId": "run_project_doctor_api_v1_projects__project_ref__readiness_doctor_post",
+        "parameters": [
+          {
+            "name": "project_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Ref"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectDoctorRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "description": "The doctor's report.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectDoctorResponse"
+                },
+                "examples": {
+                  "setup": {
+                    "summary": "The setup is the problem",
+                    "value": {
+                      "status": "ok",
+                      "data": {
+                        "project_key": "STO",
+                        "project_name": "Storefront",
+                        "repository": "acme/storefront",
+                        "ref": "main",
+                        "commit": "7c1e0f2a9b8d4c3e1f0a",
+                        "since": "2026-10-11T00:00:00Z",
+                        "window_days": 7,
+                        "ran_at": "2026-10-18T09:12:00Z",
+                        "verdict": "setup",
+                        "summary": "5 of the 6 runs that failed since 11 Oct stopped before any test ran: activate exits 1 whenever uv.lock differs from what provision installed. STO-31 changed uv.lock on 15 Oct, and every workspace built since fails the same way.",
+                        "groups": [
+                          {
+                            "group": "setup_files",
+                            "title": "Setup files on main",
+                            "checks": [
+                              {
+                                "state": "ok",
+                                "summary": ".pidgen/pidgen.toml at 7c1e0f2, 4 hooks, [tests] and [worker] set",
+                                "evidence": null,
+                                "tickets": [],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          },
+                          {
+                            "group": "workers",
+                            "title": "Workers",
+                            "checks": [
+                              {
+                                "state": "ok",
+                                "summary": "ada-mbp meets uv >= 0.4, node >= 22, docker >= 24 (the only one that does)",
+                                "evidence": null,
+                                "tickets": [],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          },
+                          {
+                            "group": "secrets",
+                            "title": "Secrets",
+                            "checks": [
+                              {
+                                "state": "ok",
+                                "summary": "STRIPE_TEST_KEY set",
+                                "evidence": null,
+                                "tickets": [],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          },
+                          {
+                            "group": "workspaces",
+                            "title": "Workspaces, 7 days",
+                            "checks": [
+                              {
+                                "state": "failed",
+                                "summary": "5 of 6 failures are activate exiting 1",
+                                "evidence": "uv.lock changed since provision; run provision",
+                                "tickets": ["STO-33", "STO-34", "STO-35", "STO-36", "STO-37"],
+                                "cause": ".pidgen/scripts/activate was changed on 14 Oct by STO-30 to fail when the lockfile hash differs.",
+                                "fix": "activate must not fail on something a Ticket changes: warn on stderr and exit 0."
+                              },
+                              {
+                                "state": "ok",
+                                "summary": "No provision failures, no hook timeouts, no residue blocks",
+                                "evidence": null,
+                                "tickets": [],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          },
+                          {
+                            "group": "tests",
+                            "title": "Tests, 7 days",
+                            "checks": [
+                              {
+                                "state": "ok",
+                                "summary": "1 failure was code, not environment (STO-32)",
+                                "evidence": null,
+                                "tickets": ["STO-32"],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          },
+                          {
+                            "group": "drift",
+                            "title": "Drift",
+                            "checks": [
+                              {
+                                "state": "needs_you",
+                                "summary": "main is 23 commits past the last rehearsal (1 Oct)",
+                                "evidence": null,
+                                "tickets": [],
+                                "cause": null,
+                                "fix": null
+                              },
+                              {
+                                "state": "needs_you",
+                                "summary": "1 leaked Compose project on ada-mbp (STO-29)",
+                                "evidence": null,
+                                "tickets": ["STO-29"],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          }
+                        ],
+                        "fix": {
+                          "summary": "activate: warn instead of failing when uv.lock changes",
+                          "template": "activate_warn",
+                          "pull_request": null,
+                          "retry": ["STO-33", "STO-34", "STO-35", "STO-36", "STO-37"]
+                        },
+                        "failed_tickets": [
+                          "STO-32",
+                          "STO-33",
+                          "STO-34",
+                          "STO-35",
+                          "STO-36",
+                          "STO-37"
+                        ],
+                        "rehearse": "refresh the timings from main (about 6 min)"
+                      }
+                    }
+                  },
+                  "code": {
+                    "summary": "The setup is not the problem: the failures were code",
+                    "value": {
+                      "status": "ok",
+                      "data": {
+                        "project_key": "STO",
+                        "project_name": "Storefront",
+                        "repository": "acme/storefront",
+                        "ref": "main",
+                        "commit": "9d02a41c7e5b3f1a2d4e",
+                        "since": "2026-10-11T00:00:00Z",
+                        "window_days": 7,
+                        "ran_at": "2026-10-18T09:12:00Z",
+                        "verdict": "code",
+                        "summary": "2 runs failed since 11 Oct, both on assertions in tests the Ticket itself changed (STO-40, STO-41). Every workspace built since 1 Oct provisioned and activated, and the tests ran in 3:05 to 3:40.",
+                        "groups": [
+                          {
+                            "group": "setup_files",
+                            "title": "Setup files on main",
+                            "checks": [
+                              {
+                                "state": "ok",
+                                "summary": ".pidgen/pidgen.toml at 9d02a41, 4 hooks, [tests] and [worker] set",
+                                "evidence": null,
+                                "tickets": [],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          },
+                          {
+                            "group": "workers",
+                            "title": "Workers",
+                            "checks": [
+                              {
+                                "state": "ok",
+                                "summary": "ada-mbp and build-02 meet [worker] tools",
+                                "evidence": null,
+                                "tickets": [],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          },
+                          {
+                            "group": "secrets",
+                            "title": "Secrets",
+                            "checks": [
+                              {
+                                "state": "ok",
+                                "summary": "STRIPE_TEST_KEY set",
+                                "evidence": null,
+                                "tickets": [],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          },
+                          {
+                            "group": "workspaces",
+                            "title": "Workspaces, 7 days",
+                            "checks": [
+                              {
+                                "state": "ok",
+                                "summary": "11 workspaces built; no provision, activation or teardown failures",
+                                "evidence": null,
+                                "tickets": [],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          },
+                          {
+                            "group": "tests",
+                            "title": "Tests, 7 days",
+                            "checks": [
+                              {
+                                "state": "ok",
+                                "summary": "2 failures, both code: STO-40 and STO-41; no environment signatures",
+                                "evidence": null,
+                                "tickets": ["STO-40", "STO-41"],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          },
+                          {
+                            "group": "drift",
+                            "title": "Drift",
+                            "checks": [
+                              {
+                                "state": "needs_you",
+                                "summary": "main is 23 commits past the last rehearsal (1 Oct); .pidgen/ is unchanged",
+                                "evidence": null,
+                                "tickets": [],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          }
+                        ],
+                        "fix": null,
+                        "failed_tickets": ["STO-40", "STO-41"],
+                        "rehearse": "refresh the timings from main (about 6 min)"
+                      }
+                    }
+                  },
+                  "unclear": {
+                    "summary": "The doctor cannot tell whether the setup is the problem",
+                    "value": {
+                      "status": "ok",
+                      "data": {
+                        "project_key": "STO",
+                        "project_name": "Storefront",
+                        "repository": "acme/storefront",
+                        "ref": "main",
+                        "commit": "9d02a41c7e5b3f1a2d4e",
+                        "since": "2026-10-11T00:00:00Z",
+                        "window_days": 7,
+                        "ran_at": "2026-10-18T09:12:00Z",
+                        "verdict": "unclear",
+                        "summary": "1 run failed since 11 Oct and the doctor cannot tell why: STO-42 stopped in its tests on a connection refused to localhost:6379, which neither the setup nor the Ticket's changes explain. Every other workspace built since 1 Oct provisioned and activated.",
+                        "groups": [
+                          {
+                            "group": "setup_files",
+                            "title": "Setup files on main",
+                            "checks": [
+                              {
+                                "state": "ok",
+                                "summary": ".pidgen/pidgen.toml at 9d02a41, 4 hooks, [tests] and [worker] set",
+                                "evidence": null,
+                                "tickets": [],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          },
+                          {
+                            "group": "workers",
+                            "title": "Workers",
+                            "checks": [
+                              {
+                                "state": "ok",
+                                "summary": "ada-mbp and build-02 meet [worker] tools",
+                                "evidence": null,
+                                "tickets": [],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          },
+                          {
+                            "group": "secrets",
+                            "title": "Secrets",
+                            "checks": [
+                              {
+                                "state": "ok",
+                                "summary": "STRIPE_TEST_KEY set",
+                                "evidence": null,
+                                "tickets": [],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          },
+                          {
+                            "group": "workspaces",
+                            "title": "Workspaces, 7 days",
+                            "checks": [
+                              {
+                                "state": "ok",
+                                "summary": "9 workspaces built; no provision, activation or teardown failures",
+                                "evidence": null,
+                                "tickets": [],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          },
+                          {
+                            "group": "tests",
+                            "title": "Tests, 7 days",
+                            "checks": [
+                              {
+                                "state": "needs_you",
+                                "summary": "1 failure the doctor cannot classify (STO-42)",
+                                "evidence": "ConnectionRefusedError: [Errno 111] Connection refused (localhost:6379)",
+                                "tickets": ["STO-42"],
+                                "cause": null,
+                                "fix": "Open the run's test log; if the tests need Redis, add it to compose.yaml and rehearse again."
+                              }
+                            ]
+                          },
+                          {
+                            "group": "drift",
+                            "title": "Drift",
+                            "checks": [
+                              {
+                                "state": "needs_you",
+                                "summary": "main is 23 commits past the last rehearsal (1 Oct); .pidgen/ is unchanged",
+                                "evidence": null,
+                                "tickets": [],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          }
+                        ],
+                        "fix": null,
+                        "failed_tickets": ["STO-42"],
+                        "rehearse": "refresh the timings from main (about 6 min)"
+                      }
+                    }
+                  },
+                  "fix_proposed": {
+                    "summary": "The setup is the problem, its fix opened as a pull request",
+                    "value": {
+                      "status": "ok",
+                      "data": {
+                        "project_key": "STO",
+                        "project_name": "Storefront",
+                        "repository": "acme/storefront",
+                        "ref": "main",
+                        "commit": "7c1e0f2a9b8d4c3e1f0a",
+                        "since": "2026-10-11T00:00:00Z",
+                        "window_days": 7,
+                        "ran_at": "2026-10-18T09:12:00Z",
+                        "verdict": "setup",
+                        "summary": "5 of the 6 runs that failed since 11 Oct stopped before any test ran: activate exits 1 whenever uv.lock differs from what provision installed. STO-31 changed uv.lock on 15 Oct, and every workspace built since fails the same way.",
+                        "groups": [
+                          {
+                            "group": "setup_files",
+                            "title": "Setup files on main",
+                            "checks": [
+                              {
+                                "state": "ok",
+                                "summary": ".pidgen/pidgen.toml at 7c1e0f2, 4 hooks, [tests] and [worker] set",
+                                "evidence": null,
+                                "tickets": [],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          },
+                          {
+                            "group": "workers",
+                            "title": "Workers",
+                            "checks": [
+                              {
+                                "state": "ok",
+                                "summary": "ada-mbp meets uv >= 0.4, node >= 22, docker >= 24 (the only one that does)",
+                                "evidence": null,
+                                "tickets": [],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          },
+                          {
+                            "group": "secrets",
+                            "title": "Secrets",
+                            "checks": [
+                              {
+                                "state": "ok",
+                                "summary": "STRIPE_TEST_KEY set",
+                                "evidence": null,
+                                "tickets": [],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          },
+                          {
+                            "group": "workspaces",
+                            "title": "Workspaces, 7 days",
+                            "checks": [
+                              {
+                                "state": "failed",
+                                "summary": "5 of 6 failures are activate exiting 1",
+                                "evidence": "uv.lock changed since provision; run provision",
+                                "tickets": ["STO-33", "STO-34", "STO-35", "STO-36", "STO-37"],
+                                "cause": ".pidgen/scripts/activate was changed on 14 Oct by STO-30 to fail when the lockfile hash differs.",
+                                "fix": "activate must not fail on something a Ticket changes: warn on stderr and exit 0."
+                              },
+                              {
+                                "state": "ok",
+                                "summary": "No provision failures, no hook timeouts, no residue blocks",
+                                "evidence": null,
+                                "tickets": [],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          },
+                          {
+                            "group": "tests",
+                            "title": "Tests, 7 days",
+                            "checks": [
+                              {
+                                "state": "ok",
+                                "summary": "1 failure was code, not environment (STO-32)",
+                                "evidence": null,
+                                "tickets": ["STO-32"],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          },
+                          {
+                            "group": "drift",
+                            "title": "Drift",
+                            "checks": [
+                              {
+                                "state": "needs_you",
+                                "summary": "main is 23 commits past the last rehearsal (1 Oct)",
+                                "evidence": null,
+                                "tickets": [],
+                                "cause": null,
+                                "fix": null
+                              },
+                              {
+                                "state": "needs_you",
+                                "summary": "1 leaked Compose project on ada-mbp (STO-29)",
+                                "evidence": null,
+                                "tickets": ["STO-29"],
+                                "cause": null,
+                                "fix": null
+                              }
+                            ]
+                          }
+                        ],
+                        "fix": {
+                          "summary": "activate: warn instead of failing when uv.lock changes",
+                          "template": "activate_warn",
+                          "pull_request": {
+                            "url": "https://forge.example.com/acme/storefront/pulls/19",
+                            "number": 19,
+                            "branch": "pidgen/doctor/activate-warn",
+                            "state": "open"
+                          },
+                          "retry": ["STO-33", "STO-34", "STO-35", "STO-36", "STO-37"]
+                        },
+                        "failed_tickets": [
+                          "STO-32",
+                          "STO-33",
+                          "STO-34",
+                          "STO-35",
+                          "STO-36",
+                          "STO-37"
+                        ],
+                        "rehearse": "refresh the timings from main (about 6 min)"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "PROJECT_NOT_FOUND.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "FORGE_NOT_CONNECTED: `propose_fix` cannot open the pull request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                },
+                "example": {
+                  "status": "error",
+                  "error": {
+                    "code": "FORGE_NOT_CONNECTED",
+                    "message": "Storefront's forge is not connected, so the fix cannot be opened as a pull request.",
+                    "details": {},
+                    "request_id": "req_example"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "INPUT_INVALID: the request failed validation; error.details.errors lists each failure (loc, msg, type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error, in the public error shape.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A CLI token, sent as `Authorization: Bearer <token>`. Obtain one with the device-code login: POST /api/v1/auth/device, then poll POST /api/v1/auth/device/token."
+      }
+    },
+    "schemas": {
+      "ReadinessInspection": {
+        "type": "object",
+        "title": "ReadinessInspection",
+        "description": "The latest inspection of the Project's repository.",
+        "additionalProperties": false,
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": ["inspecting", "inspected", "failed"],
+            "description": "`inspecting` while the files are read, `inspected` once the findings are in, `failed` when the repository could not be read (`failure` says why)."
+          },
+          "ref": {
+            "type": "string",
+            "description": "The branch read, the Project's base branch."
+          },
+          "commit": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "The commit read; null until it is known."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source": {
+            "type": "string",
+            "enum": ["forge", "worker"],
+            "description": "`forge`: read through the forge API with the Project's token; `worker`: a worker read a plain git remote."
+          },
+          "started_at": {
+            "type": "string",
+            "description": "When the inspection started.",
+            "format": "date-time"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "When it finished; null while inspecting.",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "failure": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "Why the repository could not be read; null unless `failed`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": ["state", "ref", "commit", "source", "started_at", "finished_at", "failure"]
+      },
+      "ReadinessArea": {
+        "type": "object",
+        "title": "ReadinessArea",
+        "description": "One finding: what the inspection found in one area of the repository.",
+        "additionalProperties": false,
+        "properties": {
+          "area": {
+            "type": "string",
+            "enum": [
+              "checkout",
+              "tools",
+              "dependencies",
+              "services",
+              "database",
+              "tests",
+              "ci",
+              "secrets"
+            ],
+            "description": "The area, one finding each."
+          },
+          "title": {
+            "type": "string",
+            "description": "The area's name as a person reads it, e.g. `Tools on the worker`."
+          },
+          "state": {
+            "type": "string",
+            "enum": ["ok", "proposed", "needs_you", "cannot_tell", "pending"],
+            "description": "`ok`: nothing to do; `proposed`: the proposal covers it; `needs_you`: a person must act (`ask` says how); `cannot_tell`: a question must be answered before Pidgen proposes anything; `pending`: not known yet (inspecting, or a worker must answer)."
+          },
+          "summary": {
+            "type": "string",
+            "description": "What was found, in one sentence."
+          },
+          "proposal": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "What the proposal does about it; null when nothing."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ask": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "What a person must do; null unless the area needs someone."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": ["area", "title", "state", "summary", "proposal", "ask"]
+      },
+      "ReadinessQuestion": {
+        "type": "object",
+        "title": "ReadinessQuestion",
+        "description": "A question the inspection could not answer from the files. Answering it (POST …/readiness/answers) inspects again with the answer.",
+        "additionalProperties": false,
+        "properties": {
+          "question_id": {
+            "type": "string",
+            "description": "The question's id, used to answer it.",
+            "minLength": 1
+          },
+          "area": {
+            "type": "string",
+            "enum": [
+              "checkout",
+              "tools",
+              "dependencies",
+              "services",
+              "database",
+              "tests",
+              "ci",
+              "secrets"
+            ],
+            "description": "The area it decides."
+          },
+          "question": {
+            "type": "string",
+            "description": "The question, as a person reads it."
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What the inspection found that raised it."
+          },
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The answers it takes; empty when any text is an answer."
+          },
+          "default": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "The answer used when none is given; null when there is none."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "answer": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "The answer recorded; null while the question is open."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": ["question_id", "area", "question", "evidence", "choices", "default", "answer"]
+      },
+      "ProposalFile": {
+        "type": "object",
+        "title": "ProposalFile",
+        "description": "One proposed file, by its path from the repository root.",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The path from the repository root, under `.pidgen/`."
+          },
+          "executable": {
+            "type": "boolean",
+            "description": "Whether the file is executable (a script the manifest names)."
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Its size."
+          }
+        },
+        "required": ["path", "executable", "bytes"]
+      },
+      "ProposalPullRequest": {
+        "type": "object",
+        "title": "ProposalPullRequest",
+        "description": "The pull request that proposes the setup.",
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The pull request on the forge."
+          },
+          "number": {
+            "type": "integer",
+            "description": "Its number on the forge."
+          },
+          "branch": {
+            "type": "string",
+            "description": "The branch it proposes from."
+          },
+          "state": {
+            "type": "string",
+            "enum": ["open", "merged", "closed"],
+            "description": "Its state as the forge reports it."
+          }
+        },
+        "required": ["url", "number", "branch", "state"]
+      },
+      "ReadinessProposal": {
+        "type": "object",
+        "title": "ReadinessProposal",
+        "description": "The setup Pidgen proposes from the findings: `.pidgen/pidgen.toml` and the scripts it names.",
+        "additionalProperties": false,
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": ["draft", "pull_request_open", "merged"],
+            "description": "`draft`: not written anywhere; `pull_request_open`: proposed as `pull_request`; `merged`: on the base branch."
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProposalFile"
+            },
+            "description": "The files, in path order."
+          },
+          "assumptions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What the proposal assumes, one sentence each."
+          },
+          "pull_request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProposalPullRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": ["state", "files", "assumptions", "pull_request"]
+      },
+      "RehearsalStep": {
+        "type": "object",
+        "title": "RehearsalStep",
+        "description": "One step of a rehearsal, as the worker reported it.",
+        "additionalProperties": false,
+        "properties": {
+          "step": {
+            "type": "string",
+            "description": "The step: `provision`, `activate`, `database` or `tests`, in the order they run."
+          },
+          "state": {
+            "type": "string",
+            "enum": ["running", "passed", "failed", "skipped"],
+            "description": "Its state."
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "description": "Its exit status; null while running or when skipped."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "duration_seconds": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0,
+                "description": "How long it took; null while running or when skipped."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "What it reported, e.g. `212 passed`, or why it failed."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": ["step", "state", "exit_code", "duration_seconds", "summary"]
+      },
+      "Rehearsal": {
+        "type": "object",
+        "title": "Rehearsal",
+        "description": "A rehearsal: a worker builds a throwaway workspace from `ref`, runs the setup and the tests, and tears it down.",
+        "additionalProperties": false,
+        "properties": {
+          "rehearsal_id": {
+            "type": "string",
+            "description": "The rehearsal's id."
+          },
+          "state": {
+            "type": "string",
+            "enum": ["queued", "running", "passed", "failed", "cancelled"],
+            "description": "`queued` until a worker takes it, `running`, then `passed`, `failed` or `cancelled`."
+          },
+          "ref": {
+            "type": "string",
+            "description": "The branch rehearsed: the proposal's branch, or the base branch once merged."
+          },
+          "commit": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "The commit rehearsed; null until a worker has fetched it."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "worker": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "The worker that runs it; null while queued."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RehearsalStep"
+            },
+            "description": "The steps reported so far, in the order they ran."
+          },
+          "verdict": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "The outcome in one sentence: what worked, or the step that failed, why, and the fix; null until it has settled."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requested_at": {
+            "type": "string",
+            "description": "When it was requested.",
+            "format": "date-time"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "When it settled; null until then.",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "log_artifact_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "The full log, staged as an artifact; null until it has settled."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "rehearsal_id",
+          "state",
+          "ref",
+          "commit",
+          "worker",
+          "steps",
+          "verdict",
+          "requested_at",
+          "finished_at",
+          "log_artifact_id"
+        ]
+      },
+      "Readiness": {
+        "type": "object",
+        "title": "Readiness",
+        "description": "A Project's readiness: the latest inspection, its findings (one per area), the open questions, the proposal and the latest rehearsal. Readiness never gates admission.",
+        "additionalProperties": false,
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The Project's id."
+          },
+          "project_key": {
+            "type": "string",
+            "description": "The Project's ticket-key prefix."
+          },
+          "project_name": {
+            "type": "string",
+            "description": "The Project's name."
+          },
+          "repository": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "The repository, as the Project names it; null when it has none."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "inspection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReadinessInspection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "areas": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReadinessArea"
+            },
+            "description": "One finding per area, in the order the report shows them."
+          },
+          "questions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReadinessQuestion"
+            },
+            "description": "The questions, answered ones included (their `answer` set)."
+          },
+          "proposal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReadinessProposal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rehearsal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Rehearsal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "updated_at": {
+            "type": "string",
+            "description": "When any of it last changed.",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "project_id",
+          "project_key",
+          "project_name",
+          "repository",
+          "inspection",
+          "areas",
+          "questions",
+          "proposal",
+          "rehearsal",
+          "updated_at"
+        ]
+      },
+      "ReadinessAnswer": {
+        "type": "object",
+        "title": "ReadinessAnswer",
+        "description": "The answer to one question.",
+        "additionalProperties": false,
+        "properties": {
+          "question_id": {
+            "type": "string",
+            "description": "The question.",
+            "minLength": 1
+          },
+          "value": {
+            "type": "string",
+            "description": "The answer: one of the question's `choices` when it has any.",
+            "minLength": 1
+          }
+        },
+        "required": ["question_id", "value"]
+      },
+      "ReadinessAnswersRequest": {
+        "type": "object",
+        "title": "ReadinessAnswersRequest",
+        "additionalProperties": false,
+        "properties": {
+          "answers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReadinessAnswer"
+            },
+            "minItems": 1,
+            "description": "The answers, at least one."
+          }
+        },
+        "required": ["answers"]
+      },
+      "RehearseRequest": {
+        "type": "object",
+        "title": "RehearseRequest",
+        "additionalProperties": false,
+        "properties": {
+          "ref": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "The branch to rehearse; omitted or null: the open proposal's branch, or the base branch once the setup is merged.",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ReadinessResponse": {
+        "type": "object",
+        "title": "ReadinessResponse",
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status"
+          },
+          "data": {
+            "$ref": "#/components/schemas/Readiness"
+          }
+        },
+        "required": ["status", "data"]
+      },
+      "ReadinessProposalResponse": {
+        "type": "object",
+        "title": "ReadinessProposalResponse",
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status"
+          },
+          "data": {
+            "$ref": "#/components/schemas/ReadinessProposal"
+          }
+        },
+        "required": ["status", "data"]
+      },
+      "RehearsalResponse": {
+        "type": "object",
+        "title": "RehearsalResponse",
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status"
+          },
+          "data": {
+            "$ref": "#/components/schemas/Rehearsal"
+          }
+        },
+        "required": ["status", "data"]
+      },
+      "DoctorCheck": {
+        "type": "object",
+        "title": "DoctorCheck",
+        "description": "One finding of the Project doctor, in the words the Project page shows.",
+        "additionalProperties": false,
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": ["ok", "needs_you", "failed"],
+            "description": "`ok`; `needs_you`, worth a person's look but not why work fails; `failed`, a reason work fails."
+          },
+          "summary": {
+            "type": "string",
+            "description": "The finding in one line, Tickets named by key."
+          },
+          "evidence": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "What the failure said, verbatim (a hook's stderr, a test's signature); null when there is none."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tickets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The Tickets the finding concerns, by key, in the order they failed."
+          },
+          "cause": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "The change that introduced it, its Ticket by key; null when unknown."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "fix": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "The change to make, as a sentence naming the file; null when nothing is to change."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": ["state", "summary", "evidence", "tickets", "cause", "fix"]
+      },
+      "DoctorGroup": {
+        "type": "object",
+        "title": "DoctorGroup",
+        "description": "One of the doctor's six groups of checks.",
+        "additionalProperties": false,
+        "properties": {
+          "group": {
+            "type": "string",
+            "enum": ["setup_files", "workers", "secrets", "workspaces", "tests", "drift"],
+            "description": "Which group: the setup files on the base branch, the connected workers, the Project's secrets, the workspaces and the tests in the window, and the drift since the last rehearsal."
+          },
+          "title": {
+            "type": "string",
+            "description": "The group's heading, e.g. `Setup files on main` or `Workspaces, 7 days`."
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DoctorCheck"
+            },
+            "minItems": 1,
+            "description": "Its findings, the failing ones first."
+          }
+        },
+        "required": ["group", "title", "checks"]
+      },
+      "DoctorFix": {
+        "type": "object",
+        "title": "DoctorFix",
+        "description": "The fix for the setup, when the setup is the problem.",
+        "additionalProperties": false,
+        "properties": {
+          "summary": {
+            "type": "string",
+            "description": "The fix in one line; the pull request's title when the doctor has a template for it."
+          },
+          "template": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "The template the doctor writes the fix from (`activate_warn`, `executable_bit`, `timeout`); null when it has none and the person makes the change."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pull_request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProposalPullRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "retry": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The Tickets to retry, by key, once the fix is on the base branch."
+          }
+        },
+        "required": ["summary", "template", "pull_request", "retry"]
+      },
+      "ProjectDoctorReport": {
+        "type": "object",
+        "title": "ProjectDoctorReport",
+        "description": "The Project doctor's report: whether the workspace setup is why work in the Project fails, the six groups of checks, and the fix.",
+        "additionalProperties": false,
+        "properties": {
+          "project_key": {
+            "type": "string",
+            "description": "The Project's ticket-key prefix."
+          },
+          "project_name": {
+            "type": "string",
+            "description": "The Project's name."
+          },
+          "repository": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "The repository as the forge names it, e.g. `acme/storefront`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ref": {
+            "type": "string",
+            "description": "The base branch whose setup files were read."
+          },
+          "commit": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "The commit read; null when the setup files could not be read."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The start of the window of runs read."
+          },
+          "window_days": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The window's length in days."
+          },
+          "ran_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the doctor ran."
+          },
+          "verdict": {
+            "type": "string",
+            "enum": ["setup", "code", "unclear"],
+            "description": "`setup`: the setup is the problem (the CLI exits 1); `code`: it is not, and `summary` says what did fail and why it is code; `unclear`: the doctor cannot tell, and `summary` says which failures it could not classify."
+          },
+          "summary": {
+            "type": "string",
+            "description": "The verdict as a sentence with its evidence: the failing step, the count, the Tickets by key and the change that introduced it; or what did fail and why it is code."
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DoctorGroup"
+            },
+            "description": "The six groups, in order: setup_files, workers, secrets, workspaces, tests, drift."
+          },
+          "fix": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DoctorFix"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "failed_tickets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every Ticket that failed in the window, by key."
+          },
+          "rehearse": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "Why to rehearse now, e.g. `refresh the timings from main (about 6 min)`; null when the last rehearsal is current."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "project_key",
+          "project_name",
+          "repository",
+          "ref",
+          "commit",
+          "since",
+          "window_days",
+          "ran_at",
+          "verdict",
+          "summary",
+          "groups",
+          "fix",
+          "failed_tickets",
+          "rehearse"
+        ]
+      },
+      "ProjectDoctorRequest": {
+        "type": "object",
+        "title": "ProjectDoctorRequest",
+        "additionalProperties": false,
+        "properties": {
+          "since_days": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 90,
+                "description": "How many days of runs to read; omitted or null: 7."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "propose_fix": {
+            "type": "boolean",
+            "description": "Open the fix as a pull request when the setup is the problem and the doctor has a template for it; `fix.pull_request` is then that pull request. Default false."
+          }
+        }
+      },
+      "ProjectDoctorResponse": {
+        "type": "object",
+        "title": "ProjectDoctorResponse",
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status"
+          },
+          "data": {
+            "$ref": "#/components/schemas/ProjectDoctorReport"
+          }
+        },
+        "required": ["status", "data"]
+      },
+      "PublicError": {
+        "description": "The body of every error a published route answers with; switch on error.code.",
+        "properties": {
+          "status": {
+            "const": "error",
+            "description": "Always `error`.",
+            "title": "Status",
+            "type": "string"
+          },
+          "error": {
+            "$ref": "#/components/schemas/PublicErrorDetail"
+          }
+        },
+        "required": ["status", "error"],
+        "title": "PublicError",
+        "type": "object"
+      },
+      "PublicErrorDetail": {
+        "description": "What went wrong: a stable code, a message, and optional context.",
+        "properties": {
+          "code": {
+            "description": "Stable, machine-readable error code, e.g. PROJECT_NOT_FOUND.",
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable explanation; not a stable interface.",
+            "title": "Message",
+            "type": "string"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Structured context for the error, when there is any.",
+            "title": "Details"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The request's X-Request-ID, for correlating with logs.",
+            "title": "Request Id"
+          }
+        },
+        "required": ["code", "message"],
+        "title": "PublicErrorDetail",
+        "type": "object"
+      }
+    }
+  }
+}

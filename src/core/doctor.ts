@@ -1,7 +1,7 @@
 import type { GlobalOptions, RunContext } from "./context.js";
 import { CliError } from "./errors.js";
 import { findOnPath } from "./worker.js";
-import { readInstallRecord } from "./worker-install.js";
+import { otherCopy, pathExport, readInstallRecord, workerOnPath } from "./worker-install.js";
 import {
   readWorkerReleases,
   seriesOf,
@@ -127,7 +127,9 @@ async function harnessChecks(ctx: RunContext, list: WorkerReleaseList): Promise<
 /**
  * The installed worker against the list: `current` is `ok`, `supported` is `warn`, a release the
  * server no longer accepts or does not list is `fail`. No install record is `warn`, so the doctor
- * still passes on a machine that is being prepared.
+ * still passes on a machine that is being prepared. Another `pidgen-worker` first on `PATH` than
+ * the installed wheel is named too, and makes a `current` worker `warn`, with the line that puts
+ * the installed one first on `PATH` as its fix.
  */
 async function workerCheck(ctx: RunContext, list: WorkerReleaseList): Promise<DoctorCheck> {
   const record = await readInstallRecord(ctx);
@@ -143,19 +145,25 @@ async function workerCheck(ctx: RunContext, list: WorkerReleaseList): Promise<Do
     list.releases.find((candidate) => candidate.series === seriesOf(record.version))?.status ??
     "unlisted";
   const installed = `pidgen-worker ${record.version} (${record.form}) is installed at ${record.location}`;
-  if (status === "current") return check("worker", "ok", `${installed} and is current.`);
+  const found = record.form === "wheel" ? await workerOnPath(ctx, record) : null;
+  const other = found !== null && !found.recorded ? ` ${otherCopy(found.path)}.` : "";
+  if (status === "current") {
+    return other === ""
+      ? check("worker", "ok", `${installed} and is current.`)
+      : check("worker", "warn", `${installed} and is current.${other}`, pathExport(record));
+  }
   if (status === "supported") {
     return check(
       "worker",
       "warn",
-      `${installed} and is still accepted; ${list.current} is current.`,
+      `${installed} and is still accepted; ${list.current} is current.${other}`,
       INSTALL,
     );
   }
   return check(
     "worker",
     "fail",
-    `The server no longer accepts pidgen-worker ${record.version} (${status}); ${list.current} is current.`,
+    `The server no longer accepts pidgen-worker ${record.version} (${status}); ${list.current} is current.${other}`,
     INSTALL,
   );
 }

@@ -229,6 +229,8 @@ export interface InstallContextOptions extends InstallFetchOptions {
   commands?: string[];
   trust?: ProvenanceTrust;
   env?: Record<string, string>;
+  /** The contents of /etc/os-release the runtime reads; `null` (the default): unreadable. */
+  osRelease?: string | null;
 }
 
 export async function installContext(options: InstallContextOptions = {}): Promise<InstallContext> {
@@ -257,6 +259,8 @@ export async function installContext(options: InstallContextOptions = {}): Promi
   const workerRuntime: WorkerRuntime = {
     ...defaultWorkerRuntime,
     platform: "linux",
+    // Never the host's /etc/os-release.
+    osRelease: () => Promise.resolve(options.osRelease ?? null),
     spawn: (command, args, spawnOptions) => {
       if (command === workerBin && spawnOptions.detached === true) {
         // The detached worker is faked: it "runs" unless its installed version is crashing. A

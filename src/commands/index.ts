@@ -49,6 +49,7 @@ import { workerDoctor } from "./worker/doctor.js";
 import { workerEnroll } from "./worker/enroll.js";
 import { workerInstall } from "./worker/install.js";
 import { workerLogin } from "./worker/login.js";
+import { workerRestart } from "./worker/restart.js";
 import { workerStart } from "./worker/start.js";
 import { workerStatus } from "./worker/status.js";
 import { workerStop } from "./worker/stop.js";
@@ -61,7 +62,11 @@ import { planCohorts } from "./plan/cohorts.js";
 import { planPromote } from "./plan/promote.js";
 import { planShow } from "./plan/show.js";
 import { planTemplate } from "./plan/template.js";
+import { projectDoctor } from "./project/doctor.js";
+import { projectInspect } from "./project/inspect.js";
 import { projectList } from "./project/list.js";
+import { projectRehearse } from "./project/rehearse.js";
+import { projectSetup } from "./project/setup.js";
 import { projectShow } from "./project/show.js";
 import { requestAccept } from "./request/accept.js";
 import { requestAcknowledge } from "./request/acknowledge.js";
@@ -125,6 +130,10 @@ export const commands: readonly CommandSpec[] = [
   accountUse,
   projectList,
   projectShow,
+  projectInspect,
+  projectSetup,
+  projectRehearse,
+  projectDoctor,
   domainList,
   domainShow,
   domainCreate,
@@ -199,6 +208,7 @@ export const commands: readonly CommandSpec[] = [
   workerVerify,
   workerStart,
   workerStop,
+  workerRestart,
   workerStatus,
   workerDoctor,
   workerLogin,

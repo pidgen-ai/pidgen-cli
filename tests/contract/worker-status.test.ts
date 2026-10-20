@@ -21,6 +21,7 @@ const RELEASES_PATH = "/api/v1/workers/releases";
 interface Body {
   ok: boolean;
   data: {
+    installed: boolean;
     record: unknown;
     running: boolean;
     server: {
@@ -56,7 +57,12 @@ describe("pidgen worker status against the Prism mock of the committed document"
 
     expect(code).toBe(ExitCode.Ok);
     expect(body.ok).toBe(true);
-    expect(body.data).toMatchObject({ record: null, running: false, warnings: [] });
+    expect(body.data).toMatchObject({
+      installed: false,
+      record: null,
+      running: false,
+      warnings: [],
+    });
     expect(body.data.server).toMatchObject({
       host_id: "worker-host.example.com",
       service_protocol: expect.any(String),

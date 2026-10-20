@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import { z } from "zod";
@@ -178,6 +178,40 @@ export async function installedAdapter(ctx: RunContext): Promise<WorkerAdapter> 
   return adapterFor(ctx, record?.form ?? "wheel");
 }
 
+/** The arguments a detached worker was started with: after the command, or the container's. */
+export function workerArgs(record: RunRecord): string[] {
+  return "command" in record ? record.command.slice(1) : record.args;
+}
+
+/** What `worker stop` reports for the stopped worker. */
+export type StoppedWorker = Awaited<ReturnType<WorkerAdapter["stop"]>>;
+
+/**
+ * Restarts the detached worker (or the container) with the arguments it was started with: stops
+ * it as `worker stop` does (`WORKER_NOT_RUNNING`, or `TIMEOUT` unless `force`, leaving it
+ * running), then starts it detached again with the arguments in its run record, with the same
+ * startup check as `worker start --detach` (`WORKER_EXITED`). `pidgen worker restart` and
+ * `pidgen worker update --restart` share it. A `CliError` from the start goes to `onStartFailure`
+ * with those arguments, so `worker update` can roll back; by default it is thrown.
+ */
+export async function restartDetached(
+  adapter: WorkerAdapter,
+  options: { force: boolean; timeoutSeconds: number },
+  onStartFailure: (error: CliError, args: readonly string[]) => Promise<never> = (error) =>
+    Promise.reject(error),
+): Promise<{ stopped: StoppedWorker; record: RunRecord }> {
+  const stopped = await adapter.stop(options.force, options.timeoutSeconds);
+  const args = workerArgs(stopped.record);
+  let record: RunRecord;
+  try {
+    record = (await adapter.start(args, true)) as RunRecord;
+  } catch (error) {
+    if (!(error instanceof CliError)) throw error;
+    return await onStartFailure(error, args);
+  }
+  return { stopped, record };
+}
+
 /**
  * `RUNTIME_UNAVAILABLE` (exit 2): `wheel` when uv is required for `--runtime wheel`;
  * `wheel-only` when the caller installs only the wheel and no uv was found; otherwise neither
@@ -265,7 +299,7 @@ export async function installWorker(
   });
   await writeInstallRecord(ctx, installed);
   if (record !== null && record.file !== installed.file) await removeKeptArtifact(record);
-  if (form === "wheel") await retireSharedInstall(ctx, record, await adapter.status());
+  if (form === "wheel") await settleWorkerPath(ctx, record, installed, await adapter.status());
   return { record: installed, installed: true, meta };
 }
 
@@ -571,15 +605,15 @@ function leftInPlace(record: InstallRecord): string {
 /**
  * After the worker is installed in the worker home, the earlier CLI's install in uv's shared tool
  * slot that `previous` names is removed, unless a worker is running from it (`local`, the detached
- * worker's status) or the slot holds another install's worker now. Either is said in one line;
- * a failure to remove it does not fail the install.
+ * worker's status) or the slot holds another install's worker now. Either is said in one line
+ * (`left`); a failure to remove it does not fail the install.
  */
-export async function retireSharedInstall(
+async function retireSharedInstall(
   ctx: RunContext,
   previous: InstallRecord | null,
   local: { record: RunRecord | null; running: boolean } | null,
-): Promise<void> {
-  if (previous === null || !inSharedSlot(ctx, previous)) return;
+): Promise<"removed" | "left" | null> {
+  if (previous === null || !inSharedSlot(ctx, previous)) return null;
   const runningFromIt =
     local?.running === true &&
     local.record !== null &&
@@ -589,17 +623,80 @@ export async function retireSharedInstall(
     ctx.io.stderr(
       `pidgen-worker ${previous.version} is still running from ${previous.location} (uv's shared tools), so it was left in place; once it stops, remove it with \`uv tool uninstall ${WORKER_PROJECT}\`.\n`,
     );
-    return;
+    return "left";
   }
   const uv = await findOnPath(ctx, "uv", ctx.workerRuntime);
-  if (uv === null) return;
+  if (uv === null) return "left";
   try {
     if ((await removeSharedTool(ctx, uv, previous)) === "other") {
       ctx.io.stderr(leftInPlace(previous));
+      return "left";
     }
+    return "removed";
   } catch (error) {
     if (!(error instanceof CliError)) throw error;
     ctx.io.stderr(`${error.message} Remove it with \`uv tool uninstall ${WORKER_PROJECT}\`.\n`);
+    return "left";
+  }
+}
+
+/**
+ * The `pidgen-worker` running it by name finds first on `PATH`, and whether it is the one `record`
+ * names (the same file, through any symlink); `null` when none is on `PATH`.
+ */
+export async function workerOnPath(
+  ctx: RunContext,
+  record: InstallRecord,
+): Promise<{ path: string; recorded: boolean } | null> {
+  const path = await findOnPath(ctx, WORKER_PROJECT, ctx.workerRuntime);
+  if (path === null) return null;
+  return { path, recorded: (await resolvedPath(path)) === (await resolvedPath(record.location)) };
+}
+
+/** The line that puts the installed wheel's `pidgen-worker` first on `PATH`. */
+export function pathExport(record: InstallRecord): string {
+  return `export PATH="${dirname(record.location)}:$PATH"`;
+}
+
+/**
+ * After the wheel is installed: retires an earlier CLI's install in uv's shared slot
+ * (`retireSharedInstall`), then says in one line when running `pidgen-worker` by name no longer
+ * reaches `installed`: another copy is first on `PATH`, which the CLI neither runs nor updates; or
+ * the retired copy was the one on `PATH`, so `pidgen-worker` is no longer found by name. Both name
+ * `pathExport`. Nothing is said when the shared copy was left in place, which its line already
+ * says, or when `installed` is the one on `PATH`.
+ */
+export async function settleWorkerPath(
+  ctx: RunContext,
+  previous: InstallRecord | null,
+  installed: InstallRecord,
+  local: { record: RunRecord | null; running: boolean } | null,
+): Promise<void> {
+  const retired = await retireSharedInstall(ctx, previous, local);
+  if (installed.form !== "wheel" || retired === "left") return;
+  const found = await workerOnPath(ctx, installed);
+  if (found?.recorded === true) return;
+  if (found !== null) {
+    ctx.io.stderr(
+      `${otherCopy(found.path)}; pidgen worker commands run ${installed.version} at ${installed.location}. To run that one by name, put its directory first on PATH: ${pathExport(installed)}\n`,
+    );
+  } else if (retired === "removed" && previous !== null) {
+    ctx.io.stderr(
+      `pidgen-worker ${installed.version} is now at ${installed.location}, and ${previous.location} was removed; \`pidgen-worker\` is not on PATH. To run it by name: ${pathExport(installed)}. A service or script that names ${previous.location} must name ${installed.location} instead.\n`,
+    );
+  }
+}
+
+/** The clause naming another `pidgen-worker` first on `PATH`. */
+export function otherCopy(path: string): string {
+  return `\`pidgen-worker\` on PATH is another copy, at ${path}, which this CLI does not install or update`;
+}
+
+async function resolvedPath(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch {
+    return path;
   }
 }
 

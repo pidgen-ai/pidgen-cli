@@ -387,6 +387,7 @@ describe("pidgen worker start/stop/status/doctor with a container install", () =
 
     expect(await runCli(["worker", "status"], setup.ctx)).toBe(ExitCode.Ok);
     expect(data(setup.ctx)).toMatchObject({
+      installed: true,
       record: null,
       running: false,
       update: { installed: "1.0.0" },
@@ -490,6 +491,123 @@ describe("pidgen worker start/stop/status/doctor with a container install", () =
     expect(await runCli(["worker", "doctor"], setup.ctx)).toBe(ExitCode.NotFound);
     expect(envelope(setup.ctx)).toMatchObject({ error: { code: "WORKER_NOT_RUNNING" } });
     expect(setup.dockerCalls().some((args) => args[0] === "exec")).toBe(false);
+  });
+});
+
+describe("pidgen worker restart (container)", () => {
+  /** A container started with `--label alpha`; output and the tool log are cleared. */
+  async function running(options: ContainerContextOptions = {}) {
+    const setup = await installed(options);
+    expect(await runCli(["worker", "start", "--detach", "--", "--label", "alpha"], setup.ctx)).toBe(
+      ExitCode.Ok,
+    );
+    setup.ctx.out.length = 0;
+    setup.log.length = 0;
+    return setup;
+  }
+
+  // AC-a1ec07bade09: stopped and removed as `worker stop` does, then run again detached with the
+  // arguments in its ai.pidgen.worker.args label.
+  it("stops and removes the container, then runs it again with its labelled arguments", async () => {
+    const setup = await running();
+
+    expect(await runCli(["worker", "restart", "--format", "json"], setup.ctx)).toBe(ExitCode.Ok);
+    const acting = setup.dockerCalls().filter((args) => ["kill", "rm", "run"].includes(args[0]!));
+    expect(acting).toEqual([
+      ["kill", "--signal", "SIGTERM", CONTAINER_NAME],
+      ["rm", CONTAINER_NAME],
+      [
+        "run",
+        "--detach",
+        "--name",
+        CONTAINER_NAME,
+        "--volume",
+        `${VOLUME_NAME}:/pidgen`,
+        "--env",
+        "PIDGEN_HOME=/pidgen",
+        "--label",
+        'ai.pidgen.worker.args=["--label","alpha"]',
+        PINNED_IMAGE,
+        "--label",
+        "alpha",
+      ],
+    ]);
+    expect(setup.docker.containers.get(CONTAINER_NAME)).toMatchObject({ running: true });
+    expect(envelope(setup.ctx)).toMatchObject({
+      ok: true,
+      error: null,
+      data: {
+        running: true,
+        stopped: {
+          forced: false,
+          record: { container: CONTAINER_NAME, args: ["--label", "alpha"] },
+        },
+        record: {
+          container: CONTAINER_NAME,
+          image: PINNED_IMAGE,
+          status: "running",
+          args: ["--label", "alpha"],
+        },
+      },
+    });
+  });
+
+  it("exits 4 with WORKER_NOT_RUNNING naming start --detach, and runs nothing, when no container runs", async () => {
+    const setup = await installed();
+
+    expect(await runCli(["worker", "restart"], setup.ctx)).toBe(ExitCode.NotFound);
+    const result = envelope(setup.ctx);
+    expect(result).toMatchObject({ ok: false, error: { code: "WORKER_NOT_RUNNING" } });
+    expect((result["error"] as { message: string }).message).toContain(
+      "pidgen worker start --detach",
+    );
+    expect(setup.dockerCalls().some((args) => args[0] === "run" || args[0] === "kill")).toBe(false);
+  });
+
+  it("times out leaving the container running, and with --force kills it and runs it again", async () => {
+    const setup = await running({ docker: { ignoresSigterm: true } });
+
+    expect(await runCli(["--timeout", "1", "worker", "restart"], setup.ctx)).toBe(ExitCode.Network);
+    expect(envelope(setup.ctx)).toMatchObject({ ok: false, error: { code: "TIMEOUT" } });
+    expect(setup.docker.containers.get(CONTAINER_NAME)?.running).toBe(true);
+    expect(setup.dockerCalls().some((args) => args[0] === "run")).toBe(false);
+
+    setup.ctx.out.length = 0;
+    setup.log.length = 0;
+    expect(await runCli(["--timeout", "1", "worker", "restart", "--force"], setup.ctx)).toBe(
+      ExitCode.Ok,
+    );
+    const steps = setup.dockerCalls().map((args) => args.slice(0, 2).join(" "));
+    expect(steps.indexOf(`kill ${CONTAINER_NAME}`)).toBeGreaterThan(-1);
+    expect(steps.indexOf(`kill ${CONTAINER_NAME}`)).toBeLessThan(steps.indexOf("run --detach"));
+    expect(envelope(setup.ctx)).toMatchObject({
+      ok: true,
+      data: { running: true, stopped: { forced: true }, record: { args: ["--label", "alpha"] } },
+    });
+  });
+
+  it("exits 1 with WORKER_EXITED and the container's log when the new container stops at once", async () => {
+    const dockerOptions: { exitsOnStart?: number } = {};
+    const setup = await running({ docker: dockerOptions });
+    dockerOptions.exitsOnStart = 1;
+
+    expect(await runCli(["worker", "restart"], setup.ctx)).toBe(ExitCode.Unexpected);
+    expect(envelope(setup.ctx)).toMatchObject({
+      ok: false,
+      error: {
+        code: "WORKER_EXITED",
+        details: { log_tail: ["worker: starting", "worker: no credential; enroll first"] },
+      },
+    });
+  });
+
+  it("says in a terminal that the container was restarted and names it", async () => {
+    const setup = await running();
+
+    expect(await runCli(["worker", "restart", "--format", "table"], setup.ctx)).toBe(ExitCode.Ok);
+    expect(setup.ctx.out.join("")).toContain(
+      `Worker restarted in background (container ${CONTAINER_NAME}).`,
+    );
   });
 });
 

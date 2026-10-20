@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { access, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { basename, join, sep } from "node:path";
+import { access, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { basename, delimiter, join, sep } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { runCli } from "../../src/cli.js";
 import { ExitCode } from "../../src/core/exit-codes.js";
@@ -502,6 +502,33 @@ describe("pidgen worker install (wheel)", () => {
     const doctor = setup.spawns.find((spawn) => spawn.args[0] === "doctor");
     expect(doctor?.command).toBe(setup.workerBin);
     expect(setup.spawns.map((spawn) => spawn.command)).not.toContain(decoy);
+  });
+
+  // path-other: `pidgen-worker` by name runs another copy than the one the CLI installed.
+  it("says when another pidgen-worker is first on PATH, with the line that puts the installed one first", async () => {
+    const setup = await installContext();
+    const other = join(setup.pathDir, "pidgen-worker");
+    await writeFile(other, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+
+    expect(await runCli(["worker", "install"], setup.ctx)).toBe(ExitCode.Ok);
+    const stderr = setup.ctx.err.join("");
+    expect(stderr).toContain(
+      `\`pidgen-worker\` on PATH is another copy, at ${other}, which this CLI does not install or update; pidgen worker commands run 1.0.0 at ${setup.workerBin}.`,
+    );
+    expect(stderr).toContain(`export PATH="${setup.binDir}:$PATH"`);
+    // The envelope is unchanged.
+    expect(envelope(setup.ctx)).toMatchObject({ ok: true, data: { installed: true } });
+  });
+
+  it("says nothing about PATH when pidgen-worker by name is the installed one, through a symlink", async () => {
+    const setup = await installContext();
+    await mkdir(setup.binDir, { recursive: true });
+    await symlink(setup.workerBin, join(setup.pathDir, "pidgen-worker"));
+
+    expect(await runCli(["worker", "install"], setup.ctx)).toBe(ExitCode.Ok);
+    const stderr = setup.ctx.err.join("");
+    expect(stderr).not.toContain("another copy");
+    expect(stderr).not.toContain("export PATH=");
   });
 
   it("reports a failing uv install and records nothing", async () => {
@@ -1020,6 +1047,26 @@ describe("pidgen worker update", () => {
     expect(await exists(legacy)).toBe(false);
   });
 
+  // path-moved: the removed shared copy was the `pidgen-worker` on PATH.
+  it("says where the worker moved, and how to put it on PATH, when the shared copy on PATH is removed", async () => {
+    const setup = await installContext();
+    const previous = await previousInstall(setup, { legacy: true });
+    const legacy = previous["location"] as string;
+    // uv's shared bin directory (~/.local/bin) is on PATH, as it is on a real machine.
+    setup.ctx.env["PATH"] = [setup.sharedBinDir, setup.ctx.env["PATH"]].join(delimiter);
+
+    expect(await runCli(["worker", "update"], setup.ctx)).toBe(ExitCode.Ok);
+    expect(await exists(legacy)).toBe(false);
+    const stderr = setup.ctx.err.join("");
+    expect(stderr).toContain(
+      `pidgen-worker 1.0.0 is now at ${setup.workerBin}, and ${legacy} was removed; \`pidgen-worker\` is not on PATH. To run it by name: export PATH="${setup.binDir}:$PATH". A service or script that names ${legacy} must name ${setup.workerBin} instead.`,
+    );
+    expect(envelope(setup.ctx)).toMatchObject({
+      ok: true,
+      data: { updated: true, previous_version: "0.8.0", location: setup.workerBin },
+    });
+  });
+
   it("leaves uv's shared slot alone when it no longer holds the worker an earlier CLI recorded", async () => {
     const setup = await installContext();
     const previous = await previousInstall(setup, { legacy: true });
@@ -1028,10 +1075,16 @@ describe("pidgen worker update", () => {
     const otherScript = "#!/bin/sh\n# installed from pidgen_worker-2.10.0-py3-none-any.whl\n";
     await writeFile(legacy, otherScript);
 
+    setup.ctx.env["PATH"] = [setup.sharedBinDir, setup.ctx.env["PATH"]].join(delimiter);
+
     expect(await runCli(["worker", "update"], setup.ctx)).toBe(ExitCode.Ok);
     expect(await readRecord(setup.pidgenHome)).toMatchObject({ location: setup.workerBin });
     expect((await setup.uvRuns()).filter((run) => run.args[1] === "uninstall")).toEqual([]);
     expect(await readFile(legacy, "utf8")).toBe(otherScript);
+    // The line saying it was left in place is the only one about it.
+    const stderr = setup.ctx.err.join("");
+    expect(stderr).toContain("so this CLI left it in place");
+    expect(stderr).not.toContain("another copy");
   });
 
   it("refuses to roll back onto a kept wheel that no longer has its recorded digest", async () => {
@@ -1148,6 +1201,27 @@ describe("pidgen worker uninstall", () => {
     expect(await runCli(["worker", "uninstall"], setup.ctx)).toBe(ExitCode.Ok);
     expect(envelope(setup.ctx)).toMatchObject({ ok: true, data: { stopped: null, purged: false } });
     expect(setup.signals).toEqual([]);
+  });
+
+  // AC-49c981e0e79b: a detached worker that exited on its own leaves no record behind uninstall.
+  it("removes a stale detached run record, so worker status then reports no record and not installed", async () => {
+    const { setup } = await installed();
+    const pid = await startDetached(setup);
+    setup.processes.delete(pid);
+    const runRecord = join(setup.pidgenHome, "run", "pidgen-worker.json");
+    expect(await exists(runRecord)).toBe(true);
+
+    expect(await runCli(["worker", "uninstall"], setup.ctx)).toBe(ExitCode.Ok);
+    expect(envelope(setup.ctx)).toMatchObject({ ok: true, data: { stopped: null } });
+    expect(setup.signals).toEqual([]);
+    expect(await exists(runRecord)).toBe(false);
+
+    reset(setup);
+    expect(await runCli(["worker", "status", "--format", "json"], setup.ctx)).toBe(ExitCode.Ok);
+    expect(envelope(setup.ctx)).toMatchObject({
+      ok: true,
+      data: { record: null, running: false, installed: false },
+    });
   });
 
   // AC-ea6ee214c161: --purge removes the worker home with its credential.

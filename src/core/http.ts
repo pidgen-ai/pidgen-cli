@@ -49,16 +49,35 @@ export class ApiClient {
   }
 
   async request<T = unknown>(request: ApiRequest): Promise<ApiResponse<T>> {
+    return this.parse<T>(await this.send(request, "application/json"));
+  }
+
+  /**
+   * Sends `request` for a file, such as an archive, answered in `accept` (e.g. `application/gzip`)
+   * instead of JSON: `data` is the body's bytes, unread. A refusal is read from its JSON body as
+   * `request` reads it.
+   */
+  async download(request: ApiRequest, accept: string): Promise<ApiResponse<Uint8Array>> {
+    const response = await this.send(request, `${accept}, application/json`);
+    if (!response.ok) return this.parse<never>(response);
+    return {
+      status: response.status,
+      data: new Uint8Array(await response.arrayBuffer()),
+      requestId: response.headers.get("x-request-id"),
+      apiVersion: response.headers.get("pidgen-api-version"),
+    };
+  }
+
+  private async send(request: ApiRequest, accept: string): Promise<Response> {
     const url = this.url(request);
     const retryable = request.method === "GET" || request.idempotent === true;
     const attempts = retryable ? (this.options.maxAttempts ?? 3) : 1;
     let lastError: unknown;
     for (let attempt = 1; attempt <= attempts; attempt++) {
-      let response: Response;
       try {
-        response = await this.options.fetch(url, {
+        return await this.options.fetch(url, {
           method: request.method,
-          headers: this.headers(request.form === undefined && request.body !== undefined),
+          headers: this.headers(request.form === undefined && request.body !== undefined, accept),
           ...(request.form !== undefined
             ? { body: request.form }
             : request.body !== undefined
@@ -69,9 +88,7 @@ export class ApiClient {
       } catch (error) {
         lastError = error;
         if (attempt < attempts) await this.options.sleep(250 * 2 ** (attempt - 1));
-        continue;
       }
-      return this.parse<T>(response);
     }
     throw networkError(lastError, url);
   }
@@ -85,9 +102,9 @@ export class ApiClient {
     return url.toString();
   }
 
-  private headers(hasJsonBody: boolean): Record<string, string> {
+  private headers(hasJsonBody: boolean, accept: string): Record<string, string> {
     const headers: Record<string, string> = {
-      accept: "application/json",
+      accept,
       "pidgen-api-version": API_VERSION,
       "user-agent": `pidgen/${CLI_VERSION} node/${process.versions.node}`,
     };

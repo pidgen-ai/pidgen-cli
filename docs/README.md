@@ -35,6 +35,7 @@ available are marked *planned* where they would appear.
 | [Authentication and Accounts](authentication.md) | Device-code login, Personal API Tokens, profiles, Account switching, and configuration |
 | [Preview and apply](preview-and-apply.md) | Inspecting changes, applying a digest, acknowledgements, and waiting |
 | [Planning work in cohorts](planning-cohorts.md) | Grouping related work so parallel pull requests do not conflict |
+| [Use a new model on a worker](worker-models.md) | Check provider and worker readiness, select a newer Claude executable, and declare model input capabilities |
 | [Architecture](architecture.md) | What the CLI is and is not, and how it, the agent skills and the worker connect to Pidgen |
 
 ## Reference
@@ -44,6 +45,7 @@ available are marked *planned* where they would appear.
 | [Commands](commands.md) | The command tree, flags, input files, and public API routes |
 | [Agent skills](skills.md) | The skill catalog, installation options, and status fields |
 | [Workers](workers.md) | Installation, verification, enrollment, lifecycle, and status details |
+| [Worker policy](worker-policy.md) | Versioned harness options, shipped values, constraints, examples and verification |
 | [Output and exit codes](output-and-exit-codes.md) | JSON results, terminal output, exit codes, and errors |
 | [API compatibility](api-compatibility.md) | Supported versions, contract checks, and unavailable features |
 

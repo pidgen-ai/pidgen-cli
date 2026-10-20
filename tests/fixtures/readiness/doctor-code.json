@@ -1,0 +1,101 @@
+{
+  "project_key": "STO",
+  "project_name": "Storefront",
+  "repository": "acme/storefront",
+  "ref": "main",
+  "commit": "9d02a41c7e5b3f1a2d4e",
+  "since": "2026-10-11T00:00:00Z",
+  "window_days": 7,
+  "ran_at": "2026-10-18T09:12:00Z",
+  "verdict": "code",
+  "summary": "2 runs failed since 11 Oct, both on assertions in tests the Ticket itself changed (STO-40, STO-41). Every workspace built since 1 Oct provisioned and activated, and the tests ran in 3:05 to 3:40.",
+  "groups": [
+    {
+      "group": "setup_files",
+      "title": "Setup files on main",
+      "checks": [
+        {
+          "state": "ok",
+          "summary": ".pidgen/pidgen.toml at 9d02a41, 4 hooks, [tests] and [worker] set",
+          "evidence": null,
+          "tickets": [],
+          "cause": null,
+          "fix": null
+        }
+      ]
+    },
+    {
+      "group": "workers",
+      "title": "Workers",
+      "checks": [
+        {
+          "state": "ok",
+          "summary": "ada-mbp and build-02 meet [worker] tools",
+          "evidence": null,
+          "tickets": [],
+          "cause": null,
+          "fix": null
+        }
+      ]
+    },
+    {
+      "group": "secrets",
+      "title": "Secrets",
+      "checks": [
+        {
+          "state": "ok",
+          "summary": "STRIPE_TEST_KEY set",
+          "evidence": null,
+          "tickets": [],
+          "cause": null,
+          "fix": null
+        }
+      ]
+    },
+    {
+      "group": "workspaces",
+      "title": "Workspaces, 7 days",
+      "checks": [
+        {
+          "state": "ok",
+          "summary": "11 workspaces built; no provision, activation or teardown failures",
+          "evidence": null,
+          "tickets": [],
+          "cause": null,
+          "fix": null
+        }
+      ]
+    },
+    {
+      "group": "tests",
+      "title": "Tests, 7 days",
+      "checks": [
+        {
+          "state": "ok",
+          "summary": "2 failures, both code: STO-40 and STO-41; no environment signatures",
+          "evidence": null,
+          "tickets": ["STO-40", "STO-41"],
+          "cause": null,
+          "fix": null
+        }
+      ]
+    },
+    {
+      "group": "drift",
+      "title": "Drift",
+      "checks": [
+        {
+          "state": "needs_you",
+          "summary": "main is 23 commits past the last rehearsal (1 Oct); .pidgen/ is unchanged",
+          "evidence": null,
+          "tickets": [],
+          "cause": null,
+          "fix": null
+        }
+      ]
+    }
+  ],
+  "fix": null,
+  "failed_tickets": ["STO-40", "STO-41"],
+  "rehearse": "refresh the timings from main (about 6 min)"
+}

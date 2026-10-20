@@ -1,0 +1,34 @@
+{
+  "rehearsal_id": "reh-example-1",
+  "state": "failed",
+  "ref": "pidgen/setup",
+  "commit": "9b8a7c6d5e4f30211f2e3d4c5b6a79881a2b3c4d",
+  "worker": "build-box",
+  "steps": [
+    {
+      "step": "provision",
+      "state": "passed",
+      "exit_code": 0,
+      "duration_seconds": 161,
+      "summary": null
+    },
+    {
+      "step": "activate",
+      "state": "passed",
+      "exit_code": 0,
+      "duration_seconds": 1,
+      "summary": null
+    },
+    {
+      "step": "database",
+      "state": "failed",
+      "exit_code": 1,
+      "duration_seconds": 7,
+      "summary": "migration 0042 needs the pgvector extension"
+    }
+  ],
+  "verdict": "Database setup failed after 0:07: migration 0042 needs the pgvector extension, and the setup starts postgres:16 where CI uses pgvector/pgvector:pg16. Change the image in compose.yaml on pidgen/setup and rehearse again.",
+  "requested_at": "2026-10-19T09:10:00Z",
+  "finished_at": "2026-10-19T09:13:00Z",
+  "log_artifact_id": "art-example-rehearsal-1"
+}

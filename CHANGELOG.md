@@ -2,6 +2,289 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.4
+
+The fourth alpha, published to npm under `alpha` and `latest`. Its focus is getting a repository
+ready for Pidgen and keeping a worker running: `pidgen project inspect`, `setup`, `rehearse` and
+`doctor` with the `pidgen-project-readiness` and `pidgen-setup-workspace` skills, and
+`pidgen worker restart`. `pidgen setup` asks the worker's name, recovers from a taken name, a
+removed worker or an enrollment it cannot use, and offers a newer worker release on every run.
+`doctor` and setup require git 2.38 or later, and the CLI says when `pidgen-worker` on `PATH` is
+not the worker it installed.
+
+### The CLI says when `pidgen-worker` by name is not the worker it installed
+
+- After a wheel `pidgen worker install` or `pidgen worker update` (and the install in
+  `pidgen worker enroll --install` and `pidgen setup`), one line on standard error says when
+  running `pidgen-worker` by name no longer reaches the installed worker, with the
+  `export PATH=…` line for `~/.pidgen/worker/bin`: when another `pidgen-worker` is first on
+  `PATH`, which the CLI neither runs nor updates, or when the update removed an earlier CLI's
+  install from `~/.local/bin`, so `pidgen-worker` is no longer on `PATH`. JSON envelopes and exit
+  codes are unchanged.
+- `pidgen doctor`'s `worker` check names another `pidgen-worker` first on `PATH`; a `current`
+  install with one is `warn`, with the `export PATH=…` line as its fix.
+
+### Documentation-led worker support in `pidgen-setup-worker`
+
+- The worker skill now routes setup diagnosis, new model and coding-agent readiness, capacity,
+  harness options and multiple subscriptions to the relevant pages at `https://docs.pidgen.ai`.
+  It checks installed versions and help, distinguishes local readiness from server/model support,
+  and reports undocumented options instead of inventing configuration keys or commands.
+- Configuration guidance verifies saved versus applied changes, preserves unrelated settings,
+  accounts for service environments and executable mismatches, and explains subscription
+  entitlement, duplicate logins and unknown login state. Support feedback is sent only when asked.
+- New user guides cover model readiness, selecting a newer Claude executable, model input
+  capabilities, and the complete worker 2.11.1 policy keys with constraints and shipped example
+  values. They are based on the public release's schema and example, and distinguish local
+  settings from application model selection. Both are included in documentation navigation.
+- Refresh installed copies with `pidgen skills install` after upgrading the CLI. This is a skill
+  contract change; CLI commands, envelopes and exit codes are unchanged.
+
+### `pidgen-setup-workspace` skill: make a repository's tests pass in isolated workspaces
+
+- A new bundled skill, `pidgen-setup-workspace`, takes a repository from tests that pass on a
+  developer machine but fail in Pidgen to a tracked `pidgen.toml` with `provision`, `activate` and
+  `teardown` hooks. It lists what the tests need from CI and test configuration, gives each
+  workspace its own services (a Compose project per workspace, or a namespace on a shared server),
+  ports, installs, settings and secrets, names everything after the workspace, and rehearses the
+  hooks in fresh checkouts with the environment a worker gives them: idempotent `provision`,
+  `activate` that survives a changed lockfile, two workspaces at once, and `teardown` on a
+  half-built slice. It reads the Project with `pidgen project show` and diagnoses a failed run's
+  hook errors with `pidgen run list`, `show` and `node-output`.
+
+### `pidgen worker status` after `pidgen worker uninstall`
+
+- With no install record, `pidgen worker status` now says so: in a terminal it starts with
+  `Worker not installed.` and names `pidgen worker install`, and when the App Service still lists
+  this machine as enrolled it says the enrollment and the worker's credential were kept because
+  `--purge` was not given. It still exits 0. `data` gains `installed` (`true` with a valid install
+  record, `false` without); the other fields are unchanged.
+- `pidgen worker uninstall` also removes a stale detached run record, so `worker status` no longer
+  shows a leftover worker process after uninstalling.
+
+### `pidgen project doctor` and the `pidgen-project-readiness` skill
+
+- New command, `pidgen project doctor <key> [--since <n>d] [--propose-fix] [--json]`: asks whether
+  the workspace setup is why work in the Project fails (`POST …/readiness/doctor`). A terminal
+  shows the frame's title, one line per group of checks (setup files, workers, secrets, workspaces
+  and tests in the window, drift since the last rehearsal) with the failures beneath by Ticket
+  key, then the verdict line, its sentence and the fix. When the setup is the problem it exits 1
+  with `SETUP_IS_THE_PROBLEM`, the report in `error.details.report`; the other verdicts, `code`
+  and `unclear` (the doctor cannot tell), exit 0. `--since` widens the 7-day
+  window, `--propose-fix` opens the fix as a pull request when the doctor has a template for it,
+  and `--json` prints the server's report unchanged for scripts.
+- New skill, `pidgen-project-readiness`: teaches an agent `pidgen project inspect`, `setup`,
+  `rehearse` and `doctor`, asking the person before anything that writes. `pidgen-setup-worker`
+  points to it once the worker runs.
+- The pending fragment `contracts/pending/project-readiness.json` adds the doctor route and its
+  report.
+
+### `pidgen project inspect`, `project setup` and `project rehearse`
+
+- New command, `pidgen project inspect <key>`: the Project's readiness, what its repository needs
+  before a Ticket can work in it. A terminal shows one row per area (checkout, tools on the worker,
+  dependencies, services, database setup, tests, CI, secrets and data) with its state word (ok,
+  proposed, needs you, cannot tell, pending) and summary, then each open question with its
+  evidence and the `--answer <id>=<value>` that answers it and inspects the repository again.
+  `data` is the server's readiness unchanged.
+- New command, `pidgen project setup <key>`: shows the proposed setup (`.pidgen/pidgen.toml` and
+  the scripts it names) and writes nothing. `--write` extracts the proposed files under `.pidgen/`
+  at the root of the current git checkout, each file 0644 or 0755 as proposed, and refuses to
+  change an existing `.pidgen/` (`FILES_EXIST`, exit 5) unless `--force`; writing the same
+  proposal again changes nothing; an archive with a path
+  outside `.pidgen/` or a link is refused whole (`ARCHIVE_INVALID`, exit 1). `--pull-request`
+  opens the pull request that proposes them through the Project's forge.
+- New command, `pidgen project rehearse <key> [--ref <branch>] [--no-follow]`: asks a worker to
+  rehearse the setup in a throwaway workspace and follows it, printing each step as it is reported
+  and the verdict last. A failed rehearsal exits 1 with `REHEARSAL_FAILED`.
+- The readiness routes are agreed with the App Service and not yet published; the CLI is built
+  against a pending fragment, `contracts/pending/project-readiness.json`
+  ([API compatibility](docs/api-compatibility.md#project-readiness)).
+
+### git 2.38 or later, with the command that installs it on each system
+
+- `pidgen doctor`'s `git` check, and so `pidgen setup`'s "Check this machine" step, now needs git
+  2.38 or later (it was 2.25): git 2.37 fails, 2.38 passes, and versions compare numerically (2.100
+  is newer than 2.38). The summaries say "2.38 or later" and "older than 2.38".
+- The fix names a working command for the system, and differs for a missing and a too old git where
+  the commands do. On macOS: `xcode-select --install` or `brew install git` when git is missing;
+  `brew install git` (Homebrew's git before `/usr/bin` on `PATH`) or updating the Command Line Tools
+  through Software Update when it is old. On Linux, from `/etc/os-release` (`ID`, then each
+  `ID_LIKE` entry), read only when the check fails: the git-core PPA on Ubuntu, Linux Mint and Pop!_OS
+  (Ubuntu 22.04's own git is 2.34); `apt` on Debian, noting that Debian 12 or later packages a new
+  enough git; `sudo dnf install git` / `sudo dnf upgrade git` on Fedora, RHEL, CentOS Stream, Rocky,
+  AlmaLinux and Amazon Linux; `sudo pacman -S git` on Arch and Manjaro; `sudo apk add git` /
+  `sudo apk upgrade git` on Alpine; `sudo zypper install git` on openSUSE and SLES; otherwise
+  "install git 2.38 or later with your package manager: https://git-scm.com/downloads/linux".
+- `--format json` keeps its shape: `fix` is still one string per check, and a failing `git` check
+  still exits 1 with `DOCTOR_FAILED`.
+- Docs: [Install a worker](docs/install-worker.md) lists the command for each system;
+  [Getting started](docs/getting-started.md) and the doctor table in [Commands](docs/commands.md)
+  say 2.38.
+- The `pidgen-setup-worker` skill says setup stops for a git older than 2.38 and that the `git`
+  check's fix names the command for the person's system.
+
+### `pidgen worker restart`
+
+- New command, `pidgen worker restart [--force]`: stops the detached worker (or the
+  `pidgen-worker` container) as `worker stop` does and starts it detached again with the arguments
+  it was started with (its run record, or the container's `ai.pidgen.worker.args` label), with the
+  startup check of `worker start --detach`. `data` is `stopped`, `record` and `running: true`.
+  Nothing running exits 4 with `WORKER_NOT_RUNNING`, a worker that does not stop within
+  `--timeout` exits 8 with `TIMEOUT` and is left running (`--force` kills it and continues), and a
+  new worker that exits at once exits 1 with `WORKER_EXITED`. It takes no `-- args`.
+- `pidgen worker update --restart` restarts the worker with the same shared step; its behaviour is
+  unchanged.
+- Skill: `pidgen-setup-worker` restarts the worker after an environment change with
+  `pidgen worker restart` instead of a stop and a start.
+
+### One setup test per enrollment state, and troubleshooting for the ones a person can meet
+
+- Docs: [Troubleshooting](docs/troubleshooting.md#enrollment-states) explains the enrollment states
+  a person can meet when setting up a worker (rows 3, 4, 6, 7, 10, 11 and 13 of the enrollment
+  state table), each with the command that fixes it, among them a worker home copied from another
+  machine.
+- Tests: `pidgen setup`'s tests now have one test per row of the state table, rows 1 to 12
+  (`enrollment states`), against a fake `pidgen-worker` that follows the worker's saved-credential
+  rules, written beside it. No command changed.
+
+### Setup recognises this install's worker and withdraws an enrollment it cannot use
+
+- `pidgen setup` and `pidgen worker enroll` now keep a random id for this install in the worker
+  home, `$PIDGEN_HOME/install-id` (default `~/.pidgen/install-id`): one line of 32 lowercase hex
+  characters from 16 random bytes, created when absent and never overwritten, never derived from
+  the machine, and not a credential. `pidgen-worker` keeps the same file. Moving `worker.env` aside
+  leaves it alone. A file holding anything else is left as it is, with a note, and no id is sent.
+- Both send it as `install_id` on `POST /api/v1/workers/enrollments`, so the App Service replaces
+  this install's earlier pending enrollment instead of keeping both. `worker enroll`'s `data` names
+  it in `install_id`. A server from before the field refuses it with `422` naming `install_id`; the
+  create is then sent once more without it, and `data.install_id` is `null`.
+- Setup recognises this install's worker by its id in `GET /api/v1/workers`, even with
+  `worker.env` gone. When it is listed live and this home has no credential for it, setup says
+  `This install's worker <name> is still listed but its credential is missing.` and asks
+  `Replace <name>?` instead of enrolling a second worker: yes asks the person to remove it on the
+  Workers page and continues under that name once the list, read again, shows it removed; no
+  suggests a new name. When it is listed removed, the name question suggests its name (the newest
+  one's).
+- A run that fails after creating an enrollment withdraws it before exiting
+  (`DELETE /api/v1/workers/enrollments/{enrollment_id}`), so it no longer waits for 24 hours holding
+  a worker slot: `ENROLL_FAILED`, `WORKER_HOST_TAKEN` and any other failure keep their code and exit
+  code, with `error.details.withdrawn: true` and a message ending `The enrollment <id> was
+  withdrawn.` A failed withdraw is a note: `withdrawn: false` and `error.details.withdraw_error`.
+  Setup's fix and log say which.
+- Contracts: the install id fields, the caller's enrollment list and the withdraw are agreed with
+  the App Service but not yet published; they stand in as the pending fragment
+  `contracts/pending/worker-enrollments.json`, with types in
+  `src/generated/worker-enrollments.d.ts`, and the contract tests run Prism serving it.
+- The `pidgen-setup-worker` skill describes the replace question and the withdrawn enrollment.
+- Test notes: unit tests over a temporary home cover the file, its format and the request body on
+  two runs (with `worker.env` moved aside), an invalid file, a stubbed `422` naming `install_id`
+  (also a Prism contract test), setup with this install's worker listed live and listed removed, and
+  a failing fake `pidgen-worker` asserting the `DELETE` and the envelope for both commands.
+
+### Setup asks the worker's name before enrolling
+
+- `pidgen setup` now always asks `Worker name` before it creates an enrollment, on a terminal and
+  unless `--label` answers it, with a suggestion filled in that Enter accepts and the person may
+  edit: the removed worker's name when this machine's `worker.env` names a worker the Account lists
+  as removed, else this machine's host name, or the next free name (`<name>-2`, then `-3`) when a
+  live worker of the Account holds it. Before, setup asked only when its own choice was taken, so
+  the person never saw or chose the name. The question stays open on a name that is empty, over 100
+  characters or held by a live worker of the Account; names are now compared without regard to
+  case. The answer is shown as `◇  Worker name · <name>` (the question was `Name for this worker`),
+  and the setup log records the suggestion and why it was chosen.
+- New error code `WORKER_NAME_TAKEN` (exit 5): the App Service refuses
+  `POST /workers/enrollments` with `409` when the Account holds the name by a live worker or a
+  pending enrollment, which the CLI cannot always see. `pidgen worker enroll` reports it with the
+  refused name in `error.details.display_name` and the server's suggestion in
+  `error.details.suggested_name`; nothing was created, and it never asks. Setup meets it with
+  `▲  <name> is taken in Pidgen, so this worker needs another name.` and asks `Worker name` again
+  with the suggested name filled in. The CLI handles the refusal before the App Service returns it.
+- A `--label` never asks. A taken one, listed by the Account or refused with `WORKER_NAME_TAKEN`,
+  now stops setup with `WORKER_NAME_TAKEN`, exit 5, its fix `pidgen setup --label <suggested name>`;
+  a `--label` the Account already listed used to stop with `CLI_USAGE`, exit 2.
+- The `pidgen-setup-worker` skill describes the name question and `WORKER_NAME_TAKEN`.
+- Test notes: unit tests cover the question on a fresh machine, with a live worker holding the host
+  name and for a removed worker, an edited name, the local checks, a stubbed `409`
+  `WORKER_NAME_TAKEN` for setup and for `pidgen worker enroll`, and a free and a taken `--label`.
+
+### Setup recovers when Pidgen refuses the worker's name
+
+- `pidgen worker enroll` now names the server's refusal of a taken host id. When
+  `pidgen-worker enroll` exits 1 reporting `HTTP 409 WORKER_HOST_TAKEN`, the command exits 5 with
+  the new code `WORKER_HOST_TAKEN` and the refused name in `error.details.host_id`, instead of
+  `ENROLL_FAILED` with the worker's advice to remove the worker on the Workers page, which does not
+  free the name. Other failures keep `ENROLL_FAILED`, exit 1. The worker's output still goes to
+  standard error, now with the one-time token replaced by `[redacted]` there too.
+- `pidgen setup` meets the refusal at its enroll step with one line,
+  `▲  <name> is taken in Pidgen, so this worker needs another name.`, asks `Name for this worker`
+  defaulting to the next free name (`<name>-2`, then `-3`, skipping names refused in the run), and
+  enrolls under the answer, offering the same enrollment again (the server leaves its token
+  unspent), then starts the worker as usual. Should the same enrollment fail under the new name,
+  setup makes one new enrollment and the setup log names the unused one. A name can be taken where
+  setup cannot see it: by a worker of another Account (host ids are unique across Accounts), or by
+  this Account's removed worker on a server that does not yet let an Account reclaim its name.
+- With `--label`, a refused name stops setup at the enroll step, exit 5 with `WORKER_HOST_TAKEN`, in
+  one block naming the name and the fix `pidgen setup --label <next free name>`; nothing is
+  started.
+- Setup still offers a removed worker its own name first, since the App Service accepts
+  re-enrolling it, and falls back only when the server refuses it.
+- The `pidgen-setup-worker` skill describes `WORKER_HOST_TAKEN` and no longer advises removing the
+  old worker in the web app.
+- Test notes: unit tests cover the refusal and other failures of `pidgen worker enroll`, and setup's
+  recovery (one enrollment, both runs with its token), a second refusal, a retried name, the
+  new-enrollment fallback, the `--label` stop and the removed-worker case, with a fake
+  `pidgen-worker` that prints the real refusal line. Manual check on the test bed: run
+  `pidgen setup --label <a name another Account holds>`; it stops with `WORKER_HOST_TAKEN`, and
+  without `--label` on a host whose name is taken it ends with the worker running under
+  `<name>-2`.
+
+### Setup offers a newer worker release on every run that starts the worker
+
+- A part-done `pidgen setup` run (the worker installed but, say, not yet enrolled) used to skip the
+  install step without comparing versions, so a machine set up minutes after a release started the
+  older one. Before such a run starts the worker, setup now compares the installed version with the
+  newest release on its track (the rule `pidgen worker update` follows: final releases, plus
+  pre-releases while one is installed, never older) and, when one is newer, asks once,
+  `pidgen-worker <new> is available (<old> installed). Update before starting?` (default yes). Yes
+  asks the licence question for the new release, then runs `pidgen worker update --restart` and
+  starts it; no starts the installed release and names `pidgen worker update`. `--accept-licence`
+  answers both questions in advance; without a terminal setup still exits 2 with
+  `TERMINAL_REQUIRED`.
+- *Check everything and stop* on a finished machine now says
+  `pidgen-worker <new> is available (<old> installed)` when a newer release is out, without asking
+  or installing. The re-run menu is otherwise unchanged.
+
+### Re-enrolling a removed worker uses the new enrollment
+
+- `pidgen setup` on a machine whose worker was removed from the Account (listed revoked, or no
+  longer listed) asks `Enroll it again?` as before, and now runs
+  `pidgen worker enroll --replace-credential`: the removed worker's `$PIDGEN_HOME/worker.env` is
+  moved aside to `worker.env.replaced-<UTC timestamp>` before the enrollment is created, so
+  `pidgen-worker enroll` exchanges the new enrollment instead of keeping the revoked credential, and
+  the worker starts and connects. Before, setup created an enrollment the worker never redeemed,
+  and the worker's registration was refused. The setup log records the moved file's path.
+- `pidgen worker enroll --replace-credential` is new. It renames an existing `worker.env` that
+  holds a credential to `worker.env.replaced-<UTC timestamp>` in the same folder, mode 0600, just
+  before creating the enrollment (putting it back if the server refuses the enrollment), and reports
+  the new path in `data.replaced`. The CLI never reads the credential's value, prints it, returns it
+  or deletes the file. With no `worker.env` the flag changes nothing.
+- `pidgen worker enroll` without the flag now refuses a worker home whose `worker.env` already holds
+  a credential: exit 5 with the new code `WORKER_CREDENTIAL_PRESENT`, before anything is installed
+  or an enrollment is created. The message names the file and both ways on: `pidgen worker start` to
+  use the saved credential, or `--replace-credential` to enroll anew.
+- `pidgen setup` stops at the enroll step, before creating any enrollment, when `worker.env` holds a
+  credential for another server (or one naming no server): `WORKER_CREDENTIAL_PRESENT`, exit 5, in
+  one block naming the file and that server. It used to enroll anyway, and the worker kept the old
+  credential.
+- The `pidgen-setup-worker` skill describes the refusal and the flag.
+- Test notes: unit tests cover the refusal, the move (path, mode, `data.replaced`, no credential on
+  standard output, standard error or in the envelope), the no-file case, and setup's re-enroll and
+  other-server paths with a fake `pidgen-worker` that, like the real one, skips the exchange when a
+  credential is saved. Manual check on the test bed: after a completed setup, remove the worker on
+  the Workers page and run `pidgen setup` again; it ends with the worker running and connected
+  ([Troubleshooting](docs/troubleshooting.md#re-enroll-a-removed-worker)).
+
 ## 0.1.0-alpha.3
 
 The third alpha, published to npm under `alpha` and `latest`. It publishes the changes listed under

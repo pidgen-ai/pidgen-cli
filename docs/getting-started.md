@@ -113,7 +113,8 @@ collapses to one line, such as `◇  Coding agents · Claude Code, Codex`. Ctrl-
 setup and keeps everything it finished; run it again to continue.
 
 1. **Check this machine.** Runs `pidgen doctor`, and offers to install `uv` when it is missing.
-   `git` 2.25 or later is required.
+   `git` 2.38 or later is required; when it is missing or older, setup stops and names the command
+   that installs it on your system ([Install a worker](install-worker.md) lists them).
 2. **Sign in to Pidgen.** Signs you in with a device code, if you are not signed in already.
 3. **Choose coding agents.** Tick Claude Code, Codex, or both; the ones on this machine start
    ticked. Ticking one that is missing installs it with npm, with no further question.

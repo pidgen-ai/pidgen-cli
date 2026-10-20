@@ -89,6 +89,51 @@ What the commands read:
 - **Worker releases**: `GET /api/v1/workers/releases`, read with no credential and no Account,
   answering a `WorkerReleaseList`.
 
+## Worker install ids and withdrawing an enrollment
+
+The App Service has agreed these and not yet published them, so the CLI carries them as a pending
+fragment, `contracts/pending/worker-enrollments.json`, and validates the enrollment it creates
+against it until the server publishes them:
+
+- `install_id` (optional, 32 lowercase hex characters) on `CreateEnrollmentRequest`
+  (`POST /api/v1/workers/enrollments`), on the created enrollment, and on each `WorkerResource`
+  `GET /api/v1/workers` lists. The server withdraws the caller's earlier pending enrollment for the
+  same install when a new one is created. A server from before the field refuses it with `422`
+  naming `install_id`; the CLI then sends the create once more without it.
+- `GET /api/v1/workers/enrollments`: the caller's own enrollments, pending ones unless `state`
+  widens it, each without its token or install steps, with its `install_id`.
+- `DELETE /api/v1/workers/enrollments/{enrollment_id}`: withdraw one of the caller's pending
+  enrollments, answering it, or `404` with `WORKER_ENROLLMENT_NOT_FOUND`.
+
+## Project readiness
+
+The App Service has agreed these and not yet published them, so the CLI carries them as a pending
+fragment, `contracts/pending/project-readiness.json`, and validates every answer it reads and every
+body it sends against it until the server publishes them. `pidgen project inspect`, `project setup`,
+`project rehearse` and `project doctor` use them
+([Commands](commands.md#project-inspect-setup-rehearse-and-doctor)):
+
+- `GET /api/v1/projects/{project_ref}/readiness`: the Project's `Readiness` — the latest inspection,
+  one finding per area, the questions, the proposal and the latest rehearsal.
+- `GET /api/v1/projects/{project_ref}/readiness/proposal/archive`: the proposed files as a
+  gzip-compressed tar (`application/gzip`), each entry a regular file under `.pidgen/` named from
+  the repository root, with its mode; `404` with `READINESS_PROPOSAL_NOT_FOUND` while there is none.
+- `POST /api/v1/projects/{project_ref}/readiness/proposal/pull-request`: open the pull request that
+  proposes the files, answering the `ReadinessProposal`; `409` with `FORGE_NOT_CONNECTED` or
+  `READINESS_QUESTIONS_OPEN`.
+- `POST /api/v1/projects/{project_ref}/readiness/answers`: answer questions
+  (`{"answers": [{"question_id", "value"}]}`) and inspect again, answering `202` with the
+  readiness; `422` with `READINESS_QUESTION_UNKNOWN` or `READINESS_ANSWER_INVALID`.
+- `POST /api/v1/projects/{project_ref}/readiness/rehearse`: request a rehearsal (`{"ref"}`,
+  optional), answering `202` with the queued `Rehearsal`; it is followed through the readiness's
+  `rehearsal`. `409` with `REHEARSAL_IN_PROGRESS` or `NO_ELIGIBLE_WORKER`.
+- `POST /api/v1/projects/{project_ref}/readiness/doctor`: run the Project doctor
+  (`{"since_days", "propose_fix"}`, both optional), answering `200` with the
+  `ProjectDoctorReport` once its checks are done: the `verdict` (`setup`, `code` or `unclear`), its
+  sentence, the six groups of checks and the fix. `409` with `FORGE_NOT_CONNECTED` when
+  `propose_fix` cannot open the pull request. Settled here where the stated contract is silent:
+  the schema names, the request's fields and that it answers synchronously.
+
 ## Not yet published
 
 These features wait for the public API to publish what they need, and are marked *planned* where

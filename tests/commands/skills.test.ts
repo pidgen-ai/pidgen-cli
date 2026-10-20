@@ -68,6 +68,7 @@ describe("pidgen skills install", () => {
       "pidgen-file-ticket",
       "pidgen-decompose-plan",
       "pidgen-triage-requests",
+      "pidgen-setup-workspace",
     ]) {
       expect(skills, name).toContain(name);
     }

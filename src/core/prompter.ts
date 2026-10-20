@@ -86,6 +86,8 @@ export interface Spinner {
   message(message: string): void;
   stop(message: string): void;
   error(message: string): void;
+  /** Ends the spinner without leaving a line. */
+  clear(): void;
 }
 
 export interface TaskLog {
@@ -456,6 +458,7 @@ export async function clackPrompter(io: { input: Readable; output: Writable }): 
         stop: (message) => spin.stop(message),
         // clack's cancel draws `■`, as a failed task is drawn.
         error: (message) => spin.cancel(message),
+        clear: () => spin.clear(),
       };
     },
 

@@ -5,7 +5,11 @@ import type { RunContext } from "../../core/context.js";
 import { CliError } from "../../core/errors.js";
 import { ExitCode } from "../../core/exit-codes.js";
 import type { CommandSpec } from "../../core/registry.js";
-import { assertSupportedPlatform, resolvePidgenHome } from "../../core/worker.js";
+import {
+  assertSupportedPlatform,
+  removeWorkerRecord,
+  resolvePidgenHome,
+} from "../../core/worker.js";
 import {
   adapterFor,
   noInstallRecord,
@@ -19,8 +23,9 @@ import {
  * pidgen-worker` and removes the kept wheel; the container removes the `pidgen-worker` container
  * and the pinned image. The worker home, with the worker's credential, stays unless `--purge` is
  * given: then the worker home is removed, and for the container also the `pidgen-worker-home`
- * Docker volume that holds the container's worker home. No install record exits 4 with
- * `WORKER_NOT_INSTALLED`.
+ * Docker volume that holds the container's worker home. A stale detached run record (a recorded
+ * worker that is no longer running) is removed too, so `worker status` then reports `record: null`.
+ * No install record exits 4 with `WORKER_NOT_INSTALLED`.
  *
  * `data` is `uninstalled` (the removed install record), `stopped` (`{record, forced}` of the
  * worker it stopped, or `null`), `removed` (what was removed, such as `tool pidgen-worker` or
@@ -44,6 +49,10 @@ export const workerUninstall: CommandSpec = {
     const local = await adapter.status();
     // The tool is being removed, so a worker that does not stop within the timeout is killed.
     const stopped = local.running ? await adapter.stop(true, global.timeoutSeconds) : null;
+    // A detached worker that exited on its own left its run record; it goes with the install.
+    if (!local.running && local.record !== null && record.form === "wheel") {
+      await removeWorkerRecord(ctx);
+    }
     const { removed } = await adapter.uninstall(record, purge);
     await removeInstallRecord(ctx);
     if (purge) await rm(home, { recursive: true, force: true });

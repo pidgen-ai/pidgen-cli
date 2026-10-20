@@ -1,0 +1,27 @@
+{
+  "rehearsal_id": "reh-example-1",
+  "state": "running",
+  "ref": "pidgen/setup",
+  "commit": "9b8a7c6d5e4f30211f2e3d4c5b6a79881a2b3c4d",
+  "worker": "build-box",
+  "steps": [
+    {
+      "step": "provision",
+      "state": "passed",
+      "exit_code": 0,
+      "duration_seconds": 161,
+      "summary": null
+    },
+    {
+      "step": "activate",
+      "state": "running",
+      "exit_code": null,
+      "duration_seconds": null,
+      "summary": null
+    }
+  ],
+  "verdict": null,
+  "requested_at": "2026-10-19T09:10:00Z",
+  "finished_at": null,
+  "log_artifact_id": null
+}

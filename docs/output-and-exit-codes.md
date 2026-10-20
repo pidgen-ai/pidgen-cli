@@ -193,11 +193,11 @@ string (the message), or a `{"detail": [ … ]}` validation list (`error.details
 | Code | Meaning | Typical `error.code` |
 |---|---|---|
 | 0 | Success | — |
-| 1 | Unexpected error (a bug, an unexpected server response, failed diagnostics, a failing worker install, update, uninstall or enrollment, or an immediately exiting worker) | `CLI_INTERNAL`, `UNEXPECTED_RESPONSE`, `NOT_PIDGEN`, `DOCTOR_FAILED`, `WORKER_EXITED`, `INSTALL_FAILED`, `ENROLL_FAILED`, `INSTALL_RECORD_INVALID`, `DOWNLOAD_FAILED`, `UPDATE_ROLLED_BACK`, `ROLLBACK_FAILED`, `UNINSTALL_FAILED`, `DOCKER_FAILED`, `CAPACITY_REFUSED`, `CAPACITY_FAILED` |
+| 1 | Unexpected error (a bug, an unexpected server response, failed diagnostics, a failing worker install, update, uninstall or enrollment, or an immediately exiting worker) | `CLI_INTERNAL`, `UNEXPECTED_RESPONSE`, `NOT_PIDGEN`, `DOCTOR_FAILED`, `SETUP_IS_THE_PROBLEM`, `WORKER_EXITED`, `INSTALL_FAILED`, `ENROLL_FAILED`, `INSTALL_RECORD_INVALID`, `DOWNLOAD_FAILED`, `UPDATE_ROLLED_BACK`, `ROLLBACK_FAILED`, `UNINSTALL_FAILED`, `DOCKER_FAILED`, `CAPACITY_REFUSED`, `CAPACITY_FAILED` |
 | 2 | Usage error: bad flags, invalid input file, a path outside the public API, an unavailable local worker or worker runtime (including a Docker daemon that cannot be reached), a missing worker `worker enroll` was not told to install, `pidgen setup` without a terminal, cancelled with Ctrl-C at a question, or stopped by a declined licence | `CLI_USAGE`, `INPUT_INVALID`, `PATH_NOT_PUBLIC`, `WORKER_NOT_FOUND`, `UNSUPPORTED_PLATFORM`, `INSTALL_CONFIRMATION_REQUIRED`, `COSIGN_NOT_FOUND`, `RUNTIME_UNAVAILABLE`, `TERMINAL_REQUIRED`, `SETUP_CANCELLED`, `AGENT_NOT_FOUND`, `AGENT_REQUIRED` |
 | 3 | Not authenticated, or not authorized | `AUTH_REQUIRED`, `TOKEN_EXPIRED`, `TOKEN_INVALID`, `FORBIDDEN`, `ACCOUNT_MISMATCH`, `ENROLL_NOT_PERMITTED`, `AGENT_NOT_SIGNED_IN` |
 | 4 | Not found | `NOT_FOUND`, `CREDENTIAL_NOT_FOUND`, `WORKER_NOT_RUNNING`, `WORKER_NOT_INSTALLED`, `INSTRUCTION_NOT_FOUND`, and resource-specific codes |
-| 5 | Domain refusal or conflict | server codes such as `ACTIVE_ATTEMPT_EXISTS`, `REOPEN_NOT_JUSTIFIED`, `REQUEST_WITHDRAW_FORBIDDEN`, `REQUEST_ALREADY_CREATED`, `SUBMISSION_KEY_REUSED`, `STEP_SETTLED`, `RUN_PAUSED`, `RUN_HELD`, `INSTRUCTION_ALREADY_DELIVERED`, `DELIVERY_IN_FLIGHT`, `PUBLICATION_RESULT_UNKNOWN`; `WORKER_ALREADY_RUNNING`, `PROVENANCE_INVALID`, `RELEASE_UNSUPPORTED`, `PURGE_REFUSED` |
+| 5 | Domain refusal or conflict | server codes such as `ACTIVE_ATTEMPT_EXISTS`, `REOPEN_NOT_JUSTIFIED`, `REQUEST_WITHDRAW_FORBIDDEN`, `REQUEST_ALREADY_CREATED`, `SUBMISSION_KEY_REUSED`, `STEP_SETTLED`, `RUN_PAUSED`, `RUN_HELD`, `INSTRUCTION_ALREADY_DELIVERED`, `DELIVERY_IN_FLIGHT`, `PUBLICATION_RESULT_UNKNOWN`; `WORKER_ALREADY_RUNNING`, `WORKER_CREDENTIAL_PRESENT`, `WORKER_HOST_TAKEN`, `WORKER_NAME_TAKEN`, `PROVENANCE_INVALID`, `RELEASE_UNSUPPORTED`, `PURGE_REFUSED` |
 | 6 | A preview digest or acknowledgement is required | `DIGEST_REQUIRED`, `ACKNOWLEDGEMENT_REQUIRED`, `PREVIEW_STALE` |
 | 7 | CLI and server API versions are incompatible | `API_VERSION_UNSUPPORTED` |
 | 8 | Network failure or timeout, including `--wait` timing out and `pidgen setup` waiting for the worker to connect | `NETWORK`, `TIMEOUT`, `WORKER_NOT_CONNECTED` |
@@ -218,7 +218,10 @@ These do not print an envelope:
 - `--help` and `--version`, which print text;
 - `pidgen worker start` without `--detach`, which hands the terminal to the worker: the worker's own
   output passes through and `pidgen` exits with the worker's exit code
-  ([Workers](workers.md#run-and-check-a-worker)).
+  ([Workers](workers.md#run-and-check-a-worker));
+- `pidgen project doctor --json`, which prints the doctor's report alone, as the server answered
+  it, and exits 1 when the setup is the problem; an error under `--json` is the JSON envelope
+  ([Commands](commands.md#project-inspect-setup-rehearse-and-doctor)).
 
 A failure before the handoff uses the selected output format. Help and version remain text
 regardless of `--format`.

@@ -40,7 +40,11 @@ export interface ServerView {
  * a credential is configured, the App Service's record of this worker from `GET /workers` — its
  * last-seen time, protocol state and git credential coverage.
  *
- * Without a credential it stays local: no request is made and `data` is `{record, running, update}`.
+ * `installed` is whether a valid install record exists: `false` with none (or an unreadable one),
+ * which is still a status, not a `WORKER_NOT_INSTALLED` failure, so the command exits 0.
+ *
+ * Without a credential it stays local: no request is made and `data` is
+ * `{installed, record, running, update}`.
  * With one, `data` adds `server` and `warnings`. A server that cannot be reached or refuses the
  * request leaves `server: null` and adds a warning; the command still exits 0, since the local
  * status was read. No matching worker is reported as `server.enrolled: false`, not as an error.
@@ -66,7 +70,10 @@ export const workerStatus: CommandSpec = {
     const record = await installRecord(ctx, warnings);
     // The install record's form selects the adapter; with none, the detached wheel worker's.
     if (record?.form === "container") assertSupportedPlatform(ctx.workerRuntime);
-    const local = await adapterFor(ctx, record?.form ?? "wheel").status();
+    const local = {
+      installed: record !== null,
+      ...(await adapterFor(ctx, record?.form ?? "wheel").status()),
+    };
     const installed = record?.version ?? null;
     const localOnly = {
       ...local,

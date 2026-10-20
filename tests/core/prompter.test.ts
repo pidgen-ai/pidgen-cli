@@ -1,10 +1,9 @@
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { build } from "esbuild";
 import { describe, expect, it } from "vitest";
 import { clackPrompter, PromptCancelled, type Prompter } from "../../src/core/prompter.js";
+import { tempDir } from "../support/temp.js";
 
 const ROOT = join(import.meta.dirname, "..", "..");
 
@@ -110,7 +109,7 @@ describe("clackPrompter", () => {
 // prompts-seam: only setup loads clack, so `pidgen --version` and every other command do not.
 describe("the bundle", () => {
   it("does not import @clack/prompts or @clack/core at its top level, only dynamically", async () => {
-    const outdir = await mkdtemp(join(tmpdir(), "pidgen-bundle-"));
+    const outdir = await tempDir("pidgen-bundle-");
     // As tsup builds it (tsup.config.ts): one ESM bundle, packages left as imports.
     const result = await build({
       entryPoints: { pidgen: join(ROOT, "src", "bin", "pidgen.ts") },

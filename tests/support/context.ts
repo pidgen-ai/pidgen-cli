@@ -1,19 +1,15 @@
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RunContext } from "../../src/core/context.js";
 import { defaultWorkerRuntime } from "../../src/core/worker.js";
+import { tempDir } from "./temp.js";
+
+export { tempDir, tempDirSync } from "./temp.js";
 
 export const REPO_SKILLS_DIR = fileURLToPath(new URL("../../skills", import.meta.url));
 
 export interface TestContext extends RunContext {
   out: string[];
   err: string[];
-}
-
-export async function tempDir(prefix = "pidgen-test-"): Promise<string> {
-  return mkdtemp(join(tmpdir(), prefix));
 }
 
 export async function testContext(overrides: Partial<RunContext> = {}): Promise<TestContext> {
@@ -38,7 +34,8 @@ export async function testContext(overrides: Partial<RunContext> = {}): Promise<
     },
     now: () => clock,
     readStdin: () => Promise.reject(new Error("unexpected read of standard input")),
-    workerRuntime: defaultWorkerRuntime,
+    // Never the host's /etc/os-release.
+    workerRuntime: { ...defaultWorkerRuntime, osRelease: () => Promise.resolve(null) },
     provenanceTrust: () => ({
       identities: [],
       trustedRoot: () => Promise.reject(new Error("unexpected load of a Sigstore trust root")),

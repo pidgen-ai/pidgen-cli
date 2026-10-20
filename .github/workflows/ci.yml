@@ -30,7 +30,8 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
-      - run: npm test
+      - name: Unit tests, leaving nothing in the temporary directory
+        run: npm run test:tmp-check
       - name: Contract tests against a Prism mock server
         run: npm run test:contract
       - name: Docs meet the docs bundle contract

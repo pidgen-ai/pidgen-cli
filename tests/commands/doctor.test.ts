@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { chmod, readFile } from "node:fs/promises";
+import { chmod, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
@@ -154,6 +154,7 @@ function runtimeWith(
   tools: string[],
   platform: NodeJS.Platform = "linux",
   git: string | null = GIT_VERSION,
+  osRelease: { text: string | null; reads: number } = { text: null, reads: 0 },
 ): Pick<RunContext, "workerRuntime"> & { env: Record<string, string> } {
   const present = new Set(
     [...tools, ...(git !== null ? ["git"] : [])].map((tool) => join(BIN, tool)),
@@ -167,6 +168,11 @@ function runtimeWith(
       command === join(BIN, "git") && git !== null
         ? fakeChild(git)
         : defaultWorkerRuntime.spawn(command, args, options),
+    // Never the host's /etc/os-release: what the test gives, counting the reads.
+    osRelease: () => {
+      osRelease.reads += 1;
+      return Promise.resolve(osRelease.text);
+    },
   };
   return { workerRuntime, env: { PATH: BIN } };
 }
@@ -178,15 +184,19 @@ async function setup(
     platform?: NodeJS.Platform;
     /** What `git --version` prints; `null`: git is not on PATH. */
     git?: string | null;
+    /** The contents of /etc/os-release; `null` (the default): unreadable. */
+    osRelease?: string | null;
     env?: Record<string, string>;
     answers?: Answers;
   } = {},
 ) {
   const calls: string[] = [];
+  const osRelease = { text: options.osRelease ?? null, reads: 0 };
   const runtime = runtimeWith(
     options.tools ?? ["uv", "docker", "cosign", ...HARNESS_COMMANDS],
     options.platform,
     options.git === undefined ? GIT_VERSION : options.git,
+    osRelease,
   );
   const ctx = await testContext({
     fetch: server(calls, options.answers),
@@ -196,7 +206,7 @@ async function setup(
   const stored =
     options.config === undefined ? config({ kind: "cli", token: CLI_TOKEN }) : options.config;
   if (stored) await saveConfig(ctx, stored);
-  return { ctx, calls };
+  return { ctx, calls, osRelease };
 }
 
 async function run(ctx: TestContext, ...argv: string[]) {
@@ -504,8 +514,8 @@ describe("pidgen doctor", () => {
     expect(checksOf(body)["runtime"]?.summary).toMatch(/cosign/);
   });
 
-  // c1-git: git missing or older than 2.25 fails, with the platform's fix.
-  it("fails the git check when git is missing, with the package manager fix on Linux", async () => {
+  // c1-git: git missing or older than 2.38 fails, with the platform's fix.
+  it("fails the git check when git is missing, with the generic fix on an unknown Linux", async () => {
     const { ctx } = await setup({ git: null });
     const { code, body } = await run(ctx);
 
@@ -514,37 +524,61 @@ describe("pidgen doctor", () => {
     expect(body.error?.message).toMatch(/git/);
     expect(checksOf(body)["git"]).toMatchObject({
       status: "fail",
-      fix: "install git with your package manager",
+      fix: "install git 2.38 or later with your package manager: https://git-scm.com/downloads/linux",
     });
     expect(checksOf(body)["git"]?.summary).toMatch(/not on PATH/);
   });
 
   it("fails the git check when git is missing on macOS, with xcode-select --install", async () => {
-    const { ctx } = await setup({ git: null, platform: "darwin" });
+    const { ctx, osRelease } = await setup({ git: null, platform: "darwin" });
     const { code, body } = await run(ctx);
 
     expect(code).toBe(ExitCode.Unexpected);
-    expect(checksOf(body)["git"]).toMatchObject({ status: "fail", fix: "xcode-select --install" });
+    expect(checksOf(body)["git"]?.status).toBe("fail");
+    expect(checksOf(body)["git"]?.fix).toContain("`xcode-select --install`");
+    // os-release is read only on Linux.
+    expect(osRelease.reads).toBe(0);
   });
 
-  it("fails the git check when git is older than 2.25", async () => {
-    const { ctx } = await setup({ git: "git version 2.24.3 (Apple Git-128)\n" });
+  it("fails the git check when git is older than 2.38", async () => {
+    const { ctx } = await setup({ git: "git version 2.37.1 (Apple Git-137)\n" });
     const { code, body } = await run(ctx);
 
     expect(code).toBe(ExitCode.Unexpected);
-    expect(checksOf(body)["git"]).toMatchObject({
-      status: "fail",
-      fix: "install git with your package manager",
+    expect(checksOf(body)["git"]?.status).toBe("fail");
+    expect(checksOf(body)["git"]?.summary).toMatch(/2\.37\.1.*older than 2\.38/);
+  });
+
+  // AC-7a9ce68da4fa: the JSON keeps one fix string per check, here Ubuntu's PPA for an old git.
+  it("names the git-core PPA as the JSON fix for an old git on Ubuntu, and exits 1", async () => {
+    const { ctx, osRelease } = await setup({
+      git: "git version 2.34.1\n",
+      osRelease: 'NAME="Ubuntu"\nVERSION_ID="22.04"\nID=ubuntu\nID_LIKE=debian\n',
     });
-    expect(checksOf(body)["git"]?.summary).toMatch(/2\.24\.3.*2\.25/);
+    const { code, body } = await run(ctx);
+
+    expect(code).toBe(ExitCode.Unexpected);
+    expect(body.error?.code).toBe("DOCTOR_FAILED");
+    const git = checksOf(body)["git"];
+    expect(Object.keys(git!).sort()).toEqual(["fix", "id", "status", "summary"]);
+    expect(git).toMatchObject({
+      id: "git",
+      status: "fail",
+      fix: expect.stringContaining(
+        "`sudo add-apt-repository ppa:git-core/ppa && sudo apt update && sudo apt install git`",
+      ) as unknown,
+    });
+    expect(typeof git!.fix).toBe("string");
+    expect(osRelease.reads).toBe(1);
   });
 
-  it("passes the git check for git 2.25 and later", async () => {
-    const { ctx } = await setup({ git: "git version 2.25.0\n" });
+  it("passes the git check for git 2.38 and later, without reading os-release", async () => {
+    const { ctx, osRelease } = await setup({ git: "git version 2.38.0\n" });
     const { code, body } = await run(ctx);
 
     expect(code).toBe(ExitCode.Ok);
     expect(checksOf(body)["git"]).toMatchObject({ status: "ok", fix: null });
+    expect(osRelease.reads).toBe(0);
   });
 
   it("fails the runtime check on a platform the worker does not support", async () => {
@@ -725,6 +759,29 @@ describe("pidgen doctor: the release list's harness and worker checks", () => {
     );
   });
 
+  it("warns when another pidgen-worker is first on PATH, and is ok when the installed one is", async () => {
+    const setup = await installedDoctor({ commands: ["claude", "codex"] });
+    await install(setup.ctx);
+    const onPath = join(setup.pathDir, "pidgen-worker");
+    await writeFile(onPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+
+    let result = await run(setup.ctx);
+    expect(result.code).toBe(ExitCode.Ok);
+    const worker = checksOf(result.body)["worker"];
+    expect(worker).toMatchObject({
+      status: "warn",
+      fix: `export PATH="${setup.binDir}:$PATH"`,
+    });
+    expect(worker?.summary).toContain("is current.");
+    expect(worker?.summary).toContain(`\`pidgen-worker\` on PATH is another copy, at ${onPath}`);
+
+    // A symlink to the installed worker is the installed worker.
+    await rm(onPath);
+    await symlink(setup.workerBin, onPath);
+    result = await run(setup.ctx);
+    expect(checksOf(result.body)["worker"]).toMatchObject({ status: "ok", fix: null });
+  });
+
   it("fails the releases check, and skips the checks that need the list, when the server refuses it", async () => {
     const { ctx } = await setup({
       answers: {
@@ -749,32 +806,173 @@ describe("pidgen doctor: the release list's harness and worker checks", () => {
 });
 
 describe("gitCheck", () => {
-  it("passes git 2.25 and later", () => {
-    expect(gitCheck({ path: "/usr/bin/git", version: "2.25.0" }, "linux")).toMatchObject({
-      id: "git",
-      status: "ok",
-      fix: null,
-    });
-    expect(gitCheck({ path: "/usr/bin/git", version: "2.39.3" }, "darwin").status).toBe("ok");
-    expect(gitCheck({ path: "/usr/bin/git", version: "3.0.0" }, "linux").status).toBe("ok");
+  const git = (version: string | null) => ({ path: "/usr/bin/git", version });
+
+  // AC-9ca7832cf09a: 2.38 is the boundary, and versions compare numerically.
+  it("fails git 2.37.x and passes 2.38.0 and later, compared numerically", () => {
+    expect(gitCheck(git("2.37.9"), "linux")).toMatchObject({ id: "git", status: "fail" });
+    expect(gitCheck(git("2.37.9"), "linux").summary).toBe(
+      "git 2.37.9 at /usr/bin/git is older than 2.38, the oldest the worker supports.",
+    );
+    expect(gitCheck(git("2.38.0"), "linux")).toMatchObject({ id: "git", status: "ok", fix: null });
+    expect(gitCheck(git("2.38.0"), "linux").summary).toBe(
+      "git 2.38.0 at /usr/bin/git (the worker needs 2.38 or later).",
+    );
+    expect(gitCheck(git("2.43.0"), "darwin").status).toBe("ok");
+    expect(gitCheck(git("3.0"), "linux").status).toBe("ok");
+    expect(gitCheck(git("2.100.1"), "linux").status).toBe("ok");
+    expect(gitCheck(git("2.4.0"), "linux").status).toBe("fail");
+    expect(gitCheck(git("1.99.0"), "linux").status).toBe("fail");
+    expect(gitCheck(git(null), "linux").status).toBe("fail");
   });
 
-  it("fails git that is missing, older than 2.25 or cannot be run, with the platform's fix", () => {
-    expect(gitCheck(null, "darwin")).toMatchObject({
-      id: "git",
-      status: "fail",
-      fix: "xcode-select --install",
-    });
-    expect(gitCheck(null, "linux")).toMatchObject({
-      status: "fail",
-      fix: "install git with your package manager",
-    });
-    expect(gitCheck({ path: "/usr/bin/git", version: "2.24.9" }, "linux").status).toBe("fail");
-    expect(gitCheck({ path: "/usr/bin/git", version: "1.9.0" }, "darwin")).toMatchObject({
-      status: "fail",
-      fix: "xcode-select --install",
-    });
-    expect(gitCheck({ path: "/usr/bin/git", version: null }, "linux").status).toBe("fail");
+  // AC-17d8c120b04a: macOS fixes for missing and old git.
+  it("on macOS, names the Command Line Tools or Homebrew for a missing git", () => {
+    const missing = gitCheck(null, "darwin");
+    expect(missing).toMatchObject({ id: "git", status: "fail" });
+    expect(missing.fix).toContain("`xcode-select --install`");
+    expect(missing.fix).toContain("Command Line Tools");
+    expect(missing.fix).toContain("`brew install git`");
+    expect(gitCheck(git(null), "darwin").fix).toBe(missing.fix);
+  });
+
+  it("on macOS, names Homebrew ahead of /usr/bin, or Software Update, for an old git", () => {
+    const old = gitCheck(git("2.37.1"), "darwin");
+    expect(old.status).toBe("fail");
+    expect(old.fix).toContain("`brew install git`");
+    expect(old.fix).toContain("https://brew.sh");
+    expect(old.fix).toMatch(/Homebrew's .*before \/usr\/bin on PATH/);
+    expect(old.fix).toContain("Software Update");
+    expect(old.fix).not.toContain("xcode-select");
+  });
+
+  // AC-8f425dc82cee: the Linux fix follows /etc/os-release, ID first, then each ID_LIKE entry.
+  const UBUNTU =
+    "`sudo add-apt-repository ppa:git-core/ppa && sudo apt update && sudo apt install git`";
+  const GENERIC =
+    "install git 2.38 or later with your package manager: https://git-scm.com/downloads/linux";
+  const distributions: {
+    name: string;
+    osRelease: string | null;
+    missing: string;
+    old: string;
+    oldAlso?: string;
+  }[] = [
+    {
+      name: "ubuntu 22.04",
+      osRelease:
+        'PRETTY_NAME="Ubuntu 22.04.4 LTS"\nNAME="Ubuntu"\nVERSION_ID="22.04"\nID=ubuntu\nID_LIKE=debian\n',
+      missing: UBUNTU,
+      old: UBUNTU,
+    },
+    {
+      name: "linuxmint",
+      osRelease: 'NAME="Linux Mint"\nID=linuxmint\nID_LIKE="ubuntu debian"\n',
+      missing: UBUNTU,
+      old: UBUNTU,
+    },
+    {
+      name: "pop",
+      osRelease: 'NAME="Pop!_OS"\nID=pop\nID_LIKE="ubuntu debian"\n',
+      missing: UBUNTU,
+      old: UBUNTU,
+    },
+    {
+      name: "an unknown ID like ubuntu",
+      osRelease: "ID=elementary\nID_LIKE='ubuntu debian'\n",
+      missing: UBUNTU,
+      old: UBUNTU,
+    },
+    {
+      name: "debian",
+      osRelease: 'PRETTY_NAME="Debian GNU/Linux 11 (bullseye)"\nID=debian\n',
+      missing: "`sudo apt update && sudo apt install git`",
+      old: "Debian 12 or later",
+      oldAlso: "https://git-scm.com/downloads/linux",
+    },
+    {
+      name: "fedora",
+      osRelease: "NAME=Fedora\nID=fedora\n",
+      missing: "`sudo dnf install git`",
+      old: "`sudo dnf upgrade git`",
+    },
+    {
+      name: "rocky",
+      osRelease: 'NAME="Rocky Linux"\nID="rocky"\nID_LIKE="rhel centos fedora"\n',
+      missing: "`sudo dnf install git`",
+      old: "`sudo dnf upgrade git`",
+    },
+    {
+      name: "amazon linux",
+      osRelease: 'ID="amzn"\nID_LIKE="fedora"\n',
+      missing: "`sudo dnf install git`",
+      old: "`sudo dnf upgrade git`",
+    },
+    {
+      name: "arch",
+      osRelease: 'NAME="Arch Linux"\nID=arch\n',
+      missing: "`sudo pacman -S git`",
+      old: "`sudo pacman -S git`",
+    },
+    {
+      name: "manjaro",
+      osRelease: "ID=manjaro\nID_LIKE=arch\n",
+      missing: "`sudo pacman -S git`",
+      old: "`sudo pacman -S git`",
+    },
+    {
+      name: "alpine",
+      osRelease: 'NAME="Alpine Linux"\nID=alpine\n',
+      missing: "`sudo apk add git`",
+      old: "`sudo apk upgrade git`",
+    },
+    {
+      name: "opensuse-leap",
+      osRelease: 'NAME="openSUSE Leap"\nID="opensuse-leap"\nID_LIKE="suse opensuse"\n',
+      missing: "`sudo zypper install git`",
+      old: "`sudo zypper install git`",
+    },
+    {
+      name: "sles",
+      osRelease: 'ID="sles"\nID_LIKE="suse"\n',
+      missing: "`sudo zypper install git`",
+      old: "`sudo zypper install git`",
+    },
+    { name: "an unknown ID", osRelease: "ID=plan9\n", missing: GENERIC, old: GENERIC },
+    { name: "a missing file", osRelease: null, missing: GENERIC, old: GENERIC },
+  ];
+
+  it.each(distributions)(
+    "on Linux, $name, names its fix",
+    ({ osRelease, missing, old, oldAlso }) => {
+      const absent = gitCheck(null, "linux", osRelease);
+      expect(absent).toMatchObject({ id: "git", status: "fail" });
+      expect(absent.fix).toContain(missing);
+      const tooOld = gitCheck(git("2.34.1"), "linux", osRelease);
+      expect(tooOld).toMatchObject({ id: "git", status: "fail" });
+      expect(tooOld.fix).toContain(old);
+      if (oldAlso !== undefined) expect(tooOld.fix).toContain(oldAlso);
+      // One string, one line, no trailing full stop (setup adds its own punctuation).
+      for (const fix of [absent.fix, tooOld.fix]) {
+        expect(fix).not.toMatch(/\n/);
+        expect(fix).not.toMatch(/\.$/);
+      }
+    },
+  );
+
+  it("gives distinct missing and old fixes where the commands differ", () => {
+    const fedora = "ID=fedora\n";
+    expect(gitCheck(null, "linux", fedora).fix).not.toContain("upgrade");
+    expect(gitCheck(git("2.30.0"), "linux", fedora).fix).not.toContain("dnf install");
+    const alpine = "ID=alpine\n";
+    expect(gitCheck(git("2.30.0"), "linux", alpine).fix).not.toContain("apk add");
+    const debian = "ID=debian\n";
+    expect(gitCheck(null, "linux", debian).fix).not.toContain("Debian 12");
+  });
+
+  it("is the generic fix on a Linux whose os-release is unknown, and an ok check has no fix", () => {
+    expect(gitCheck(null, "linux").fix).toBe(GENERIC);
+    expect(gitCheck(git("2.43.0"), "linux", "ID=ubuntu\n").fix).toBeNull();
   });
 });
 

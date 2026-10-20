@@ -7,5 +7,8 @@ export default defineConfig({
     // Contract tests start a Prism mock server; they run with `npm run test:contract`.
     exclude: ["tests/contract/**", "**/node_modules/**"],
     environment: "node",
+    // Removes the temporary directories tests make (tests/support/temp.ts).
+    setupFiles: ["tests/support/setup.ts"],
+    globalSetup: ["tests/support/global-setup.ts"],
   },
 });

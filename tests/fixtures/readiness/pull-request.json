@@ -1,0 +1,41 @@
+{
+  "state": "pull_request_open",
+  "files": [
+    {
+      "path": ".pidgen/pidgen.toml",
+      "executable": false,
+      "bytes": 350
+    },
+    {
+      "path": ".pidgen/scripts/provision",
+      "executable": true,
+      "bytes": 202
+    },
+    {
+      "path": ".pidgen/scripts/activate",
+      "executable": true,
+      "bytes": 118
+    },
+    {
+      "path": ".pidgen/scripts/teardown",
+      "executable": true,
+      "bytes": 131
+    },
+    {
+      "path": ".pidgen/scripts/test",
+      "executable": true,
+      "bytes": 55
+    }
+  ],
+  "assumptions": [
+    "Tests run with uv run pytest -m 'not slow' and npm test, as CI runs them.",
+    "postgres:16 and redis:7 start from compose.yaml, one Compose project per workspace.",
+    "Migrations run with alembic upgrade head after the services start."
+  ],
+  "pull_request": {
+    "url": "https://forge.example.com/example-org/storefront/pulls/1",
+    "number": 1,
+    "branch": "pidgen/setup",
+    "state": "open"
+  }
+}

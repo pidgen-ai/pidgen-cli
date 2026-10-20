@@ -1,6 +1,6 @@
 {
   "name": "pidgen",
-  "version": "0.1.0-alpha.3",
+  "version": "0.1.0-alpha.4",
   "description": "Command-line client and agent skills for Pidgen",
   "license": "Apache-2.0",
   "repository": {
@@ -28,11 +28,12 @@
     "dev": "tsup --watch",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:tmp-check": "node scripts/test-tmp-check.mjs",
     "test:contract": "vitest run --config vitest.contract.config.ts",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit",
-    "contract:generate": "openapi-typescript contracts/openapi.json -o src/generated/api.d.ts",
+    "contract:generate": "openapi-typescript contracts/openapi.json -o src/generated/api.d.ts && openapi-typescript contracts/pending/worker-enrollments.json -o src/generated/worker-enrollments.d.ts && openapi-typescript contracts/pending/project-readiness.json -o src/generated/project-readiness.d.ts",
     "contract:pull": "node scripts/contract-pull.mjs",
     "release:check": "node scripts/release-check.mjs",
     "api:coverage": "node scripts/api-coverage.mjs",

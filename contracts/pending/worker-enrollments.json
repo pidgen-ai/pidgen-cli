@@ -1,0 +1,1585 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Pidgen Public API: pending worker enrollment routes",
+    "version": "1.0",
+    "description": "The worker install id and withdrawing an enrollment, as the App Service states them. POST /api/v1/workers/enrollments and GET /api/v1/workers are published; they are held here as published plus `install_id` (optional, 32 lowercase hex characters) on CreateEnrollmentRequest, CreatedEnrollment and WorkerResource, because the published CreateEnrollmentRequest refuses unknown fields. GET /api/v1/workers/enrollments (the caller's own enrollments, pending only unless `state` widens it) and DELETE /api/v1/workers/enrollments/{enrollment_id} (withdraw one; 404 WORKER_ENROLLMENT_NOT_FOUND) are not yet published. An enrollment, WorkerEnrollment, has CreatedEnrollment's fields without token, install_commands, install and eula. When the server publishes them, they are pulled with contracts/openapi.json and this file is deleted. Settled here where the stated contract is silent: the schema names, `all` for `state`, and the enrollment list's order. Every route takes the bearer credential and the X-PIDGEN-Account header like the published routes."
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/api/v1/workers": {
+      "get": {
+        "tags": ["workers"],
+        "summary": "List the Account's workers",
+        "description": "List the workers enrolled in the Account named by X-PIDGEN-Account: host, locality, whether this API process holds its channel, when it was last seen, the major.minor protocol it last announced and where that stands against this service (protocol_state), and per Project remote whether it last reported a local git credential. Also its name, who enrolled it, whether it is the Account fleet's, its scope and credential mode, and its latest preflight (tools, coding-agent CLIs, their login and repository access). mine=true lists only the workers you enrolled. Owners and Administrators (account.manage_workers) see every worker; a member who may enroll their own workers (account.enroll_own_workers) sees only theirs. No Personal API Token scope reaches it. Each worker names the install_id its enrollment was created with.",
+        "operationId": "list_workers_api_v1_workers_get",
+        "parameters": [
+          {
+            "name": "mine",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Only the workers you enrolled.",
+              "default": false,
+              "title": "Mine"
+            },
+            "description": "Only the workers you enrolled."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerListResponse"
+                },
+                "example": {
+                  "status": "ok",
+                  "data": {
+                    "service_protocol": "1.0",
+                    "accepted_protocols": ["1.0"],
+                    "workers": [
+                      {
+                        "host_id": "build-box",
+                        "display_name": "build-box",
+                        "enrolled_by": "human:usr-example",
+                        "own": true,
+                        "fleet": true,
+                        "scope": "account",
+                        "scope_projects": null,
+                        "credential_mode": "platform",
+                        "version": 1,
+                        "locality_domain": "build-box",
+                        "enabled": true,
+                        "connected": true,
+                        "created_at": "2026-10-18T10:00:00Z",
+                        "last_seen_at": "2026-10-18T10:05:00Z",
+                        "revoked_at": null,
+                        "build_version": "1.0.0",
+                        "protocol": "1.0",
+                        "protocol_state": "current",
+                        "git_credentials": [],
+                        "coverage": {},
+                        "preflight": {
+                          "state": "not_reported",
+                          "reported_at": null,
+                          "checks": {
+                            "tools": "unknown",
+                            "harnesses": "unknown",
+                            "login": "unknown",
+                            "repositories": "unknown"
+                          },
+                          "tools": [],
+                          "harnesses": [],
+                          "repositories": []
+                        },
+                        "drains": [],
+                        "install_id": "0123456789abcdef0123456789abcdef"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "INPUT_INVALID: the request failed validation; error.details.errors lists each failure (loc, msg, type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error, in the public error shape.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/workers/enrollments": {
+      "post": {
+        "tags": ["workers"],
+        "summary": "Create a worker enrollment",
+        "description": "Create a one-time enrollment token (valid 24 hours) in the request's Account and return it once, with the install options for each published form of the worker and the end-user licence agreement it ships under. Run an option's `install`, then its `enroll`, on the machine the worker will run on. `display_name` is required; `fleet` true enrolls a worker for the Account fleet (Owners and Administrators), false a machine you manage (members too, while the Account allows it); `scope` sets whom it serves. A Personal API Token needs the workers:enroll scope. Counts against the Account's max_enrolled_workers (403 ENTITLEMENT_LIMIT_REACHED). `install_id` (optional) names the worker install the enrollment is for; the caller's earlier pending enrollment for the same install is withdrawn when this one is created. A server that does not take install_id yet refuses it with 422 INPUT_INVALID naming the field.",
+        "operationId": "create_enrollment_api_v1_workers_enrollments_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateEnrollmentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedEnrollmentResponse"
+                },
+                "example": {
+                  "status": "ok",
+                  "data": {
+                    "enrollment_id": "enr-example-1",
+                    "account_id": "ACC-EXAMPLE",
+                    "label": "build-box",
+                    "fingerprint": "abc123",
+                    "created_by": "human:usr-example",
+                    "created_at": "2026-10-18T10:00:00Z",
+                    "expires_at": "2026-10-19T10:00:00Z",
+                    "consumed_at": null,
+                    "consumed_host_id": null,
+                    "revoked_at": null,
+                    "state": "pending",
+                    "display_name": "build-box",
+                    "fleet": true,
+                    "scope": "account",
+                    "install_id": "0123456789abcdef0123456789abcdef",
+                    "token": "pidgen_enroll_example_one_time_token",
+                    "install_commands": {
+                      "container": "docker run -e PIDGEN_ENROLL_TOKEN=pidgen_enroll_example_one_time_token registry.example.com/example-org/worker:1.0",
+                      "script": "curl -fsSL https://pidgen.example.com/install.sh | sh -s -- --token pidgen_enroll_example_one_time_token",
+                      "wheel": "uv tool install pidgen-worker~=1.0.0 && pidgen-worker enroll --token pidgen_enroll_example_one_time_token"
+                    },
+                    "install": [
+                      {
+                        "form": "wheel",
+                        "artifact": "pidgen-worker~=1.0.0",
+                        "install": "uv tool install pidgen-worker~=1.0.0",
+                        "enroll": "pidgen-worker enroll --token pidgen_enroll_example_one_time_token",
+                        "command": "uv tool install pidgen-worker~=1.0.0 && pidgen-worker enroll --token pidgen_enroll_example_one_time_token"
+                      }
+                    ],
+                    "eula": {
+                      "name": "Pidgen Worker End-User Licence Agreement",
+                      "location": "https://pidgen.example.com/legal/worker-eula",
+                      "notice": "Installing pidgen-worker accepts its end-user licence agreement."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "INPUT_INVALID: the request failed validation; error.details.errors lists each failure (loc, msg, type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error, in the public error shape.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      },
+      "get": {
+        "description": "List the caller's own worker enrollments in the Account named by X-PIDGEN-Account, newest first, never with a token. Only pending ones unless `state` widens it.",
+        "operationId": "list_enrollments_api_v1_workers_enrollments_get",
+        "tags": ["workers"],
+        "summary": "List your worker enrollments",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": ["pending", "consumed", "expired", "revoked", "all"]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "State",
+              "description": "Only enrollments in this state, or `all`. Omitted: pending."
+            },
+            "description": "Only enrollments in this state, or `all`. Omitted: pending."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerEnrollmentListResponse"
+                },
+                "example": {
+                  "status": "ok",
+                  "data": [
+                    {
+                      "enrollment_id": "enr-example-1",
+                      "account_id": "ACC-EXAMPLE",
+                      "label": "build-box",
+                      "fingerprint": "abc123",
+                      "created_by": "human:usr-example",
+                      "created_at": "2026-10-18T10:00:00Z",
+                      "expires_at": "2026-10-19T10:00:00Z",
+                      "consumed_at": null,
+                      "consumed_host_id": null,
+                      "revoked_at": null,
+                      "state": "pending",
+                      "display_name": "build-box",
+                      "fleet": true,
+                      "scope": "account",
+                      "install_id": "0123456789abcdef0123456789abcdef"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "INPUT_INVALID: the request failed validation; error.details.errors lists each failure (loc, msg, type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error, in the public error shape.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/workers/enrollments/{enrollment_id}": {
+      "delete": {
+        "description": "Withdraw one of the caller's own pending worker enrollments: it is revoked, its token can no longer be exchanged, and it stops counting against the Account's workers. Answers the enrollment. An enrollment that is not the caller's, or not in this Account, is 404 WORKER_ENROLLMENT_NOT_FOUND.",
+        "operationId": "withdraw_enrollment_api_v1_workers_enrollments__enrollment_id__delete",
+        "tags": ["workers"],
+        "summary": "Withdraw a worker enrollment",
+        "parameters": [
+          {
+            "name": "enrollment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Enrollment Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerEnrollmentResponse"
+                },
+                "example": {
+                  "status": "ok",
+                  "data": {
+                    "enrollment_id": "enr-example-1",
+                    "account_id": "ACC-EXAMPLE",
+                    "label": "build-box",
+                    "fingerprint": "abc123",
+                    "created_by": "human:usr-example",
+                    "created_at": "2026-10-18T10:00:00Z",
+                    "expires_at": "2026-10-19T10:00:00Z",
+                    "consumed_at": null,
+                    "consumed_host_id": null,
+                    "revoked_at": "2026-10-18T10:01:00Z",
+                    "state": "revoked",
+                    "display_name": "build-box",
+                    "fleet": true,
+                    "scope": "account",
+                    "install_id": "0123456789abcdef0123456789abcdef"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "WORKER_ENROLLMENT_NOT_FOUND: no enrollment by that id is the caller's in this Account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                },
+                "example": {
+                  "status": "error",
+                  "error": {
+                    "code": "WORKER_ENROLLMENT_NOT_FOUND",
+                    "message": "No such worker enrollment.",
+                    "details": {},
+                    "request_id": "req_example"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "INPUT_INVALID: the request failed validation; error.details.errors lists each failure (loc, msg, type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error, in the public error shape.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CreateEnrollmentRequest": {
+        "properties": {
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name",
+            "description": "The worker's name, shown on every page (required; `label` is accepted in its place)."
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label",
+            "description": "Deprecated: the name before `display_name`; used when that is absent."
+          },
+          "fleet": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fleet",
+            "description": "true: a worker for the Account fleet (account.enroll_workers); false: a machine you manage. Omitted: true when you may enroll the fleet."
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": ["mine", "projects", "account"]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope",
+            "description": "Whom the worker serves: mine, projects or account. Omitted: account for the fleet, mine otherwise."
+          },
+          "install_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Install Id",
+            "description": "The id of the worker install the enrollment is for: 32 lowercase hex characters, kept in the worker home's install-id file. Not a credential. A pending enrollment the caller made earlier with the same install_id is withdrawn (revoked) when this one is created."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "CreateEnrollmentRequest",
+        "description": "Create a worker enrollment: its name, and whose machine it will be."
+      },
+      "CreatedEnrollment": {
+        "properties": {
+          "enrollment_id": {
+            "type": "string",
+            "title": "Enrollment Id",
+            "description": "The enrollment's id."
+          },
+          "account_id": {
+            "type": "string",
+            "title": "Account Id",
+            "description": "The Account the enrolled worker will belong to."
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label",
+            "description": "The name given to the enrollment, if any."
+          },
+          "fingerprint": {
+            "type": "string",
+            "title": "Fingerprint",
+            "description": "Leading characters of the stored token hash."
+          },
+          "created_by": {
+            "type": "string",
+            "title": "Created By",
+            "description": "The actor who created the enrollment."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At",
+            "description": "When the enrollment was created."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At",
+            "description": "When the token stops being exchangeable."
+          },
+          "consumed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consumed At",
+            "description": "When a worker exchanged it; null here."
+          },
+          "consumed_host_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consumed Host Id",
+            "description": "The host the exchange enrolled."
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At",
+            "description": "When it was withdrawn unused."
+          },
+          "state": {
+            "type": "string",
+            "enum": ["pending", "consumed", "expired", "revoked"],
+            "title": "State",
+            "description": "`pending` when created."
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name",
+            "description": "The worker's name."
+          },
+          "fleet": {
+            "type": "boolean",
+            "title": "Fleet",
+            "description": "Whether the worker will be the Account fleet's."
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": ["mine", "projects", "account"]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope",
+            "description": "The scope the worker starts with; null takes the kind's default."
+          },
+          "token": {
+            "type": "string",
+            "title": "Token",
+            "description": "The one-time pidgen_enroll_… token. Returned only in this response."
+          },
+          "install_commands": {
+            "$ref": "#/components/schemas/InstallCommands",
+            "description": "The one-command install of each published form, keyed by form."
+          },
+          "install": {
+            "items": {
+              "$ref": "#/components/schemas/InstallOption"
+            },
+            "type": "array",
+            "title": "Install",
+            "description": "Each published form of the worker with its install and enroll steps; show `eula` before running an install."
+          },
+          "eula": {
+            "$ref": "#/components/schemas/WorkerEula"
+          },
+          "install_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Install Id",
+            "description": "The install id the enrollment was created with, or null when none was sent."
+          }
+        },
+        "type": "object",
+        "required": [
+          "enrollment_id",
+          "account_id",
+          "label",
+          "fingerprint",
+          "created_by",
+          "created_at",
+          "expires_at",
+          "consumed_at",
+          "consumed_host_id",
+          "revoked_at",
+          "state",
+          "display_name",
+          "fleet",
+          "scope",
+          "token",
+          "install_commands",
+          "install",
+          "eula"
+        ],
+        "title": "CreatedEnrollment",
+        "description": "A new one-time enrollment token and how to install a worker with it; shown once."
+      },
+      "CreatedEnrollmentResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status",
+            "default": "ok"
+          },
+          "data": {
+            "$ref": "#/components/schemas/CreatedEnrollment"
+          }
+        },
+        "type": "object",
+        "required": ["data"],
+        "title": "CreatedEnrollmentResponse",
+        "description": "A created worker enrollment."
+      },
+      "InstallCommands": {
+        "properties": {
+          "container": {
+            "type": "string",
+            "title": "Container",
+            "description": "Pull the public image and start it, enrolling."
+          },
+          "wheel": {
+            "type": "string",
+            "title": "Wheel",
+            "description": "Install the wheel from PyPI as a tool, then enroll."
+          },
+          "script": {
+            "type": "string",
+            "title": "Script",
+            "description": "Run the App Service's install script (GET /install.sh): installs uv when it is missing, installs the wheel at the protocol's release series, then enrolls."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["container", "wheel", "script"],
+        "title": "InstallCommands",
+        "description": "The one-command install of each published form, enrolling with one token."
+      },
+      "InstallOption": {
+        "properties": {
+          "form": {
+            "type": "string",
+            "enum": ["container", "wheel"],
+            "title": "Form",
+            "description": "`container` (the public image) or `wheel` (the PyPI package)."
+          },
+          "artifact": {
+            "type": "string",
+            "title": "Artifact",
+            "description": "What is installed: the image reference (repository:X.Y) or the wheel requirement (pidgen-worker~=X.Y.0), pinned to the release series of the worker protocol this service speaks."
+          },
+          "install": {
+            "type": "string",
+            "title": "Install",
+            "description": "The install step alone; it does not enroll."
+          },
+          "enroll": {
+            "type": "string",
+            "title": "Enroll",
+            "description": "The enroll step alone, run after install: exchanges the one-time token for the worker's credential and starts the worker."
+          },
+          "command": {
+            "type": "string",
+            "title": "Command",
+            "description": "install and enroll as one line to paste into a shell."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["form", "artifact", "install", "enroll", "command"],
+        "title": "InstallOption",
+        "description": "One published form of the worker, and how to install it and enroll with a token."
+      },
+      "PreflightHarness": {
+        "properties": {
+          "harness": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Harness"
+          },
+          "cli_present": {
+            "type": "boolean",
+            "title": "Cli Present"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "login": {
+            "type": "string",
+            "enum": ["ready", "not_ready", "unknown"],
+            "title": "Login"
+          },
+          "subscriptions": {
+            "items": {
+              "$ref": "#/components/schemas/PreflightSubscription"
+            },
+            "type": "array",
+            "maxItems": 16,
+            "title": "Subscriptions",
+            "default": []
+          },
+          "live_steering": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Live Steering"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["harness", "cli_present", "login"],
+        "title": "PreflightHarness",
+        "description": "One coding-agent CLI the node configuration enables.\n\nAttributes:\n    harness: The harness (``claude``, ``codex``, ...).\n    cli_present: Whether its CLI resolves.\n    version: The CLI's version, or ``None`` when absent or illegible.\n    login: Its adapter's credential-readiness check; no credential is reported.\n    subscriptions: Each subscription the worker holds for it, in preference order, the\n        first being the primary. Empty from a worker that reports none, which holds one\n        ``unattributed`` subscription, ``default``.\n    live_steering: Whether the adapter takes instructions after its run has started,\n        sent from protocol minor 9; ``None`` from a node that did not say. Recorded,\n        not acted on here: the registry's own capability decides."
+      },
+      "PreflightRepository": {
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Project Id"
+          },
+          "reached": {
+            "type": "boolean",
+            "title": "Reached"
+          },
+          "form": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": ["ssh", "https"]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Form"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["project_id", "reached"],
+        "title": "PreflightRepository",
+        "description": "Whether the worker reached one probe target, and in which form.\n\nAttributes:\n    project_id: The Project whose remote the App Service named as a probe target.\n    reached: Whether ``git ls-remote`` with the machine's own credentials reached it in\n        either form.\n    form: The form that worked, ``ssh`` or ``https``; ``None`` exactly when neither did."
+      },
+      "PreflightSubscription": {
+        "properties": {
+          "label": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "title": "Label"
+          },
+          "fingerprint": {
+            "type": "string",
+            "pattern": "^(unattributed|[0-9a-f]{64})$",
+            "title": "Fingerprint"
+          },
+          "login": {
+            "type": "string",
+            "enum": ["ready", "not_ready", "unknown", "duplicate"],
+            "title": "Login"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["label", "fingerprint", "login"],
+        "title": "PreflightSubscription",
+        "description": "One provider subscription a worker holds for a harness.\n\nAttributes:\n    label: The subscription's name in the worker's node configuration.\n    fingerprint: A SHA-256 over the provider's own stable account identifier, never a\n        token; ``unattributed`` when the worker could not read one. Two workers logged\n        into one provider account report one fingerprint and share its limits.\n    login: That subscription's credential-readiness check, or ``duplicate`` (from\n        protocol minor 2.10) when an earlier subscription of the harness is logged into\n        the same provider account and so shares its limit."
+      },
+      "PreflightTool": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "present": {
+            "type": "boolean",
+            "title": "Present"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "meets_floor": {
+            "type": "boolean",
+            "title": "Meets Floor"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["name", "present", "meets_floor"],
+        "title": "PreflightTool",
+        "description": "One required base tool, as the worker found it on its own machine.\n\nAttributes:\n    name: The tool (``git``, ``uv``, ...).\n    present: Whether it resolves on the worker's ``PATH``.\n    version: The version it reported, or ``None`` when absent or illegible.\n    meets_floor: Whether that version meets the worker's floor for it."
+      },
+      "PublicError": {
+        "description": "The body of every error a published route answers with; switch on error.code.",
+        "properties": {
+          "status": {
+            "const": "error",
+            "description": "Always `error`.",
+            "title": "Status",
+            "type": "string"
+          },
+          "error": {
+            "$ref": "#/components/schemas/PublicErrorDetail"
+          }
+        },
+        "required": ["status", "error"],
+        "title": "PublicError",
+        "type": "object"
+      },
+      "PublicErrorDetail": {
+        "description": "What went wrong: a stable code, a message, and optional context.",
+        "properties": {
+          "code": {
+            "description": "Stable, machine-readable error code, e.g. PROJECT_NOT_FOUND.",
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable explanation; not a stable interface.",
+            "title": "Message",
+            "type": "string"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Structured context for the error, when there is any.",
+            "title": "Details"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The request's X-Request-ID, for correlating with logs.",
+            "title": "Request Id"
+          }
+        },
+        "required": ["code", "message"],
+        "title": "PublicErrorDetail",
+        "type": "object"
+      },
+      "WorkerDrain": {
+        "properties": {
+          "harness": {
+            "type": "string",
+            "title": "Harness",
+            "description": "The harness: claude, codex or pi."
+          },
+          "active": {
+            "type": "boolean",
+            "title": "Active",
+            "description": "Whether the worker takes nothing new of this harness."
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "description": "The directive's version: `expected_directive_version` when it is set or cleared again. A harness absent from `drains` was never drained: version 0."
+          }
+        },
+        "type": "object",
+        "required": ["harness", "active", "version"],
+        "title": "WorkerDrain",
+        "description": "One harness's drain on a worker: whether it is set, and the version to name to change it."
+      },
+      "WorkerEnrollment": {
+        "properties": {
+          "enrollment_id": {
+            "type": "string",
+            "title": "Enrollment Id",
+            "description": "The enrollment's id."
+          },
+          "account_id": {
+            "type": "string",
+            "title": "Account Id",
+            "description": "The Account the enrolled worker will belong to."
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label",
+            "description": "The name given to the enrollment, if any."
+          },
+          "fingerprint": {
+            "type": "string",
+            "title": "Fingerprint",
+            "description": "Leading characters of the stored token hash."
+          },
+          "created_by": {
+            "type": "string",
+            "title": "Created By",
+            "description": "The actor who created the enrollment."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At",
+            "description": "When the enrollment was created."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At",
+            "description": "When the token stops being exchangeable."
+          },
+          "consumed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consumed At",
+            "description": "When a worker exchanged it, or null."
+          },
+          "consumed_host_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consumed Host Id",
+            "description": "The host the exchange enrolled."
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At",
+            "description": "When it was withdrawn unused."
+          },
+          "state": {
+            "type": "string",
+            "enum": ["pending", "consumed", "expired", "revoked"],
+            "title": "State",
+            "description": "`pending` until a worker exchanges it, it expires, or it is withdrawn (`revoked`)."
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name",
+            "description": "The worker's name."
+          },
+          "fleet": {
+            "type": "boolean",
+            "title": "Fleet",
+            "description": "Whether the worker will be the Account fleet's."
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": ["mine", "projects", "account"]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope",
+            "description": "The scope the worker starts with; null takes the kind's default."
+          },
+          "install_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Install Id",
+            "description": "The install id the enrollment was created with, or null when none was sent."
+          }
+        },
+        "type": "object",
+        "required": [
+          "enrollment_id",
+          "account_id",
+          "label",
+          "fingerprint",
+          "created_by",
+          "created_at",
+          "expires_at",
+          "consumed_at",
+          "consumed_host_id",
+          "revoked_at",
+          "state",
+          "display_name",
+          "fleet",
+          "scope"
+        ],
+        "title": "WorkerEnrollment",
+        "description": "A worker enrollment, without its token: never returned again after it was created."
+      },
+      "WorkerEnrollmentListResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status",
+            "default": "ok"
+          },
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/WorkerEnrollment"
+            },
+            "type": "array",
+            "title": "Data"
+          }
+        },
+        "type": "object",
+        "required": ["data"],
+        "title": "WorkerEnrollmentListResponse",
+        "description": "The caller's own worker enrollments in the Account."
+      },
+      "WorkerEnrollmentResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status",
+            "default": "ok"
+          },
+          "data": {
+            "$ref": "#/components/schemas/WorkerEnrollment"
+          }
+        },
+        "type": "object",
+        "required": ["data"],
+        "title": "WorkerEnrollmentResponse",
+        "description": "A worker enrollment."
+      },
+      "WorkerEula": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "The agreement's name."
+          },
+          "location": {
+            "type": "string",
+            "title": "Location",
+            "description": "Where the agreement's text ships."
+          },
+          "notice": {
+            "type": "string",
+            "title": "Notice",
+            "description": "What to show before installing: installing accepts it."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": ["name", "location", "notice"],
+        "title": "WorkerEula",
+        "description": "The end-user licence agreement the worker is distributed under."
+      },
+      "WorkerGitCredential": {
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "title": "Project Id",
+            "description": "The Project."
+          },
+          "remote_url": {
+            "type": "string",
+            "title": "Remote Url",
+            "description": "The remote the worker matched against its policy or probed."
+          },
+          "local_credential": {
+            "type": "boolean",
+            "title": "Local Credential",
+            "description": "Whether the worker's own credentials reach it (same as covered)."
+          },
+          "covered": {
+            "type": "boolean",
+            "title": "Covered",
+            "description": "Whether the worker's own credentials reach it."
+          },
+          "basis": {
+            "type": "string",
+            "enum": ["declared", "probed", "provisioning_refused"],
+            "title": "Basis",
+            "description": "declared (a worker policy entry matched); probed (the worker's git ls-remote with the machine's credentials); provisioning_refused (the worker refused to provision with LOCAL_GIT_CREDENTIAL_REQUIRED since its last report)."
+          },
+          "form": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": ["ssh", "https"]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Form",
+            "description": "The form of the remote the worker's preflight reached (ssh or https), which it is sent instead of the Project's own remote; null when it reported none."
+          },
+          "state": {
+            "type": "string",
+            "enum": ["covered", "missing", "stale"],
+            "title": "State",
+            "description": "covered; missing (the worker has no credential for this repository); stale (reported on a remote the Project no longer uses)."
+          },
+          "reported_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Reported At",
+            "description": "When the worker reported it."
+          }
+        },
+        "type": "object",
+        "required": [
+          "project_id",
+          "remote_url",
+          "local_credential",
+          "covered",
+          "basis",
+          "form",
+          "state",
+          "reported_at"
+        ],
+        "title": "WorkerGitCredential",
+        "description": "What a worker last reported about its own git credential for one Project remote."
+      },
+      "WorkerList": {
+        "properties": {
+          "service_protocol": {
+            "type": "string",
+            "title": "Service Protocol",
+            "description": "The major.minor worker protocol this service speaks."
+          },
+          "accepted_protocols": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Accepted Protocols",
+            "description": "Every major.minor worker protocol this service accepts."
+          },
+          "workers": {
+            "items": {
+              "$ref": "#/components/schemas/WorkerResource"
+            },
+            "type": "array",
+            "title": "Workers",
+            "description": "The Account's workers."
+          }
+        },
+        "type": "object",
+        "required": ["service_protocol", "accepted_protocols", "workers"],
+        "title": "WorkerList",
+        "description": "The Account's workers, and the worker protocol this service speaks."
+      },
+      "WorkerListResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status",
+            "default": "ok"
+          },
+          "data": {
+            "$ref": "#/components/schemas/WorkerList"
+          }
+        },
+        "type": "object",
+        "required": ["data"],
+        "title": "WorkerListResponse",
+        "description": "The Account's workers."
+      },
+      "WorkerPreflightChecks": {
+        "properties": {
+          "tools": {
+            "type": "string",
+            "enum": ["pass", "fail", "unknown"],
+            "title": "Tools",
+            "description": "Every required tool is present and meets its version floor."
+          },
+          "harnesses": {
+            "type": "string",
+            "enum": ["pass", "fail", "unknown"],
+            "title": "Harnesses",
+            "description": "At least one coding-agent CLI resolves."
+          },
+          "login": {
+            "type": "string",
+            "enum": ["pass", "fail", "unknown"],
+            "title": "Login",
+            "description": "At least one resolved coding-agent CLI is logged in."
+          },
+          "repositories": {
+            "type": "string",
+            "enum": ["pass", "fail", "unknown"],
+            "title": "Repositories",
+            "description": "Every Project remote the worker was asked to probe was reached."
+          }
+        },
+        "type": "object",
+        "required": ["tools", "harnesses", "login", "repositories"],
+        "title": "WorkerPreflightChecks",
+        "description": "The four setup checks of a worker's preflight, each pass, fail or unknown."
+      },
+      "WorkerPreflightResource": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": ["reported", "not_reported", "upgrade_required"],
+            "title": "State",
+            "description": "reported; not_reported (the worker has sent none yet); upgrade_required (the worker speaks a protocol below 2.5, which cannot report one)."
+          },
+          "reported_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reported At",
+            "description": "When it was reported, or null."
+          },
+          "checks": {
+            "$ref": "#/components/schemas/WorkerPreflightChecks",
+            "description": "The four setup checks."
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/PreflightTool"
+            },
+            "type": "array",
+            "title": "Tools",
+            "description": "Each required tool: present, its version, and whether it meets the floor."
+          },
+          "harnesses": {
+            "items": {
+              "$ref": "#/components/schemas/PreflightHarness"
+            },
+            "type": "array",
+            "title": "Harnesses",
+            "description": "Each coding-agent CLI enabled: whether it resolves, its version, its login."
+          },
+          "repositories": {
+            "items": {
+              "$ref": "#/components/schemas/PreflightRepository"
+            },
+            "type": "array",
+            "title": "Repositories",
+            "description": "Each probe target: whether it was reached, and in which form."
+          }
+        },
+        "type": "object",
+        "required": ["state", "reported_at", "checks", "tools", "harnesses", "repositories"],
+        "title": "WorkerPreflightResource",
+        "description": "A worker's latest preflight: what it reported about its own machine."
+      },
+      "WorkerResource": {
+        "properties": {
+          "host_id": {
+            "type": "string",
+            "title": "Host Id",
+            "description": "The worker's host id."
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name",
+            "description": "The name given at enrollment, or null for a worker enrolled before names."
+          },
+          "enrolled_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enrolled By",
+            "description": "The User who enrolled it (human:<id>), or null when unknown."
+          },
+          "own": {
+            "type": "boolean",
+            "title": "Own",
+            "description": "Whether the caller enrolled it."
+          },
+          "fleet": {
+            "type": "boolean",
+            "title": "Fleet",
+            "description": "true for the Account fleet; false for a machine a member manages."
+          },
+          "scope": {
+            "type": "string",
+            "enum": ["mine", "projects", "account"],
+            "title": "Scope",
+            "description": "Whom it serves: mine, projects or account."
+          },
+          "scope_projects": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope Projects",
+            "description": "The Projects the worker is pinned to under its scope (any scope), or null: no pin."
+          },
+          "credential_mode": {
+            "type": "string",
+            "enum": ["local_only", "platform"],
+            "title": "Credential Mode",
+            "description": "platform (may use the Account's forge credential) or local_only."
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "description": "The row version a command may name as its fence."
+          },
+          "locality_domain": {
+            "type": "string",
+            "title": "Locality Domain",
+            "description": "The locality the worker answers for."
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "description": "Whether the worker may be given work (false: paused)."
+          },
+          "connected": {
+            "type": "boolean",
+            "title": "Connected",
+            "description": "Whether this API process holds its channel."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At",
+            "description": "When the worker was enrolled."
+          },
+          "last_seen_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen At",
+            "description": "When it last called, or null if never."
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At",
+            "description": "When its credential was revoked, or null."
+          },
+          "build_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Build Version",
+            "description": "The build it last announced, or null."
+          },
+          "protocol": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protocol",
+            "description": "The major.minor protocol it last announced, or null if never."
+          },
+          "protocol_state": {
+            "type": "string",
+            "enum": ["current", "outdated", "unsupported", "unknown"],
+            "title": "Protocol State",
+            "description": "current; outdated (accepted, one minor behind — upgrade before the next minor drops it); unsupported (refused with 426); unknown (never announced)."
+          },
+          "git_credentials": {
+            "items": {
+              "$ref": "#/components/schemas/WorkerGitCredential"
+            },
+            "type": "array",
+            "title": "Git Credentials",
+            "description": "Per Project remote it serves, its last report of a local git credential."
+          },
+          "coverage": {
+            "additionalProperties": {
+              "type": "string",
+              "enum": ["covered", "missing", "stale"]
+            },
+            "type": "object",
+            "title": "Coverage",
+            "description": "Per Project it reported on: covered, missing or stale."
+          },
+          "preflight": {
+            "$ref": "#/components/schemas/WorkerPreflightResource",
+            "description": "Its latest preflight: tools, coding-agent CLIs, their login, and repository access (protocol 2.5)."
+          },
+          "drains": {
+            "items": {
+              "$ref": "#/components/schemas/WorkerDrain"
+            },
+            "type": "array",
+            "title": "Drains",
+            "description": "Each harness an owner has drained on it, or lifted the drain of, with the version a drain or a return to service names; empty when it was never drained. Read here so the worker's own owner can return it to service without the Account-wide capacity view."
+          },
+          "install_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Install Id",
+            "description": "The install id the worker's enrollment was created with: which install on which machine it is, or null when none was sent."
+          }
+        },
+        "type": "object",
+        "required": [
+          "host_id",
+          "display_name",
+          "enrolled_by",
+          "own",
+          "fleet",
+          "scope",
+          "scope_projects",
+          "credential_mode",
+          "version",
+          "locality_domain",
+          "enabled",
+          "connected",
+          "created_at",
+          "last_seen_at",
+          "revoked_at",
+          "build_version",
+          "protocol",
+          "protocol_state",
+          "git_credentials",
+          "coverage",
+          "preflight",
+          "drains"
+        ],
+        "title": "WorkerResource",
+        "description": "A worker enrolled in the Account; never its credential."
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A CLI token, sent as `Authorization: Bearer <token>`. Obtain one with the device-code login: POST /api/v1/auth/device, then poll POST /api/v1/auth/device/token."
+      }
+    }
+  }
+}

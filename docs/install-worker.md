@@ -10,8 +10,21 @@ You need:
 
 - The [Pidgen CLI](getting-started.md#1-install-the-cli), which needs Node.js and npm.
 - Linux on x86_64 or aarch64, or macOS on Intel or Apple silicon.
-- `git` 2.25 or later. On macOS, `xcode-select --install` installs it; on Linux, install it with
-  your package manager.
+- `git` 2.38 or later. `pidgen doctor` and setup name the command for your system when it is
+  missing or older:
+
+  | System | Command |
+  |---|---|
+  | macOS | `xcode-select --install` (Apple's Command Line Tools) or `brew install git`; when the Command Line Tools' git is older, `brew install git` from [Homebrew](https://brew.sh), with Homebrew's bin directory before `/usr/bin` on `PATH`, or update the Command Line Tools through Software Update |
+  | Ubuntu, Linux Mint, Pop!_OS | `sudo add-apt-repository ppa:git-core/ppa && sudo apt update && sudo apt install git` (Ubuntu 22.04's own git is 2.34) |
+  | Debian | `sudo apt update && sudo apt install git`; Debian 12 or later packages a new enough git, and for older releases see <https://git-scm.com/downloads/linux> |
+  | Fedora, RHEL, CentOS Stream, Rocky, AlmaLinux, Amazon Linux | `sudo dnf install git`, or `sudo dnf upgrade git` for an older one |
+  | Arch, Manjaro | `sudo pacman -S git` |
+  | Alpine | `sudo apk add git`, or `sudo apk upgrade git` for an older one |
+  | openSUSE, SLES | `sudo zypper install git` |
+  | Any other Linux | Install git 2.38 or later with your package manager: <https://git-scm.com/downloads/linux> |
+
+  On Linux the distribution comes from `/etc/os-release`: its `ID`, then each `ID_LIKE` entry.
 - A subscription or API key for at least one coding agent: Claude Code or Codex.
 - Permission to enroll a worker: an Account Owner or Administrator, or an eligible Personal API
   Token with `workers:enroll`.
@@ -87,13 +100,13 @@ A first run looks like this:
 
 | Step | What happens |
 |---|---|
-| 1. Check this machine | Runs `pidgen doctor` and shows one line, `This machine is ready · <system> · Node.js <version> · git <version>`. Checks a later step fixes (the sign-in, the coding agents, the install) and warnings that do not apply to what setup does (the container runtime's `cosign`) go only to the setup log. When `uv` is missing, setup asks `uv installs the worker and isn't on this machine. Install it?` and, when you say yes, runs uv's installer, `curl -LsSf https://astral.sh/uv/install.sh \| sh`. A missing `git`, or one older than 2.25, stops setup with how to install it |
+| 1. Check this machine | Runs `pidgen doctor` and shows one line, `This machine is ready · <system> · Node.js <version> · git <version>`. Checks a later step fixes (the sign-in, the coding agents, the install) and warnings that do not apply to what setup does (the container runtime's `cosign`) go only to the setup log. When `uv` is missing, setup asks `uv installs the worker and isn't on this machine. Install it?` and, when you say yes, runs uv's installer, `curl -LsSf https://astral.sh/uv/install.sh \| sh`. A missing `git`, or one older than 2.38, stops setup with the command that installs it on this system |
 | 2. Sign in to Pidgen | Signs you in with a device code: open the link it shows (it carries the code), or go to the address and enter the code. It asks which Account the worker serves when you belong to several, and shows `Signed in as <email> · <Account> · <Role>`. A credential that cannot enroll workers stops setup here, before anything is installed, naming the roles that can (an Owner or Administrator) and the Personal API Token sign-in, `pidgen auth login <url> --with-token --account <ACC-…>` |
 | 3. Choose coding agents | Shows Claude Code and Codex as checkboxes, with the ones already on `PATH` ticked; a missing one is labelled `not installed · setup installs it with npm`. Ticking it installs it with `npm install -g @anthropic-ai/claude-code` or `npm install -g @openai/codex`, with no further question. Pi is shown, and can't be ticked, when it is on `PATH`: the worker runs it, and setup doesn't manage it. Choose at least one |
 | 4. Sign in to coding agents | Asks each chosen agent whether it is signed in, and for those that are not, runs `pidgen worker login <agent>` when you press Enter. The agent's own login runs in your terminal |
 | 5. Size coding agent sessions | Asks how many of each chosen agent's sessions run at once: a number, with the plans it suits as hints, or *Custom…* (see [Plans and session caps](#plans-and-session-caps)) |
 | 6. Install the worker | Asks once, `Install pidgen-worker <version> and accept its licence?`, naming the licence in one line and linking its full text, `Read it: https://pidgen.ai/legal/eula`, in the next (see [The install question](#the-install-question)); no stops setup, and the worker isn't installed. Then it installs the worker in its own environment under `~/.pidgen/worker` and verifies its signature. When uv already holds another `pidgen-worker`, setup leaves it alone and says so in one `▲` line |
-| 7. Enroll and start the worker | Enrolls this machine, applies the session caps, starts the worker in the background, and waits until Pidgen reports it connected |
+| 7. Enroll and start the worker | Asks `Worker name`, with a suggested name filled in that Enter accepts and you can edit (see [The name question](#the-name-question)), then enrolls this machine under it, applies the session caps, starts the worker in the background, and waits until Pidgen reports it connected |
 | 8. Prove the worker works | Runs the worker's own checks |
 
 ### The install question
@@ -138,7 +151,9 @@ enrolled and running, its coding agents' sessions set), it says so in one line a
 ```
 
 *Check everything and stop* runs the worker's checks and confirms it is connected, without asking
-anything more. *Change coding agents or sessions* asks those questions again and applies the new
+anything more; when a newer release is out it says so in one line,
+`◇  pidgen-worker 2.12.0 is available (2.11.0 installed) · update with pidgen worker update`, and
+installs nothing. *Change coding agents or sessions* asks those questions again and applies the new
 caps. *Update the worker* is offered only when `pidgen worker update` would install a newer release: the
 newest of the server's current series on the installed version's track (final releases, and
 pre-releases too while a pre-release is installed), so a machine on `2.11.1b1` is offered `2.11.1b2`
@@ -148,6 +163,25 @@ answer the question in advance: change them.
 On a machine where only part is done, setup collapses what is done into one line, such as
 `◇  Already done · signed in to Acme · pidgen-worker 2.11.0 installed`, and continues with the
 rest.
+
+Before such a run starts the worker, setup compares the installed worker with the newest release on
+its track, by the rule `pidgen worker update` follows (final releases, and pre-releases too while a
+pre-release is installed; never an older release). When one is newer, it asks once:
+
+```text
+◆  pidgen-worker 2.11.1 is available (2.11.0 installed). Update before starting?
+│  ● Yes  ○ No
+└
+```
+
+Yes, the default, asks the licence question again for the new release, since a new release may
+carry a new licence (`Install pidgen-worker 2.11.1 and accept its licence?`), then runs
+`pidgen worker update --restart` and starts the new release. No, to either question, keeps the
+installed release and starts it, with `◇  pidgen-worker 2.11.0 is installed · update it later with
+pidgen worker update`. `--accept-licence` answers both questions yes in advance. Nothing is asked
+when nothing newer is out (a newer beta is not offered while a final release is installed), when
+`--version` names the release, or when the server's releases or the package index cannot be read
+(the setup log notes why).
 
 Guided setup currently supports the **wheel** runtime. Container installation and management
 commands are available, but container enrollment through the CLI and guided container setup are
@@ -165,7 +199,8 @@ pidgen setup --agent claude --sessions claude=2 --accept-licence --label develop
 - `--sessions <agent>=<n>` says how many of that agent's sessions run at once, a whole number from
   1; repeat it for each agent. `--plan <agent>=<plan>` answers the same question with a plan from
   the table below instead; give one of them for each agent, not both.
-- `--accept-licence` installs the worker and accepts its licence without asking.
+- `--accept-licence` installs the worker and accepts its licence without asking; on a re-run it
+  also says yes to updating to a newer release before the worker starts.
 - `--runtime wheel` names the runtime (the only one setup offers, so it is never asked), and
   `--label` names the worker (default: this machine's host name). The name is both the enrollment's label and the worker's host id in the
   Account, the name `pidgen worker status` and the web app show.
@@ -295,6 +330,44 @@ commands and their output under it, and keeps them on screen after it succeeds.
 ◇  pidgen-worker 2.11.0 installed and verified
 ```
 
+### The name question
+
+Before it creates an enrollment, setup always asks for the worker's name, unless `--label` answers
+it in advance. The name is both the enrollment's label and the worker's host id, the name
+`pidgen worker status` and the web app show:
+
+```text
+◆  Worker name
+│  my-host
+└
+```
+
+The suggestion filled in is:
+
+- this install's newest worker's name, when the Account lists it as removed: the worker whose
+  `install_id` is this install's id ([below](#what-setup-keeps-and-sends)), since the Account may
+  reclaim its name;
+- this machine's removed worker's name, when this install's `worker.env` names a worker the Account
+  lists as removed;
+- else this machine's host name;
+- else, when a live worker of the Account already holds the host name, the next free name
+  (`my-host-2`, then `my-host-3`).
+
+Press Enter to accept it, or type another name. The question stays open, saying why, on a name that
+is empty, longer than 100 characters, or held by a live worker of the Account (names are compared
+without regard to case). Nothing is created until you answer, and the answer is shown as
+`◇  Worker name · my-host`. The setup log records the suggestion and why it was chosen.
+
+Setup cannot see every name that is taken: another person's pending enrollments in the Account are
+not visible to it. When the App Service refuses the enrollment because the Account holds the name,
+by a live worker or a pending enrollment (`409` with `WORKER_NAME_TAKEN`), no enrollment was
+created. Setup says so in one line, `▲  my-host is taken in Pidgen, so this worker needs another
+name.`, and asks `Worker name` again with the name the server suggests
+(`error.details.suggested_name`) filled in, then enrolls under your answer. With `--label`, setup
+never asks: a `--label` the Account already lists, or one the server refuses with
+`WORKER_NAME_TAKEN`, stops setup at the enroll step, exit 5 with `WORKER_NAME_TAKEN`, in one block
+whose fix is `pidgen setup --label <suggested name>`; nothing is created or started.
+
 ### How setup knows this machine is enrolled
 
 Setup decides from this install's worker home (`~/.pidgen`, or `$PIDGEN_HOME`). The machine is
@@ -303,18 +376,75 @@ for the server setup signs in to, and the Account lists that worker, by the host
 `worker.env`, without revoking it. Setup reads `worker.env` only to learn whether the credential is
 there; it never prints or stores it.
 
+- **This install's worker is listed, but its credential is missing.** The Account lists a live
+  worker under this install's id, and this worker home holds no credential for it (`worker.env` was
+  deleted or moved). Setup does not enroll a second worker beside it. It says
+  `This install's worker my-host is still listed but its credential is missing.` and asks
+  `Replace my-host?`. Yes: remove the worker on the Workers page, then answer yes to
+  `Removed my-host on the Workers page?`; setup reads the Account's list again each time, says so
+  while it still lists the worker live, and once it lists it as removed asks `Worker name` with
+  `my-host` filled in and enrolls this install under it. No, at either question: the name question
+  suggests a new name (`my-host-2`). `--label` answers the name in advance and asks nothing.
 - **Another worker already has this machine's name.** When the Account lists a worker under this
-  machine's host name that is not this install's, for example one that keeps its settings in
-  another folder, setup does not adopt it. It says so and asks for a name for this worker,
-  defaulting to the next free one (`my-host-2`, then `my-host-3`), then enrolls under that name.
-  `--label` answers the question in advance.
-- **The worker was removed.** When the Account lists this home's worker as revoked, setup asks
-  whether to enroll it again (the default is yes).
+  machine's host name that is not this install's (its `install_id` is another install's, or it has
+  none), for example one that keeps its settings in
+  another folder, setup does not adopt it. It says so, and the name question suggests the next free
+  name (`my-host-2`, then `my-host-3`); setup enrolls under your answer. `--label` answers the
+  question in advance.
+- **The worker was removed.** When the Account lists this home's worker as revoked, or no longer
+  lists it, setup asks whether to enroll it again (the default is yes), then the name question,
+  suggesting the removed worker's name when the Account lists it as removed. Yes runs
+  `pidgen worker enroll --replace-credential`: the removed worker's `worker.env` is moved aside to
+  `worker.env.replaced-<UTC timestamp>` in the same folder (the setup log records its new path), so
+  `pidgen-worker` redeems the new enrollment instead of starting with the revoked credential, and
+  the worker starts and connects with its new one. The moved file is kept, never deleted.
+- **Pidgen refuses the name.** A name can be taken where the Account's list cannot show it: by a
+  worker of another Account (host ids are unique across Accounts), or by this Account's removed
+  worker on a server that does not yet let an Account reclaim its name. `pidgen-worker enroll` is
+  then refused with `HTTP 409 WORKER_HOST_TAKEN`, and setup says so in one line,
+  `▲  my-host is taken in Pidgen, so this worker needs another name.`, asks `Worker name` again,
+  defaulting to the next free one (`my-host-2`, then `my-host-3`), and enrolls under your answer, offering the
+  same enrollment again (the server leaves it unspent), then goes on to start the worker. Should the
+  same enrollment fail under the new name, setup withdraws it and makes one new enrollment, and the
+  setup log names the one it withdrew. With `--label`, setup stops at the enroll step instead, exit 5 with
+  `WORKER_HOST_TAKEN`, in one block naming the taken name and the fix,
+  `pidgen setup --label my-host-2`; nothing is started. A removed worker is still offered its own
+  name first, since the App Service accepts re-enrolling it; setup falls back only when the server
+  refuses it.
+- **The credential is for another server.** When `worker.env` holds a credential for another
+  Pidgen server (or names none), setup stops at the enroll step before creating any enrollment,
+  with `WORKER_CREDENTIAL_PRESENT` naming the file and that server. Move the file aside and run
+  setup again to enroll this machine with this server, or run setup with another `PIDGEN_HOME`
+  to keep it.
 - **A Personal API Token cannot read the worker list.** Then the home's credential alone decides,
   and setup cannot confirm the worker connected.
 
 Setup never starts a worker whose home holds no credential: it stops with
 `ENROLL_FAILED` and asks you to report it with `pidgen feedback --kind not-working`.
+
+A run that fails after it created an enrollment, because `pidgen-worker enroll` failed or the name
+was refused with `--label`, withdraws that enrollment before it stops
+(`DELETE /api/v1/workers/enrollments/{enrollment_id}`), so it does not wait for 24 hours holding a
+worker slot. The step's fix says `The enrollment setup created was withdrawn, so nothing is left
+waiting.`, and `error.details.withdrawn` is `true`. When the withdraw fails, setup notes it in its
+log, the fix says the unused enrollment expires on its own, and the failure is reported as it was.
+
+### What setup keeps and sends
+
+Besides what each step's command keeps (the profile, the installed worker, its credential and
+logs), setup keeps one file of its own in the worker home: `install-id` (`~/.pidgen/install-id`,
+or `$PIDGEN_HOME/install-id`), this install's id, one line of 32 lowercase hex characters from 16
+random bytes, made when it is absent and never overwritten. `pidgen-worker` keeps the same file;
+whichever runs first makes it. It is not a credential and is never derived from this machine's
+hardware: a second worker home on the same machine has its own id. A file that holds anything else
+is left as it is, the setup log notes it, and no id is sent.
+
+What the CLI sends the App Service about this install, when it creates an enrollment: the worker's
+name (`label`) and this install's id (`install_id`). With the id the App Service replaces this
+install's earlier pending enrollment instead of keeping both, and lists the worker with it, so setup
+recognises this install's worker even after its `worker.env` is gone. A server from before install
+ids refuses the field (`422`); setup then enrolls without it. The id goes only to the configured
+Pidgen server.
 
 ## 2. Confirm the worker is ready
 
@@ -387,7 +517,17 @@ Size the caps from [Plans and session caps](#plans-and-session-caps); the exampl
 Max 5x alone. A person signs in to each coding agent with `pidgen worker login claude` or
 `pidgen worker login codex` before the worker runs it.
 
-Enrollment creates the worker enrollment immediately and does not start it. Background startup
+Enrollment creates the worker enrollment immediately and does not start it. When the worker home
+already holds a credential, `pidgen worker enroll` refuses with `WORKER_CREDENTIAL_PRESENT` (exit 5)
+and creates nothing: run `pidgen worker start --detach` to use the saved credential, or add
+`--replace-credential` to move `worker.env` aside and enroll anew. When Pidgen refuses the worker's
+host id because another worker holds it, `pidgen worker enroll` exits 5 with `WORKER_HOST_TAKEN`
+and the refused name in `error.details.host_id`: enroll again under another name with
+`--label <name> -- --host-id <name>`. When the App Service refuses the enrollment's name because
+the Account holds it, by a live worker or a pending enrollment, `pidgen worker enroll` creates
+nothing and exits 5 with `WORKER_NAME_TAKEN`, the refused name in `error.details.display_name` and
+the name the server suggests in `error.details.suggested_name`: enroll again under that one with
+`--label <suggested_name> -- --host-id <suggested_name>`. Background startup
 checks that the process stays alive for two seconds; it does not wait for the server connection.
 Check status again until the server reports it connected. See [Worker reference](workers.md)
 for enrollment failures, lifecycle behavior, and automation details.
@@ -400,6 +540,7 @@ for enrollment failures, lifecycle behavior, and automation details.
 | Check the worker's own configuration | `pidgen worker doctor` |
 | Stop the background worker | `pidgen worker stop` |
 | Start it again | `pidgen worker start --detach` |
+| Restart it with the arguments it was started with | `pidgen worker restart` |
 | Install an update and restart | `pidgen worker update --restart` |
 
 Updates happen when you request them. A detached worker runs in the background; automatic startup

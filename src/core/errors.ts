@@ -68,6 +68,8 @@ const REFUSAL_CODES = new Set([
   "REQUEST_BUG_DETAILS_REQUIRED",
   "REQUEST_TARGET_NEEDS_PROJECT",
   "REQUEST_REPLIES_OFF",
+  // A worker name the Account already holds creates no enrollment, whichever status it comes with.
+  "WORKER_NAME_TAKEN",
 ]);
 
 /**

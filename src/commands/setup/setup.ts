@@ -59,6 +59,7 @@ import {
   collectedOutput,
   findOnPath,
   readWorkerCredential,
+  type WorkerCredential,
   resolvePidgenHome,
   runWorkerCapacity,
   workerPlatformSupported,
@@ -74,20 +75,19 @@ import {
   type InstallRecord,
   type WorkerForm,
 } from "../../core/worker-install.js";
-import type { components } from "../../generated/api.js";
+import { ensureInstallId, invalidInstallIdNote } from "../../core/install-id.js";
+import type { WorkerList, WorkerResource } from "../../core/worker-enrollments.js";
 import { accountUse } from "../account/use.js";
 import { loginWithDeviceCode, parseServerUrl, type DeviceCodeShown } from "../auth/login.js";
 import { doctorChecks } from "../doctor/doctor.js";
 import { workerDoctor } from "../worker/doctor.js";
-import { workerEnroll } from "../worker/enroll.js";
+import { enrollWorker, NAME_TAKEN, workerEnroll } from "../worker/enroll.js";
 import { workerLogin } from "../worker/login.js";
 import { workerStart } from "../worker/start.js";
 import { workerUpdate } from "../worker/update.js";
 import { serverView, WORKERS_ROUTE, type ServerView } from "../worker/status.js";
 import { workerVerify } from "../worker/verify.js";
 import { SetupLog } from "./log.js";
-
-type WorkerList = components["schemas"]["WorkerList"];
 
 /** The hosted Pidgen service, signed in to when no server is configured and `--url` is not given. */
 export const HOSTED_SERVICE_URL = DEFAULT_SERVER_URL;
@@ -250,9 +250,11 @@ interface Answers {
  * It ends with `└  Done in <m> min <s> s`: in a terminal on standard output, with the summary card
  * (what was set up, how to manage it, the one next thing to do); with JSON on standard error. A
  * signed-in profile, an installed worker and an enrolled host are detected and skipped, so running
- * it again resumes: a part-done machine says what is done in one line, and a finished one asks
- * whether to check everything, change the coding agents or sessions, or update the worker. A
- * credential that cannot enroll workers stops it at sign-in. A failed step stops it with one block
+ * it again resumes: a part-done machine says what is done in one line and, before it starts the
+ * worker, asks whether to update to a newer release on the installed one's track first (yes asks
+ * the licence question for it; `--accept-licence` answers both), and a finished one asks whether to
+ * check everything (which names a newer release), change the coding agents or sessions, or update
+ * the worker. A credential that cannot enroll workers stops it at sign-in. A failed step stops it with one block
  * on screen (what failed and why, the fix, the log, where a re-run continues) and, in JSON, the
  * step, the command, its error and the fix. Ctrl-C at a prompt stops it with
  * `SETUP_CANCELLED` (exit 2), keeping what was done. Without a terminal it exits 2 with
@@ -585,8 +587,17 @@ class Commands {
   verify = () => this.pidgen(["worker", "verify"]);
   agentLogin = (agent: AgentKind) => this.pidgen(["worker", "login", agent], { account: false });
   /** `pidgen worker enroll`: the name is the enrollment's label and, after `--`, the worker's host id. */
-  enroll = (name: string = this.answers.label) =>
-    this.pidgen(["worker", "enroll", "--label", name, "--", "--host-id", name]);
+  enroll = (name: string = this.answers.label, replace = false) =>
+    this.pidgen([
+      "worker",
+      "enroll",
+      ...(replace ? ["--replace-credential"] : []),
+      "--label",
+      name,
+      "--",
+      "--host-id",
+      name,
+    ]);
   start = () => this.pidgen(["worker", "start", "--detach"]);
   status = () => this.pidgen(["worker", "status"]);
   workerDoctor = () => this.pidgen(["worker", "doctor"]);
@@ -680,19 +691,50 @@ function shortDate(iso: string): string {
   return `${date.getUTCDate()} ${MONTHS[date.getUTCMonth()]}`;
 }
 
-/** Whether the Account lists an unrevoked worker under `name`. */
+/** Whether the Account lists an unrevoked worker under `name`, compared case-insensitively. */
 function nameTaken(list: WorkerList, name: string): boolean {
-  return list.workers.some((worker) => worker.host_id === name && worker.revoked_at === null);
+  return liveWorker(list, name) !== undefined;
 }
 
-/** The first of `<base>-2`, `<base>-3`, … the Account lists no worker under, within the label limit. */
-function nextFreeName(list: WorkerList, base: string): string {
-  const listed = new Set(list.workers.map((worker) => worker.host_id));
+/** The Account's unrevoked worker under `name`, compared case-insensitively. */
+function liveWorker(list: WorkerList, name: string): WorkerList["workers"][number] | undefined {
+  const wanted = name.toLowerCase();
+  return list.workers.find(
+    (worker) => worker.host_id.toLowerCase() === wanted && worker.revoked_at === null,
+  );
+}
+
+/**
+ * The first of `<base>-2`, `<base>-3`, … the Account lists no worker under (revoked ones included)
+ * and the server did not refuse in this run (`refused`, lower case), within the label limit. Names
+ * are compared case-insensitively.
+ */
+function nextFreeName(
+  list: WorkerList | null,
+  base: string,
+  refused: ReadonlySet<string> = new Set(),
+): string {
+  const listed = new Set(list?.workers.map((worker) => worker.host_id.toLowerCase()) ?? []);
   for (let number = 2; ; number++) {
     const suffix = `-${number}`;
     const name = `${base.slice(0, LABEL_MAX - suffix.length)}${suffix}`;
-    if (!listed.has(name)) return name;
+    const key = name.toLowerCase();
+    if (!listed.has(key) && !refused.has(key)) return name;
   }
+}
+
+/** A name setup prefers to suggest, and why (the setup log records it). */
+interface Preferred {
+  name: string;
+  why: string;
+  /** Suggest it only while the Account lists a removed worker under it. */
+  listedRemoved: boolean;
+}
+
+/** This install's newest worker in `list`: the newest whose `install_id` is `installId`. */
+function newestOfInstall(list: WorkerList, installId: string): WorkerResource | null {
+  const ours = list.workers.filter((worker) => worker.install_id === installId);
+  return [...ours].sort((a, b) => b.created_at.localeCompare(a.created_at))[0] ?? null;
 }
 
 /** What a re-run of setup does after a failure. */
@@ -734,6 +776,10 @@ class SetupRun {
   private mode: RunMode = "change";
   /** The release a re-run offers to update the worker to. */
   private updateTo: string | null = null;
+  /** The licence of the server's current release list, read with the newer release. */
+  private updateLicence: string | null = null;
+  /** Whether the "Already set up" line was shown: the re-run menu, not the update question, ran. */
+  private setUp = false;
   /** Whether setup used a uv that `PATH` does not reach yet. */
   private uvOffPath = false;
 
@@ -1094,6 +1140,19 @@ class SetupRun {
     if (failure !== undefined) task.failure = failure;
     task.spinner?.message(message);
     task.taskLog?.message(message);
+  }
+
+  /**
+   * Ends the open task without a line of its own: what comes next (a warning and a question) says
+   * what became of it.
+   */
+  private dropTask(): void {
+    const task = this.active;
+    if (task === null) return;
+    this.flush();
+    this.active = null;
+    this.log.event(`task ended: ${task.title}`);
+    task.spinner?.clear();
   }
 
   /** Ends the open task in its one line. */
@@ -1577,6 +1636,7 @@ class SetupRun {
     const { record, enrolled, running } = survey;
     if (record !== null && enrolled !== null && running && agents.length > 0) {
       this.reported = { install: true, enroll: true };
+      this.setUp = true;
       this.answered(
         [
           "Already set up",
@@ -1627,6 +1687,7 @@ class SetupRun {
       const { list } = await readWorkerReleases(this.ctx, this.global);
       const index = packageIndex(this.answers.test || record.index === "testpypi");
       const release = await resolveUpdate(this.ctx, selectSeries(list), index, record.version);
+      this.updateLicence = list.eula.name;
       return release?.version ?? null;
     } catch (error) {
       if (!(error instanceof CliError)) throw error;
@@ -2126,6 +2187,17 @@ class SetupRun {
     if (this.mode === "update" && this.updateTo !== null) return this.update(this.updateTo);
     if (this.skipInstall) {
       const record = await readInstallRecord(this.ctx);
+      if (this.mode === "check" && this.updateTo !== null) {
+        // Checking reports the newer release; it asks nothing and installs nothing.
+        this.answered(
+          `pidgen-worker ${this.updateTo} is available (${record?.version} installed) · update with ${this.commands.pidgen(["worker", "update"], { account: false })}`,
+        );
+      } else if (record !== null && this.offersUpdate()) {
+        const newer = await this.newerRelease(record);
+        if (newer !== null && (await this.confirmUpdate(newer, record.version))) {
+          return this.update(newer);
+        }
+      }
       this.note("The worker is installed; skipping the install.");
       if (!this.reported.install) this.answered(`pidgen-worker ${record?.version} is installed`);
       return { status: "skipped", summary: `pidgen-worker ${record?.version} is installed.` };
@@ -2162,8 +2234,48 @@ class SetupRun {
   }
 
   /**
-   * The re-run's update: `pidgen worker update --restart`, verified as an install is, and the
-   * running worker restarted on it. Choosing the update in the re-run question is the consent.
+   * Whether the install step offers a newer release before the worker is started: on every run
+   * but a finished machine's re-run (its menu offers the update) and one `--version` pins.
+   */
+  private offersUpdate(): boolean {
+    return this.mode === "change" && !this.setUp && this.answers.version === undefined;
+  }
+
+  /**
+   * The update question, default yes, asked once before the worker is started (`--accept-licence`
+   * answers it), then, on yes, the install question for the newer release, since a new release
+   * may carry a new licence. No, to either, keeps the installed release and says how to update it
+   * later.
+   */
+  private async confirmUpdate(newer: string, installed: string): Promise<boolean> {
+    this.note(`pidgen-worker ${newer} is newer than the installed ${installed}.`);
+    const message = `pidgen-worker ${newer} is available (${installed} installed). Update before starting?`;
+    let yes: boolean;
+    if (this.answers.acceptLicence) {
+      this.answered(`${message} · Yes (from --accept-licence)`);
+      yes = true;
+    } else {
+      yes = await this.prompter.confirm({ message });
+    }
+    if (yes) {
+      try {
+        await this.confirmInstall(newer, this.updateLicence ?? "worker's end-user licence");
+        return true;
+      } catch (error) {
+        if (!(error instanceof CliError) || error.code !== "SETUP_CANCELLED") throw error;
+        this.log.event(`licence of ${newer} not accepted; keeping ${installed}`);
+      }
+    }
+    const update = this.commands.pidgen(["worker", "update"], { account: false });
+    this.reported.install = true;
+    this.answered(`pidgen-worker ${installed} is installed · update it later with ${update}`);
+    return false;
+  }
+
+  /**
+   * The update: `pidgen worker update --restart`, verified as an install is, and a running worker
+   * restarted on it (one not running is started by the enroll step). Choosing the update in the
+   * re-run question, or yes to the update question and its licence, is the consent.
    */
   private async update(version: string): Promise<StepResult> {
     const record = await readInstallRecord(this.ctx);
@@ -2186,11 +2298,13 @@ class SetupRun {
         error.code === "UPDATE_ROLLED_BACK"
           ? "The new release didn't start, so the previous one runs again; read the worker's log."
           : "Read the output in the setup log and fix what it names.",
-    )) as InstallRecord & { previous_version: string };
-    this.done(`pidgen-worker ${updated.version} installed, verified and running`);
+    )) as InstallRecord & { previous_version: string; restarted: boolean };
+    this.done(
+      `pidgen-worker ${updated.version} installed, verified${updated.restarted ? " and running" : ""}`,
+    );
     return {
       status: "done",
-      summary: `pidgen-worker ${updated.previous_version} was updated to ${updated.version} and restarted.`,
+      summary: `pidgen-worker ${updated.previous_version} was updated to ${updated.version}${updated.restarted ? " and restarted" : ""}.`,
       command,
       version: updated.version,
     };
@@ -2281,7 +2395,7 @@ class SetupRun {
     const c = this.commands;
     const ctx = this.quiet;
 
-    const { read, enrolled, revoked, hostId: found } = await this.enrollmentState();
+    const { read, enrolled, revoked, foreign, mine, hostId: found } = await this.enrollmentState();
     const local = await localWorkerStatus(ctx, ctx.workerRuntime);
     let hostId = found;
     let enroll = c.enroll(hostId);
@@ -2305,17 +2419,48 @@ class SetupRun {
           `Ask an Account Owner or Administrator to run setup, or sign in with a Personal API Token that has ${ENROLL_SCOPE}: \`${c.tokenLogin(account)}\`.`,
         );
       }
+      // pidgen-worker keeps a saved credential and ignores a new enrollment: never create one then.
+      if (foreign !== null) throw this.foreignCredential(foreign, enroll);
       if (revoked) await this.confirmEnrollAgain(enroll);
-      hostId = await this.chooseName(read.list, revoked ? hostId : this.ctx.hostName);
-      enroll = c.enroll(hostId);
+      // This install's newest worker, by its install id, is preferred: when it is listed live
+      // without a credential here, the person decides whether to replace it before anything is
+      // created; when it is listed removed, its name is the suggestion.
+      let list = read.list;
+      let preferred: Preferred | null = revoked
+        ? { name: hostId, why: "this machine's removed worker's name", listedRemoved: true }
+        : null;
+      let kept: string | null = null;
+      if (mine !== null && !this.answers.labelGiven) {
+        if (mine.revoked_at !== null) {
+          preferred = {
+            name: mine.host_id,
+            why: "this install's removed worker's name",
+            listedRemoved: true,
+          };
+        } else {
+          const replaced = await this.replaceListed(mine.host_id);
+          if (replaced === null) {
+            kept = mine.host_id;
+          } else {
+            list = replaced;
+            preferred = {
+              name: mine.host_id,
+              why: "this install's worker, removed to be replaced",
+              listedRemoved: false,
+            };
+          }
+        }
+      }
+      // The name is asked before anything is created, with a suggestion filled in.
+      hostId = await this.chooseName(list, preferred, kept);
       this.begin(`Enrolling as ${hostId}…`, `Couldn't enroll ${hostId}`);
-      await this.runCommand(
-        enroll,
-        workerEnroll,
-        { args: ["--host-id", hostId], options: { label: hostId } },
-        enrollFix,
-        ctx,
-      );
+      // A removed worker's credential is moved aside, so the worker redeems the new enrollment.
+      const result = await this.enrollUnderFreeName(ctx, list, hostId, revoked);
+      hostId = result.hostId;
+      enroll = c.enroll(hostId, revoked);
+      if (result.replaced !== null) {
+        this.note(`Moved the removed worker's credential aside to ${result.replaced}.`);
+      }
       this.done(`Enrolled as ${hostId} in ${this.accountName()}`);
       ran = true;
     }
@@ -2370,26 +2515,114 @@ class SetupRun {
    * Whether this install's worker is enrolled: its worker home holds a credential (`worker.env`
    * with `PIDGEN_NODE_TOKEN`) for the configured server, and `GET /workers` lists its host id
    * unrevoked (a credential that cannot read the list leaves the local credential to decide).
+   * A credential for this server that the list does not show live (revoked, or not listed at all)
+   * is `revoked`: the worker was removed. A credential for another server is `foreign`.
+   *
+   * `mine` is this install's newest worker the list names: the newest whose `install_id` is the
+   * one the worker home's `install-id` holds (made now when there is none). It is how setup knows
+   * this install's worker when `worker.env` is gone.
    */
   private async enrollmentState(): Promise<{
     read: WorkersRead;
     enrolled: boolean;
     revoked: boolean;
+    foreign: WorkerCredential | null;
+    mine: WorkerResource | null;
     hostId: string;
   }> {
     const home = await readWorkerCredential(this.quiet);
     const ours =
       home.credential && home.serviceUrl !== null && sameServer(home.serviceUrl, this.answers.url);
+    const foreign = home.credential && !ours ? home : null;
+    const install = await ensureInstallId(this.ctx);
+    if (install.created) this.note(`Made this install's id in ${install.path}.`);
+    if (install.invalid) this.note(invalidInstallIdNote(install.path));
     const read = await this.readWorkers();
     const hostId = ours && home.hostId !== null ? home.hostId : this.answers.label;
-    if (read.list === null) return { read, enrolled: ours, revoked: false, hostId };
+    if (read.list === null) {
+      return { read, enrolled: ours, revoked: false, foreign, mine: null, hostId };
+    }
     const view = ours && home.hostId !== null ? serverView(read.list, home.hostId) : null;
-    return {
-      read,
-      enrolled: view?.enrolled === true,
-      revoked: view !== null && !view.enrolled && view.worker !== null,
-      hostId,
-    };
+    const enrolled = view?.enrolled === true;
+    const mine = install.id === null ? null : newestOfInstall(read.list, install.id);
+    return { read, enrolled, revoked: ours && !enrolled, foreign, mine, hostId };
+  }
+
+  /**
+   * This install's worker `name` is listed live, but this home holds no credential for it: setup
+   * says so and asks whether to replace it, instead of enrolling a second worker beside it. Yes:
+   * the person removes it on the Workers page, and setup reads the list again each time they say
+   * it is done, until it no longer lists it live; it answers that list. No (at either question):
+   * `null`, and setup suggests a new name.
+   */
+  private async replaceListed(name: string): Promise<WorkerList | null> {
+    const account = this.accountName();
+    this.warn(`This install's worker ${name} is still listed but its credential is missing.`);
+    this.note(
+      `${name} is this install's worker (its install id matches), listed live in ${account}; this worker home holds no credential for it.`,
+    );
+    const replace = await this.prompter.confirm({
+      message: `Replace ${name}?`,
+      detail: `Yes: remove it on the Workers page, then setup enrolls this install as ${name} again.\nNo: enroll this install under a new name.`,
+    });
+    if (!replace) {
+      this.note(`Not replacing ${name}: enrolling this install under a new name.`);
+      return null;
+    }
+    this.say(
+      `${SYMBOL.bar}\n${SYMBOL.bar}  Remove ${name} on the Workers page in Pidgen. Setup continues under that name once Pidgen lists it as removed.`,
+    );
+    for (;;) {
+      const removed = await this.prompter.confirm({
+        message: `Removed ${name} on the Workers page?`,
+        detail:
+          "Setup reads Pidgen's list of workers again.\nNo: enroll this install under a new name instead.",
+      });
+      if (!removed) {
+        this.note(`${name} was not removed: enrolling this install under a new name.`);
+        return null;
+      }
+      const read = await this.readWorkers();
+      if (read.list === null) return null;
+      if (liveWorker(read.list, name) === undefined) {
+        this.note(`${name} is listed as removed; enrolling this install under its name.`);
+        return read.list;
+      }
+      this.warn(`${name} is still listed live in ${account}: remove it on the Workers page first.`);
+    }
+  }
+
+  /**
+   * `WORKER_CREDENTIAL_PRESENT`: the worker home holds a credential for another server (or one
+   * that names none). pidgen-worker would keep using it, so setup stops before enrolling.
+   */
+  private foreignCredential(home: WorkerCredential, enroll: string): StepFailure {
+    const shown = this.shownPath(home.path);
+    const server = home.serviceUrl;
+    const holds =
+      server === null
+        ? "holds a worker credential that names no server"
+        : `holds a worker credential for ${server}`;
+    const aside = `mv ${displayArgument(home.path)} ${displayArgument(`${home.path}.old`)}`;
+    return new StepFailure(
+      new CliError(
+        "WORKER_CREDENTIAL_PRESENT",
+        `${home.path} ${holds}, not ${this.answers.url}. pidgen-worker would keep using it and ignore a new enrollment, so setup enrolled nothing.`,
+        ExitCode.Refused,
+        { path: home.path, server, url: this.answers.url },
+      ),
+      enroll,
+      `To enroll this machine with ${this.answers.url} instead, move it aside and run setup again: \`${aside}\`. To keep it, run setup with another PIDGEN_HOME.`,
+      {
+        headline: `${shown} ${holds}.`,
+        lines: [
+          `pidgen-worker would keep using it, so setup didn't enroll this machine with ${this.answers.url}.`,
+          "To enroll it here instead, move the file aside and run setup again:",
+          `  ${aside}`,
+        ],
+        end: `Nothing was enrolled. ${plainText(CONTINUE)}`,
+      },
+    );
   }
 
   /** The Account's name, as the person knows it, else its id. */
@@ -2418,47 +2651,287 @@ class SetupRun {
   }
 
   /**
-   * The worker's name, which is also its host id: `--label`, else `preferred` when the Account lists
-   * no unrevoked worker under it, else the name question, defaulting to the next free name.
+   * The worker's name, which is also its host id: `--label` (never asked; one the Account lists
+   * unrevoked stops setup with `WORKER_NAME_TAKEN`), else the answer to the name question, asked
+   * before anything is created. Its suggestion is `preferred` when no live worker holds it (and,
+   * when `listedRemoved`, the Account lists it as removed): this install's newest worker's name by
+   * its install id, or the removed worker's name this machine's credential names. Else, with this
+   * install's worker `kept` live beside it, the next free name after it; else this host's name, or
+   * the next free name when a live worker of the Account holds it.
    */
-  private async chooseName(list: WorkerList | null, preferred: string): Promise<string> {
+  private async chooseName(
+    list: WorkerList | null,
+    preferred: Preferred | null,
+    kept: string | null = null,
+  ): Promise<string> {
     if (this.answers.labelGiven) {
       const name = this.answers.label;
       if (list !== null && nameTaken(list, name)) {
-        throw new StepFailure(
-          new CliError(
-            "CLI_USAGE",
-            `${this.accountName()} already has a worker named ${name}, and it isn't this install's; nothing was enrolled.`,
-            ExitCode.Usage,
-            { host_id: name },
-          ),
-          this.commands.enroll(name),
-          `Choose another name: \`pidgen setup --label ${displayArgument(nextFreeName(list, name))}\``,
+        const suggested = nextFreeName(list, name);
+        this.note(`${name} is taken: ${this.accountName()} lists a live worker by that name.`);
+        throw this.labelNameTaken(
+          name,
+          suggested,
+          `${this.accountName()} already has a worker named ${name}, so this worker was not enrolled and nothing was started.`,
+          { display_name: name, suggested_name: suggested, host_id: name },
+          false,
         );
       }
       return name;
     }
-    if (list === null || !nameTaken(list, preferred)) return preferred;
 
-    const other = list.workers.find(
-      (worker) => worker.host_id === preferred && worker.revoked_at === null,
-    )!;
+    const host = this.ctx.hostName;
+    const wanted = preferred?.name.toLowerCase();
+    const reclaim =
+      preferred !== null &&
+      list !== null &&
+      !nameTaken(list, preferred.name) &&
+      (!preferred.listedRemoved ||
+        list.workers.some(
+          (worker) => worker.host_id.toLowerCase() === wanted && worker.revoked_at !== null,
+        ));
+    if (reclaim) {
+      // A removed worker is offered its own name: the App Service lets its Account reclaim it.
+      this.note(`Suggested worker name ${preferred.name}: ${preferred.why}.`);
+      return this.askName(list, preferred.name);
+    }
+    if (kept !== null) {
+      const suggested = nextFreeName(list, kept);
+      this.note(
+        `Suggested worker name ${suggested}: this install's worker ${kept} is still listed.`,
+      );
+      return this.askName(list, suggested);
+    }
+    const other = list === null ? undefined : liveWorker(list, host);
+    if (other === undefined) {
+      this.note(`Suggested worker name ${host}: this host's name.`);
+      return this.askName(list, host);
+    }
     const account = this.accountName();
     this.say(
       [
-        `│\n▲  ${account} already has a worker named ${preferred} (${other.connected ? "connected" : "not connected"}; enrolled ${shortDate(other.created_at)}).`,
+        `│\n▲  ${account} already has a worker named ${other.host_id} (${other.connected ? "connected" : "not connected"}; enrolled ${shortDate(other.created_at)}).`,
         "   It isn't this install: it keeps its settings in another folder on this machine.",
       ].join("\n"),
     );
-    const fallback = nextFreeName(list, preferred);
+    const suggested = nextFreeName(list, host);
+    this.note(
+      `Suggested worker name ${suggested}: ${account} lists a live worker named ${other.host_id}.`,
+    );
+    return this.askName(list, suggested);
+  }
+
+  /**
+   * Runs `pidgen worker enroll` under `first`. Two refusals name the name as taken:
+   *
+   * - The App Service refuses the enrollment (HTTP 409 `WORKER_NAME_TAKEN`: the Account holds the
+   *   name, by a live worker or a pending enrollment the Account's list cannot show). Nothing was
+   *   created, so setup says so in one line and asks the name question again, defaulting to the
+   *   server's `suggested_name`, and creates the enrollment under the answer.
+   * - pidgen-worker's exchange is refused (HTTP 409 `WORKER_HOST_TAKEN`: a worker of another
+   *   Account holds the host id, or this Account's removed worker on a server that does not let an
+   *   Account reclaim its name). Setup says so in one line and asks the name question, defaulting to
+   *   the next free name, then has the same enrollment offered again under the answer (the server
+   *   leaves its token unspent on that refusal). Should the same enrollment then fail under the new
+   *   name, one new enrollment is made for it, and the log names the one left unused.
+   *
+   * With `--label` either refusal stops setup instead, naming a name to run it again with.
+   */
+  private async enrollUnderFreeName(
+    ctx: RunContext,
+    list: WorkerList | null,
+    first: string,
+    revoked: boolean,
+  ): Promise<{ hostId: string; replaced: string | null }> {
+    const c = this.commands;
+    // Names refused in this run, in lower case: the name question refuses them too.
+    const refused = new Set<string>();
+    let base: string | null = null;
+    let name = first;
+    let renamed = false;
+    const rename = async (taken: string): Promise<string | null> => {
+      refused.add(taken.toLowerCase());
+      base ??= taken;
+      this.note(
+        `${taken} is taken in Pidgen (HTTP 409 WORKER_HOST_TAKEN): the server refused to enroll this worker under it.`,
+      );
+      if (this.answers.labelGiven) return null;
+      this.dropTask();
+      this.warn(`${taken} is taken in Pidgen, so this worker needs another name.`);
+      name = await this.askName(list, nextFreeName(list, base, refused), refused);
+      this.note(`Enrolling as ${name} with the same enrollment.`);
+      this.begin(`Enrolling as ${name}…`, `Couldn't enroll ${name}`);
+      renamed = true;
+      return name;
+    };
+    const spec: CommandSpec = {
+      ...workerEnroll,
+      run: (context, input) => enrollWorker(context, input, { rename }),
+    };
+    const run = async () =>
+      (await this.runCommand(
+        c.enroll(name, revoked),
+        spec,
+        {
+          args: ["--host-id", name],
+          options: { label: name, ...(revoked ? { replaceCredential: true } : {}) },
+        },
+        enrollFix,
+        ctx,
+      )) as { replaced?: string } | null;
+    const attempt = async (): Promise<{ replaced?: string } | null> => {
+      try {
+        return await run();
+      } catch (error) {
+        // The same enrollment could not be used under the new name: one new enrollment, at most.
+        if (!(renamed && error instanceof StepFailure && error.error.code === "ENROLL_FAILED")) {
+          throw error;
+        }
+        renamed = false;
+        const enrollment = error.error.details["enrollment"] as { enrollment_id?: unknown } | null;
+        const unused =
+          typeof enrollment?.enrollment_id === "string" ? enrollment.enrollment_id : "(unknown)";
+        const after =
+          error.error.details["withdrawn"] === true
+            ? "It was withdrawn."
+            : "It could not be withdrawn and expires on its own.";
+        this.note(
+          `The enrollment ${unused} is left unused: pidgen-worker could not enroll ${name} with it (${error.error.message}). ${after} Creating a new enrollment for ${name}.`,
+        );
+        return await run();
+      }
+    };
+
+    let result: { replaced?: string } | null;
+    for (;;) {
+      try {
+        result = await attempt();
+        break;
+      } catch (error) {
+        if (!(error instanceof StepFailure)) throw error;
+        if (error.error.code === "WORKER_HOST_TAKEN") {
+          throw this.labelTaken(error, list, refused, revoked);
+        }
+        if (error.error.code !== NAME_TAKEN) throw error;
+        // No enrollment was created: ask again, with the server's suggestion filled in.
+        const taken = name;
+        refused.add(taken.toLowerCase());
+        const given = error.error.details["suggested_name"];
+        const suggested = typeof given === "string" && given.trim() !== "" ? given.trim() : null;
+        const usable =
+          suggested !== null &&
+          suggested.length <= LABEL_MAX &&
+          !refused.has(suggested.toLowerCase()) &&
+          !(list !== null && nameTaken(list, suggested));
+        const fallback = usable ? suggested : nextFreeName(list, taken, refused);
+        this.note(
+          `${taken} is taken in Pidgen (HTTP 409 WORKER_NAME_TAKEN): no enrollment was created; Pidgen suggests ${suggested ?? "no name"}.`,
+        );
+        if (this.answers.labelGiven) {
+          if (this.active !== null) this.active.tail = [];
+          throw this.labelNameTaken(
+            taken,
+            fallback,
+            `${taken} is taken in Pidgen: the Account already has a worker or a pending enrollment by that name (HTTP 409 WORKER_NAME_TAKEN), so this worker was not enrolled and nothing was started.`,
+            { ...error.error.details, suggested_name: fallback },
+            revoked,
+          );
+        }
+        this.dropTask();
+        this.warn(`${taken} is taken in Pidgen, so this worker needs another name.`);
+        name = await this.askName(list, fallback, refused);
+        this.note(`Enrolling as ${name}.`);
+        this.begin(`Enrolling as ${name}…`, `Couldn't enroll ${name}`);
+      }
+    }
+    return {
+      hostId: name,
+      replaced: typeof result?.replaced === "string" ? result.replaced : null,
+    };
+  }
+
+  /**
+   * `WORKER_HOST_TAKEN` with `--label`: the name was answered in advance, so setup stops at the
+   * enroll step, naming the next free name. Nothing is started.
+   */
+  private labelTaken(
+    failure: StepFailure,
+    list: WorkerList | null,
+    refused: ReadonlySet<string>,
+    revoked: boolean,
+  ): StepFailure {
+    const name = this.answers.label;
+    const rerun = `pidgen setup --label ${displayArgument(nextFreeName(list, name, refused))}`;
+    // pidgen-worker's own advice (remove the worker from the Workers page) does not apply here.
+    if (this.active !== null) this.active.tail = [];
+    return new StepFailure(
+      new CliError(
+        "WORKER_HOST_TAKEN",
+        `${name} is taken in Pidgen by another worker, in this Account or another (HTTP 409 WORKER_HOST_TAKEN), so this worker was not enrolled and nothing was started.`,
+        ExitCode.Refused,
+        { ...failure.error.details, host_id: name },
+      ),
+      this.commands.enroll(name, revoked),
+      `Choose another name: \`${rerun}\``,
+      {
+        headline: `${name} is taken in Pidgen, so setup can't enroll this worker under it.`,
+        lines: ["Run setup with another name:", `  ${rerun}`],
+        end: `Nothing was started. Run ${rerun} to continue from here.`,
+      },
+    );
+  }
+
+  /**
+   * `WORKER_NAME_TAKEN` with `--label`: the name was answered in advance, so setup stops at the
+   * enroll step (exit 5) with `pidgen setup --label <suggested>` as the fix. Nothing was created or
+   * started.
+   */
+  private labelNameTaken(
+    name: string,
+    suggested: string,
+    message: string,
+    details: Record<string, unknown>,
+    revoked: boolean,
+  ): StepFailure {
+    const rerun = `pidgen setup --label ${displayArgument(suggested)}`;
+    return new StepFailure(
+      new CliError(NAME_TAKEN, message, ExitCode.Refused, {
+        ...details,
+        display_name: name,
+        suggested_name: suggested,
+      }),
+      this.commands.enroll(name, revoked),
+      `Choose another name: \`${rerun}\``,
+      {
+        headline: `${name} is taken in Pidgen, so setup can't enroll this worker under it.`,
+        lines: ["Run setup with another name:", `  ${rerun}`],
+        end: `Nothing was started. Run ${rerun} to continue from here.`,
+      },
+    );
+  }
+
+  /**
+   * The name question, `Worker name`, defaulting to `fallback`: an empty name, one over the label
+   * limit, one the Account lists unrevoked or one the server refused in this run (`refused`, lower
+   * case) keeps it open. Names are compared case-insensitively.
+   */
+  private async askName(
+    list: WorkerList | null,
+    fallback: string,
+    refused: ReadonlySet<string> = new Set(),
+  ): Promise<string> {
+    const account = this.accountName();
     const name = await this.prompter.text({
-      message: "Name for this worker",
+      message: "Worker name",
       defaultValue: fallback,
       validate: (value) => {
         const answer = value.trim();
         if (answer === "") return "Enter a name for this worker.";
         if (answer.length > LABEL_MAX) return `A worker's name is at most ${LABEL_MAX} characters.`;
-        if (nameTaken(list, answer)) {
+        if (refused.has(answer.toLowerCase())) {
+          return `${answer} is taken in Pidgen: choose another name.`;
+        }
+        if (list !== null && nameTaken(list, answer)) {
           return `${answer} is taken: ${account} already has a worker by that name.`;
         }
         return undefined;
@@ -2702,6 +3175,9 @@ function enrollFix(error: CliError): string {
   }
   if (error.code === "ENTITLEMENT_LIMIT_REACHED") {
     return "The Account has enrolled all the workers it may; revoke one in the web app.";
+  }
+  if (error.details["withdrawn"] === true) {
+    return "Fix the error. The enrollment setup created was withdrawn, so nothing is left waiting.";
   }
   return "Fix the error. The unused enrollment expires on its own.";
 }

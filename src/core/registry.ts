@@ -49,7 +49,7 @@ export interface DirectCommandResult {
 export const NOUNS: Record<string, string> = {
   auth: "Sign in and manage CLI credentials",
   account: "List and switch Pidgen Accounts",
-  project: "Read projects",
+  project: "Read projects, and inspect, set up, rehearse and diagnose their workspaces",
   domain: "Domains: groups of projects, their parents, Domain Members and Maintainers",
   contract: "Read, revise and accept a project's or a domain's contracts",
   ticket: "Create, read, and recover tickets",

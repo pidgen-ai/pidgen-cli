@@ -1091,3 +1091,71 @@ describe("terminal output documentation", () => {
     expect(read("docs/skills.md")).toMatch(/--format json[^.]*terminal|terminal[^.]*--format json/s);
   });
 });
+
+/**
+ * AC-e52d85d96335: pidgen-project-readiness teaches an agent the four readiness commands
+ * (docs/commands.md, "project inspect, setup, rehearse and doctor") and names only `pidgen`
+ * commands: every command line and every command-like code span is a `pidgen` invocation.
+ */
+describe("skill pidgen-project-readiness", () => {
+  const root = new URL("../../", import.meta.url).pathname;
+  const file = join(REPO_SKILLS_DIR, "pidgen-project-readiness", "SKILL.md");
+  const raw = existsSync(file) ? readFileSync(file, "utf8") : "";
+  const blocks = [...raw.matchAll(/^```[^\n]*\n([\s\S]*?)^```/gm)].map((match) => match[1]!);
+
+  it("exists as a bundled skill and is not exempt from the content rules", () => {
+    expect(raw, "missing skills/pidgen-project-readiness/SKILL.md").not.toBe("");
+    expect(imported).not.toContain("pidgen-project-readiness");
+  });
+
+  it("teaches the four commands: inspect, setup, rehearse and doctor", () => {
+    for (const verb of ["inspect", "setup", "rehearse", "doctor"]) {
+      expect(raw, verb).toMatch(new RegExp(`\\bpidgen project ${verb}\\b`));
+    }
+    for (const flag of ["--answer", "--write", "--pull-request", "--ref", "--since", "--propose-fix"]) {
+      expect(raw, flag).toContain(flag);
+    }
+  });
+
+  it("names only pidgen commands", () => {
+    const lines = blocks
+      .flatMap((block) => block.replace(/\\\n\s*/g, " ").split("\n"))
+      .map((line) => line.trim().replace(/^\$\s+/, ""))
+      .filter((line) => line !== "" && !line.startsWith("#"));
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) expect(line, line).toMatch(/^pidgen [a-z]/);
+    const spans = [...raw.replace(/^```[\s\S]*?^```/gm, "").matchAll(/`([^`\n]+)`/g)].map(
+      (match) => match[1]!,
+    );
+    for (const span of spans.filter((text) => /^[a-z][\w.-]*\s+[\w-]/.test(text))) {
+      expect(span, span).toMatch(/^pidgen /);
+    }
+  });
+
+  it("reads the doctor's verdict: exit 1 with SETUP_IS_THE_PROBLEM and the report in error.details.report", () => {
+    expect(raw).toContain("SETUP_IS_THE_PROBLEM");
+    expect(raw).toContain("error.details.report");
+    expect(raw).toMatch(/exit(?:s)? 1/);
+    expect(raw).toMatch(/never gates/i);
+  });
+
+  it("is listed in docs/skills.md and README.md", () => {
+    for (const doc of ["docs/skills.md", "README.md"]) {
+      expect(readFileSync(join(root, doc), "utf8"), doc).toMatch(/^\| `pidgen-project-readiness` \|/m);
+    }
+  });
+
+  // AC-2cc4475ac8f5, AC-d23833d85997: the three verdicts and their exits, and --write's refusal
+  // of an existing .pidgen/.
+  it("reads the three verdicts, setup exiting 1 and code or unclear exiting 0, and --write's refusal", () => {
+    for (const verdict of ["`setup`", "`code`", "`unclear`"]) expect(raw, verdict).toContain(verdict);
+    expect(raw).toMatch(/`code` or `unclear`[^.]*exits 0/);
+    expect(raw).toMatch(/existing `\.pidgen\/`[^.]*`FILES_EXIST`/);
+  });
+
+  it("is where pidgen-setup-worker points once the worker runs", () => {
+    const worker = readFileSync(join(REPO_SKILLS_DIR, "pidgen-setup-worker", "SKILL.md"), "utf8");
+    expect(worker).toContain("pidgen-project-readiness");
+    expect(worker).toMatch(/pidgen project rehearse [A-Z]+ --format json/);
+  });
+});

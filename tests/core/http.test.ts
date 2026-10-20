@@ -192,6 +192,41 @@ describe("ApiClient", () => {
     });
   });
 
+  // AC-bc2d5eeb9a5f: `pidgen project setup --write` downloads the proposal archive this way.
+  it("downloads a file's bytes unread, asking for its media type, and reads a refusal as JSON", async () => {
+    const bytes = new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0xff]);
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(bytes, {
+          status: 200,
+          headers: { "content-type": "application/gzip", "x-request-id": "req_file" },
+        }),
+    );
+    const response = await client(fetchMock).download(
+      { method: "GET", path: "/projects/STO/readiness/proposal/archive" },
+      "application/gzip",
+    );
+    expect(response.data).toEqual(bytes);
+    expect(response.requestId).toBe("req_file");
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://pidgen.example.com/api/v1/projects/STO/readiness/proposal/archive");
+    expect(init.headers).toMatchObject({
+      accept: "application/gzip, application/json",
+      authorization: "Bearer pidgen_cli_example",
+      "x-pidgen-account": "ACC-EXAMPLE",
+    });
+
+    const refusing = vi.fn(async () =>
+      jsonResponse(404, {
+        status: "error",
+        error: { code: "READINESS_PROPOSAL_NOT_FOUND", message: "None yet.", request_id: "r" },
+      }),
+    );
+    await expect(
+      client(refusing).download({ method: "GET", path: "/x" }, "application/gzip"),
+    ).rejects.toMatchObject({ code: "READINESS_PROPOSAL_NOT_FOUND", exitCode: ExitCode.NotFound });
+  });
+
   it("retries GET on network failure", async () => {
     const fetchMock = vi
       .fn()

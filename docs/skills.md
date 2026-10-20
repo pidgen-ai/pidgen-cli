@@ -23,7 +23,21 @@ shared skills directory such as `~/.claude/skills`.
 | `pidgen-retry-run` | Decide whether a failed or stalled run should get a fresh attempt, and start it |
 | `pidgen-replay-node` | Re-run one workflow node as a new attempt, including reopening a completed ticket |
 | `pidgen-unstick-ticket` | Choose between answering a clarification, retrying, or filing new work |
-| `pidgen-setup-worker` | Take a machine from nothing to a running, verified worker without a terminal, then configure it: pool sizes, session caps per coding agent, fallback provider logins and the primary one |
+| `pidgen-setup-worker` | Diagnose setup, install and verify a worker, check new model or coding-agent support, resize pools and session caps, customize documented harness options, and configure multiple provider subscriptions using the published documentation |
+| `pidgen-project-readiness` | Get a Project's repository ready for its Tickets: read the findings and answer the questions, write the proposed `.pidgen/` setup or open it as a pull request, rehearse it on a worker; later ask the Project doctor whether the setup is why work fails, and propose its fix |
+| `pidgen-setup-workspace` | Make a repository's tests pass in isolated ticket workspaces: list what the tests need, give each workspace its own services, ports, installs and settings with a tracked `pidgen.toml` and its `provision`, `activate` and `teardown` hooks, rehearse the hooks as a worker runs them, and diagnose a failed run's hook errors |
+
+For worker help, ask your agent to use `pidgen-setup-worker`, for example: “Diagnose why my worker
+is disconnected,” “Check whether this worker can run this new model,” “Raise Claude's session cap
+to four,” “Configure a documented harness option,” or “Add a second provider subscription.”
+The skill starts from [Pidgen Docs](https://docs.pidgen.ai/), selects the relevant CLI or worker
+guide, checks installed versions, and verifies changes through status, doctor and configuration
+readback. [Use a new model on a worker](worker-models.md) covers readiness, executable selection
+and model input capabilities; [Worker policy](worker-policy.md) lists the versioned options.
+The skill reports unsupported or undocumented model and policy options instead of guessing
+configuration keys. Provider plan sizing hints are not guaranteed limits; automatic subscription
+fallback depends on the Account's plan. Support reports are prepared locally and sent only when
+you ask to submit them.
 
 ## Installing
 
@@ -101,7 +115,9 @@ preview before they apply, and never name an Account, profile or server; the pro
 | `pidgen-retry-run` | `ticket show\|actions\|act\|retry\|edit`, `run list\|show\|node-output`, `review attention`, `worker status` |
 | `pidgen-replay-node` | `ticket show\|actions\|act\|replay\|reopen`, `run list\|show\|node-output`, `review attention`, `worker status` |
 | `pidgen-unstick-ticket` | `review list\|attention`, `ticket clarify\|actions\|act\|template\|create\|cancel`, `run list\|show`, `worker status`, `api get` |
-| `pidgen-setup-worker` | `doctor`, `auth login`, `account use`, `worker install\|verify\|enroll\|start\|stop\|status\|doctor\|update\|uninstall\|subscriptions`, `skills install`; and the installed worker's `pidgen-worker capacity show\|set\|reload` and `pidgen-worker subscriptions show\|use` |
+| `pidgen-project-readiness` | `project inspect\|setup\|rehearse\|doctor`, `ticket show\|act` |
+| `pidgen-setup-worker` | `doctor`, `auth login`, `account use`, `worker install\|verify\|enroll\|start\|stop\|restart\|status\|doctor\|login\|update\|uninstall\|subscriptions`, `skills install`, `feedback` when requested; and the installed worker's `pidgen-worker capacity show\|set\|reload` and `pidgen-worker subscriptions show\|use` |
+| `pidgen-setup-workspace` | `project list\|show`, `run list\|show\|node-output`; everything else is the repository's own tooling |
 
 The recovery skills (`pidgen-retry-run`, `pidgen-replay-node`, `pidgen-unstick-ticket`) recover only with
 `pidgen ticket actions` and `pidgen ticket act` (or `pidgen ticket retry` and `pidgen ticket replay`, which

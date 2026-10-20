@@ -13,21 +13,61 @@ const PACKAGE = new URL("../../package.json", import.meta.url);
 /**
  * Every pending fragment under contracts/pending/ and the routes it holds, `METHOD path`. A new
  * fragment is listed here; once the server publishes its routes the fragment and its entry go.
- * There are none today: the seven that stood in for the worker release, domain, Domain Epic,
- * contract, contract creation, contract publishing and Request routes were deleted when the server
- * published those routes (RETIRED_FRAGMENTS).
+ * The seven that stood in for the worker release, domain, Domain Epic, contract, contract
+ * creation, contract publishing and Request routes were deleted when the server published those
+ * routes (RETIRED_FRAGMENTS).
  */
-const PENDING_ROUTES: Record<string, readonly string[]> = {};
+const PENDING_ROUTES: Record<string, readonly string[]> = {
+  "worker-enrollments": [
+    "GET /api/v1/workers",
+    "POST /api/v1/workers/enrollments",
+    "GET /api/v1/workers/enrollments",
+    "DELETE /api/v1/workers/enrollments/{enrollment_id}",
+  ],
+  "project-readiness": [
+    "GET /api/v1/projects/{project_ref}/readiness",
+    "GET /api/v1/projects/{project_ref}/readiness/proposal/archive",
+    "POST /api/v1/projects/{project_ref}/readiness/proposal/pull-request",
+    "POST /api/v1/projects/{project_ref}/readiness/answers",
+    "POST /api/v1/projects/{project_ref}/readiness/rehearse",
+    "POST /api/v1/projects/{project_ref}/readiness/doctor",
+  ],
+};
 
 /** The published schemas each fragment copies verbatim from contracts/openapi.json. */
-const COPIED_SCHEMAS: Record<string, readonly string[]> = {};
+const COPIED_SCHEMAS: Record<string, readonly string[]> = {
+  "worker-enrollments": [
+    "CreatedEnrollmentResponse",
+    "WorkerList",
+    "WorkerListResponse",
+    "PublicError",
+    "InstallOption",
+    "WorkerEula",
+  ],
+  "project-readiness": ["PublicError", "PublicErrorDetail"],
+};
 const FRAGMENTS = Object.keys(PENDING_ROUTES);
 
 /**
  * Routes a fragment holds that the server already publishes, extended with a field the published
  * schema lacks. Their reminder is not the route but the field.
  */
-const EXTENDED_ROUTES: Record<string, readonly string[]> = {};
+const EXTENDED_ROUTES: Record<string, readonly string[]> = {
+  "worker-enrollments": ["GET /api/v1/workers", "POST /api/v1/workers/enrollments"],
+};
+
+/**
+ * Published schemas a fragment holds under their published names with fields added, and those
+ * fields. Apart from them each is the published schema; once the published one carries them, the
+ * fragment's reminder fires.
+ */
+const EXTENDED_SCHEMAS: Record<string, Record<string, readonly string[]>> = {
+  "worker-enrollments": {
+    CreateEnrollmentRequest: ["install_id"],
+    CreatedEnrollment: ["install_id"],
+    WorkerResource: ["install_id"],
+  },
+};
 
 /**
  * The fragments the published document replaced, and the routes each stood in for. Their files,
@@ -393,10 +433,225 @@ describe("npm run contract:generate", () => {
         expect(schemas[copied], `${name}: ${copied}`).toEqual(published.components.schemas[copied]);
       }
       for (const [schema, value] of Object.entries(schemas)) {
-        if (Object.hasOwn(published.components.schemas, schema)) {
+        if (!Object.hasOwn(published.components.schemas, schema)) continue;
+        const added = EXTENDED_SCHEMAS[name]?.[schema];
+        if (added === undefined) {
           expect(value, `${name}: ${schema}`).toEqual(published.components.schemas[schema]);
+          continue;
         }
+        // An extended schema is the published one plus its added fields, none of them required.
+        const own = published.components.schemas[schema] as { properties: Record<string, unknown> };
+        const extended = value as { properties: Record<string, unknown>; required?: string[] };
+        for (const field of added) {
+          expect(
+            own.properties,
+            `The published ${schema} carries ${field} now: drop it from contracts/pending/${name}.json`,
+          ).not.toHaveProperty(field);
+          expect(extended.properties, `${name}: ${schema}.${field}`).toHaveProperty(field);
+          expect(extended.required ?? [], `${name}: ${schema}.${field}`).not.toContain(field);
+        }
+        const properties = Object.fromEntries(
+          Object.entries(extended.properties).filter(([key]) => !added.includes(key)),
+        );
+        expect({ ...extended, properties }, `${name}: ${schema}`).toEqual(own);
       }
+    }
+  });
+
+  // AC-2fc2fc58890f: the worker enrollments fragment holds only the agreed routes and fields.
+  it("the worker enrollments fragment adds install_id, the enrollment list and the withdraw, and nothing else", async () => {
+    const pending = (await fragment("worker-enrollments")) as Fragment & {
+      security?: unknown;
+      components: { securitySchemes?: unknown };
+    };
+    const published = JSON.parse(await readFile(DOCUMENT, "utf8")) as Fragment;
+    type Schema = {
+      properties: Record<string, Record<string, unknown>>;
+      required?: string[];
+      additionalProperties?: unknown;
+    };
+    const schemas = pending.components.schemas as Record<string, Schema>;
+    expect(pending.info.title).toBe("Pidgen Public API: pending worker enrollment routes");
+    expect(pending.security).toEqual([{ bearerAuth: [] }]);
+    expect(pending.components.securitySchemes).toHaveProperty("bearerAuth");
+
+    // install_id: optional, 32 lowercase hex characters, on the request, the created enrollment,
+    // each worker and each listed enrollment.
+    const installId = { type: "string", pattern: "^[0-9a-f]{32}$" };
+    for (const schema of [
+      "CreateEnrollmentRequest",
+      "CreatedEnrollment",
+      "WorkerResource",
+      "WorkerEnrollment",
+    ]) {
+      expect(schemas[schema]!.properties["install_id"]!["anyOf"], schema).toEqual([
+        installId,
+        { type: "null" },
+      ]);
+      expect(schemas[schema]!.required ?? [], schema).not.toContain("install_id");
+    }
+    // The published request refuses unknown fields: why the create is held here.
+    const request = published.components.schemas["CreateEnrollmentRequest"] as Schema;
+    expect(request.additionalProperties).toBe(false);
+    expect(schemas["CreateEnrollmentRequest"]!.additionalProperties).toBe(false);
+
+    // An enrollment: CreatedEnrollment's fields without the token and install steps, plus install_id.
+    const createdFields = Object.keys(schemas["CreatedEnrollment"]!.properties);
+    const omitted = ["token", "install_commands", "install", "eula"];
+    expect(Object.keys(schemas["WorkerEnrollment"]!.properties).sort()).toEqual(
+      createdFields.filter((field) => !omitted.includes(field)).sort(),
+    );
+    expect(schemas["WorkerEnrollment"]!.properties).not.toHaveProperty("token");
+    expect(schemas["WorkerEnrollmentListResponse"]!.properties["data"]).toEqual({
+      items: { $ref: "#/components/schemas/WorkerEnrollment" },
+      type: "array",
+      title: "Data",
+    });
+    expect(schemas["WorkerEnrollmentResponse"]!.properties["data"]).toEqual({
+      $ref: "#/components/schemas/WorkerEnrollment",
+    });
+
+    // The list: the caller's own, pending unless ?state= widens it.
+    const list = pending.paths["/api/v1/workers/enrollments"]!["get"]!;
+    expect(
+      (list["parameters"] as Array<{ name: string; in: string }>).map((p) => `${p.in} ${p.name}`),
+    ).toEqual(["query state"]);
+    // The withdraw: the enrollment, or 404 WORKER_ENROLLMENT_NOT_FOUND.
+    const withdraw = pending.paths["/api/v1/workers/enrollments/{enrollment_id}"]!["delete"]!;
+    expect(JSON.stringify(withdraw["responses"])).toContain('"code":"WORKER_ENROLLMENT_NOT_FOUND"');
+    expect(
+      (withdraw["parameters"] as Array<{ name: string; in: string }>).map(
+        (p) => `${p.in} ${p.name}`,
+      ),
+    ).toEqual(["path enrollment_id"]);
+
+    // The two published routes are held as published: same body, operation id and responses' schemas.
+    for (const [path, method] of [
+      ["/api/v1/workers/enrollments", "post"],
+      ["/api/v1/workers", "get"],
+    ] as const) {
+      const ours = pending.paths[path]![method]!;
+      const theirs = published.paths[path]![method]!;
+      expect(ours["operationId"]).toBe(theirs["operationId"]);
+      expect(ours["requestBody"]).toEqual(theirs["requestBody"]);
+      expect(ours["parameters"]).toEqual(theirs["parameters"]);
+    }
+
+    // Every 2xx example matches its schema in the fragment, so Prism serves what the CLI reads.
+    const { schemaIssues } = await import("../../src/core/input.js");
+    for (const route of PENDING_ROUTES["worker-enrollments"]!) {
+      const [method, path] = route.split(" ") as [string, string];
+      const responses = pending.paths[path]![method.toLowerCase()]!["responses"] as Record<
+        string,
+        { content?: Record<string, { example?: unknown; schema?: unknown }> }
+      >;
+      const [, success] = Object.entries(responses).find(([status]) => /^2\d\d$/.test(status))!;
+      const json = success.content!["application/json"]!;
+      expect(schemaIssues(pending as never, json.schema, json.example), route).toEqual([]);
+    }
+  });
+
+  // AC-bc2d5eeb9a5f: the readiness fragment holds the readiness routes the commands send.
+  it("the project readiness fragment states the readiness routes, their examples match, and the archive is gzip", async () => {
+    const pending = (await fragment("project-readiness")) as Fragment & {
+      security?: unknown;
+      components: { securitySchemes?: unknown };
+    };
+    expect(pending.info.title).toBe("Pidgen Public API: pending project readiness routes");
+    expect(pending.security).toEqual([{ bearerAuth: [] }]);
+    expect(pending.components.securitySchemes).toHaveProperty("bearerAuth");
+    const schemas = pending.components.schemas as Record<
+      string,
+      { properties: Record<string, Record<string, unknown>>; required?: string[] }
+    >;
+    // A finding's state is one of the words the report shows.
+    expect(schemas["ReadinessArea"]!.properties["state"]!["enum"]).toEqual([
+      "ok",
+      "proposed",
+      "needs_you",
+      "cannot_tell",
+      "pending",
+    ]);
+    expect(schemas["ReadinessAnswer"]!.required).toEqual(["question_id", "value"]);
+    // The archive is a file, not JSON.
+    const archive = pending.paths["/api/v1/projects/{project_ref}/readiness/proposal/archive"]!
+      .get!["responses"] as Record<string, { content: Record<string, unknown> }>;
+    expect(Object.keys(archive["200"]!.content)).toEqual(["application/gzip"]);
+
+    // Every JSON 2xx example (and each named example) matches its schema, so Prism serves what
+    // the CLI reads.
+    const { schemaIssues } = await import("../../src/core/input.js");
+    for (const route of PENDING_ROUTES["project-readiness"]!) {
+      const [method, path] = route.split(" ") as [string, string];
+      const responses = pending.paths[path]![method.toLowerCase()]!["responses"] as Record<
+        string,
+        {
+          content?: Record<
+            string,
+            { example?: unknown; examples?: Record<string, { value: unknown }>; schema?: unknown }
+          >;
+        }
+      >;
+      const [, success] = Object.entries(responses).find(([status]) => /^2\d\d$/.test(status))!;
+      const json = success.content!["application/json"];
+      if (json === undefined) continue;
+      const examples = [
+        ...(json.example === undefined ? [] : [json.example]),
+        ...Object.values(json.examples ?? {}).map((example) => example.value),
+      ];
+      expect(examples.length, route).toBeGreaterThan(0);
+      for (const example of examples) {
+        expect(schemaIssues(pending as never, json.schema, example), route).toEqual([]);
+      }
+    }
+  });
+
+  // AC-9f7dca84dddc: the doctor route answers the report the command renders, its examples the
+  // fixtures under tests/fixtures/readiness/.
+  it("the project readiness fragment states the doctor route, its verdicts and its named examples", async () => {
+    const pending = await fragment("project-readiness");
+    const schemas = pending.components.schemas as Record<
+      string,
+      { properties: Record<string, Record<string, unknown>>; required?: string[] }
+    >;
+    expect(schemas["ProjectDoctorReport"]!.properties["verdict"]!["enum"]).toEqual([
+      "setup",
+      "code",
+      "unclear",
+    ]);
+    expect(schemas["DoctorGroup"]!.properties["group"]!["enum"]).toEqual([
+      "setup_files",
+      "workers",
+      "secrets",
+      "workspaces",
+      "tests",
+      "drift",
+    ]);
+    expect(schemas["DoctorCheck"]!.properties["state"]!["enum"]).toEqual([
+      "ok",
+      "needs_you",
+      "failed",
+    ]);
+    expect(Object.keys(schemas["ProjectDoctorRequest"]!.properties).sort()).toEqual([
+      "propose_fix",
+      "since_days",
+    ]);
+    const doctor = pending.paths["/api/v1/projects/{project_ref}/readiness/doctor"]!.post!;
+    const examples = (
+      doctor["responses"] as Record<
+        string,
+        { content: Record<string, { examples: Record<string, { value: { data: unknown } }> }> }
+      >
+    )["200"]!.content["application/json"]!.examples;
+    const fixtures = new URL("../fixtures/readiness/", import.meta.url);
+    for (const [name, file] of [
+      ["setup", "doctor-setup.json"],
+      ["code", "doctor-code.json"],
+      ["unclear", "doctor-unclear.json"],
+      ["fix_proposed", "doctor-fix-proposed.json"],
+    ] as const) {
+      const expected = JSON.parse(await readFile(new URL(file, fixtures), "utf8")) as unknown;
+      expect(examples[name]?.value.data, name).toEqual(expected);
     }
   });
 

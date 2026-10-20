@@ -1,4 +1,6 @@
-import { chmod, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 import { runCli } from "../../src/cli.js";
@@ -95,6 +97,15 @@ interface ServerState {
   connectAfter: number;
   /** `GET /workers` answers this instead of the list. */
   workersRefusal?: () => Response;
+  /**
+   * Names `POST /workers/enrollments` refuses with 409 `WORKER_NAME_TAKEN` (compared
+   * case-insensitively), each with the `suggested_name` the refusal carries.
+   */
+  takenNames?: Record<string, string>;
+  /** The install id the last `POST /workers/enrollments` carried: this install's worker's. */
+  installId?: string | null;
+  /** `DELETE /workers/enrollments/{id}` answers this instead of the withdrawn enrollment. */
+  withdrawRefusal?: () => Response;
 }
 
 interface Harness extends InstallContext {
@@ -173,6 +184,7 @@ interface WorkerResource {
   protocol_state: string;
   build_version: string;
   git_credentials: unknown[];
+  install_id?: string | null;
 }
 
 function workerResource(
@@ -192,6 +204,9 @@ function workerResource(
     ...overrides,
   };
 }
+
+/** The credential a worker removed from the Account kept in its worker.env. */
+const REVOKED_CREDENTIAL = "pidgen_node_fake_revoked_credential";
 
 /** The keys of this install's worker.env, or `null` when there is none. */
 async function readWorkerEnv(home: string): Promise<Record<string, string> | null> {
@@ -229,8 +244,28 @@ async function writeWorkerEnv(home: string, lines: string[]): Promise<void> {
  * A fake `pidgen-worker`: logs each argument list, answers `doctor --json`, and exits 0. `enroll`
  * prints its argument list, the one-time token among them, on standard error.
  * `capacity set` prints FAKE_CAPACITY_OUTPUT (default "saved") and exits FAKE_CAPACITY_EXIT.
- * `enroll` writes $PIDGEN_HOME/worker.env as the real worker does (the credential, the server and
- * `--host-id`, default the host name), unless FAKE_ENROLL_NO_ENV is set.
+ *
+ * The worker's saved-credential rules. `pidgen-worker enroll --token <t> --server <s>` with a
+ * worker.env holding a credential (PIDGEN_NODE_TOKEN) decides by that credential, and logs its
+ * decision, `["credential", "kept" | "moved-aside" | "refused"]`, to FAKE_WORKER_LOG.credentials:
+ *
+ *   1. It keeps a saved credential the service accepts (for <s>, and not one the service refuses):
+ *      the one-time token is not exchanged and worker.env is left as it is.
+ *   2. It moves aside a saved credential the service refuses with HTTP 401 (one of
+ *      FAKE_REFUSED_CREDENTIALS, comma-separated; the harness's default is REVOKED_CREDENTIAL, the
+ *      removed worker's): worker.env is renamed worker.env.refused and the token is exchanged.
+ *   3. It refuses a saved credential for another server (PIDGEN_SERVICE_URL is not <s>, or is
+ *      missing) unless `--replace` is given: it prints the refusal, naming that server and
+ *      `--replace`, exits 1 and changes nothing. With `--replace` worker.env is renamed
+ *      worker.env.replaced and the token is exchanged.
+ *
+ * An exchange writes $PIDGEN_HOME/worker.env as the real worker does (the credential, the server and
+ * `--host-id`, default the host name), unless FAKE_ENROLL_NO_ENV is set, and each `enroll` that
+ * gets that far logs `["exchange", "done"]` or `["exchange", "skipped"]` to
+ * FAKE_WORKER_LOG.exchanges. An exchange for a host id in FAKE_TAKEN_HOSTS (comma-separated) is
+ * refused as the server refuses a taken host id: the worker prints its refusal line and exits 1,
+ * writing nothing. FAKE_FAIL_ENROLL_RUN=<n> makes the n-th `enroll` (counted from 1) fail for
+ * another reason, exit 1.
  */
 const WORKER_SCRIPT = `#!${process.execPath}
 const fs = require("node:fs");
@@ -239,11 +274,62 @@ const args = process.argv.slice(2);
 fs.appendFileSync(process.env.FAKE_WORKER_LOG, JSON.stringify(args) + "\\n");
 // The worker says what it enrolls with, one-time token and all, as a careless worker might.
 if (args[0] === "enroll") process.stderr.write("pidgen-worker " + args.join(" ") + "\\nenrolled\\n");
-if (args[0] === "enroll" && !process.env.FAKE_ENROLL_NO_ENV) {
-  const value = (flag) => { const at = args.lastIndexOf(flag); return at < 0 ? undefined : args[at + 1]; };
-  const home = process.env.PIDGEN_HOME;
+const value = (flag) => { const at = args.lastIndexOf(flag); return at < 0 ? undefined : args[at + 1]; };
+const home = process.env.PIDGEN_HOME;
+const envFile = path.join(home, "worker.env");
+const decide = (decision) => fs.appendFileSync(process.env.FAKE_WORKER_LOG + ".credentials", JSON.stringify(["credential", decision]) + "\\n");
+// The saved credential's keys, or null when worker.env holds no PIDGEN_NODE_TOKEN.
+const saved = (() => {
+  let text;
+  try {
+    text = fs.readFileSync(envFile, "utf8");
+  } catch {
+    return null;
+  }
+  const keys = Object.fromEntries(text.split("\\n").filter((line) => line.includes("=")).map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
+  return keys.PIDGEN_NODE_TOKEN ? keys : null;
+})();
+let keep = false;
+if (args[0] === "enroll" && saved !== null) {
+  const server = value("--server");
+  const refused = (process.env.FAKE_REFUSED_CREDENTIALS ?? "").split(",").includes(saved.PIDGEN_NODE_TOKEN);
+  if ((saved.PIDGEN_SERVICE_URL ?? "") !== server) {
+    // Rule 3: another server's credential is refused without --replace.
+    if (!args.includes("--replace")) {
+      decide("refused");
+      process.stderr.write("worker.env holds a credential for " + (saved.PIDGEN_SERVICE_URL || "no server") + ", not " + server + ". Re-run with --replace to move it aside and enroll with " + server + ".\\n");
+      process.exit(1);
+    }
+    decide("moved-aside");
+    fs.renameSync(envFile, envFile + ".replaced");
+  } else if (refused) {
+    // Rule 2: a credential the service refuses (HTTP 401) is moved aside.
+    decide("moved-aside");
+    process.stderr.write("saved credential refused (HTTP 401 TOKEN_INVALID); moved worker.env aside to worker.env.refused\\n");
+    fs.renameSync(envFile, envFile + ".refused");
+  } else {
+    // Rule 1: a credential the service accepts is kept, and the one-time token is not exchanged.
+    decide("kept");
+    keep = true;
+  }
+}
+if (args[0] === "enroll" && !keep) {
+  const runs = fs.readFileSync(process.env.FAKE_WORKER_LOG, "utf8").split("\\n").filter((line) => line.startsWith('["enroll"')).length;
+  if (String(runs) === process.env.FAKE_FAIL_ENROLL_RUN) {
+    process.stderr.write("enrollment token not accepted (HTTP 401 ENROLLMENT_INVALID).\\n");
+    process.exit(1);
+  }
+  const hostId = value("--host-id") ?? process.env.FAKE_HOSTNAME;
+  if ((process.env.FAKE_TAKEN_HOSTS ?? "").split(",").includes(hostId)) {
+    process.stderr.write("host id '" + hostId + "' is already enrolled in this Account (HTTP 409 WORKER_HOST_TAKEN).\\n");
+    process.stderr.write("Re-run with a different --host-id, or remove the existing worker from the Workers page\\nfirst. Two machines must never share a host id.\\n");
+    process.exit(1);
+  }
+}
+if (args[0] === "enroll") fs.appendFileSync(process.env.FAKE_WORKER_LOG + ".exchanges", JSON.stringify(["exchange", keep ? "skipped" : "done"]) + "\\n");
+if (args[0] === "enroll" && !keep && !process.env.FAKE_ENROLL_NO_ENV) {
   fs.mkdirSync(home, { recursive: true });
-  fs.writeFileSync(path.join(home, "worker.env"), [
+  fs.writeFileSync(envFile, [
     "PIDGEN_SERVICE_URL=" + value("--server"),
     "PIDGEN_NODE_TOKEN=pidgen_node_fake_credential",
     "PIDGEN_LOCALITY_DOMAIN=" + (value("--host-id") ?? process.env.FAKE_HOSTNAME),
@@ -349,6 +435,8 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
   ctx.env["PIDGEN_WORKER_BIN"] = workerBin;
   ctx.env["FAKE_WORKER_LOG"] = workerLog;
   ctx.env["FAKE_HOSTNAME"] = ctx.hostName;
+  // The credential the service refuses with HTTP 401: the removed worker's (rule 2 of the fake).
+  ctx.env["FAKE_REFUSED_CREDENTIALS"] ??= REVOKED_CREDENTIAL;
 
   const installFetch = ctx.fetch;
   ctx.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -408,12 +496,17 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
     if (url === `${api}/workers`) {
       if (state.workersRefusal) return state.workersRefusal();
       if (started.value) pollsAfterStart++;
-      const connected = started.value && pollsAfterStart >= state.connectAfter && !state.revoked;
+      const env = await readWorkerEnv(ctx.homeDir);
+      // A worker that starts with a revoked credential is refused by the server: never connected.
+      const live = env?.["PIDGEN_NODE_TOKEN"] !== REVOKED_CREDENTIAL;
+      const connected =
+        started.value && pollsAfterStart >= state.connectAfter && !state.revoked && live;
       const listed = state.enrolled || connected;
-      const hostId = (await readWorkerEnv(ctx.homeDir))?.["PIDGEN_LOCALITY_DOMAIN"] ?? HOST;
+      const hostId = env?.["PIDGEN_LOCALITY_DOMAIN"] ?? HOST;
       const own = workerResource(connected, {
         host_id: hostId,
         revoked_at: state.revoked ? "2026-09-28T10:00:00Z" : null,
+        install_id: state.installId ?? null,
       });
       return ok({
         workers: [...state.others, ...(listed ? [own] : [])],
@@ -422,9 +515,34 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
       });
     }
     if (url === `${api}/workers/enrollments` && method === "POST") {
+      const label = (body as { label?: string } | undefined)?.label ?? "";
+      const taken = Object.entries(state.takenNames ?? {}).find(
+        ([name]) => name.toLowerCase() === label.toLowerCase(),
+      );
+      if (taken !== undefined) {
+        return jsonResponse(409, {
+          status: "error",
+          error: {
+            code: "WORKER_NAME_TAKEN",
+            message: `A worker named ${label} already exists in this Account.`,
+            details: { display_name: label, suggested_name: taken[1] },
+            request_id: "req_fake_name_taken",
+          },
+        });
+      }
       state.enrolled = true;
       state.revoked = false;
+      state.installId = (body as { install_id?: string } | undefined)?.install_id ?? null;
       return ok(enrollment(), 201);
+    }
+    if (url.startsWith(`${api}/workers/enrollments/`) && method === "DELETE") {
+      if (state.withdrawRefusal) return state.withdrawRefusal();
+      // A withdrawn enrollment was never redeemed: no worker is listed for it.
+      state.enrolled = false;
+      // The enrollment as listed: without its token and install steps.
+      const rest: Record<string, unknown> = { ...enrollment() };
+      for (const key of ["token", "install_commands", "install", "eula"]) delete rest[key];
+      return ok({ ...rest, state: "revoked", revoked_at: "2026-09-27T10:01:00Z" });
     }
     return installFetch(input, init);
   }) as typeof fetch;
@@ -449,7 +567,14 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
   const scripted = scriptedPrompter(
     (text) => ctx.io.stderr(text),
     answers,
-    (asked) => questions.push(asked.screen),
+    (asked) => {
+      questions.push(asked.screen);
+      // Setup asks the worker's name before every enrollment. A test that scripts no answer for it
+      // presses Enter, accepting the suggestion; one that cares answers it like any other question.
+      if (asked.kind === "text" && asked.message === "Worker name" && answers.length === 0) {
+        answers.push("");
+      }
+    },
   );
   prompts = scripted.asked;
   ctx.prompter = options.noTerminal ? null : () => Promise.resolve(scripted.prompter);
@@ -560,6 +685,9 @@ const OWNED_BY_STEP_COMMANDS = [
   // What setup did, for the person to read: its log is not progress it resumes from.
   /^\.pidgen\/logs\/setup-[^/]+\.log$/,
   /^\.pidgen\/worker\.env$/,
+  // This install's id (`pidgen worker enroll`, as setup's enroll step runs it): kept for good, the
+  // same file pidgen-worker keeps, never progress.
+  /^\.pidgen\/install-id$/,
 ];
 
 async function expectNoProgressState(root: string): Promise<void> {
@@ -584,13 +712,29 @@ function enrollments(h: Harness) {
   return h.requests.filter((request) => request.url.endsWith("/workers/enrollments"));
 }
 
+/** The enrollments setup withdrew: each `DELETE /workers/enrollments/{id}`, by path. */
+function withdrawals(h: Harness): string[] {
+  return h.requests
+    .filter((request) => request.method === "DELETE")
+    .map((request) => new URL(request.url).pathname);
+}
+
+/** Any install id: the body of an enrollment setup creates carries this install's. */
+const ANY_INSTALL_ID = expect.stringMatching(/^[0-9a-f]{32}$/);
+
+/** Writes this install's id, as an earlier setup or pidgen-worker would have. */
+async function writeInstallId(home: string, id: string): Promise<void> {
+  await mkdir(join(home, ".pidgen"), { recursive: true });
+  await writeFile(join(home, ".pidgen", "install-id"), `${id}\n`);
+}
+
 describe("pidgen setup", () => {
   // AC-13099f01c6dd: setup owns its prompts and stderr summaries in every stdout format; with
   // --verbose its commands are shown under each task (without it they are in the setup log).
   it.each([undefined, "json", "table"])(
     "retains setup commands and progress with %s output",
     async (format) => {
-      const h = await harness({ answers: ["", "", "", ""] });
+      const h = await harness({ answers: ["", "", "", "", ""] });
       h.ctx.io.stdoutIsTTY = true;
       const flags = format ? ["--format", format] : [];
       expect(await runCli([...flags, "setup", "--url", SERVER, "--verbose"], h.ctx)).toBe(
@@ -607,7 +751,7 @@ describe("pidgen setup", () => {
         "$ pidgen worker doctor",
       ])
         expect(stderr).toContain(command);
-      expect(h.questions).toHaveLength(4);
+      expect(h.questions).toHaveLength(5);
       expect(stderr).not.toContain(ENROLL_TOKEN);
       // JSON: the frame ends on standard error. A terminal: it ends with the summary card.
       if (format === "json") {
@@ -640,7 +784,7 @@ describe("pidgen setup", () => {
 
   // AC-eb803e163154: the six steps in order, each printed as the pidgen command it runs.
   it("takes a fresh machine to a connected worker, running each step's command in order", async () => {
-    const h = await harness({ answers: ["", "", "", ""] });
+    const h = await harness({ answers: ["", "", "", "", ""] });
 
     const { code, body, stderr, log } = await h.run("setup", "--url", SERVER);
 
@@ -683,9 +827,9 @@ describe("pidgen setup", () => {
     );
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
 
-    // Four questions: the coding agents, each one's sessions, then the install and its licence;
-    // no runtime question while setup offers only the wheel.
-    expect(h.questions).toHaveLength(4);
+    // Five questions: the coding agents, each one's sessions, the install and its licence, then the
+    // worker's name; no runtime question while setup offers only the wheel.
+    expect(h.questions).toHaveLength(5);
     expect(h.questions[0]).toMatch(/coding agents/i);
     expect(h.questions[3]).toMatch(/Install pidgen-worker 1\.0\.0 and accept its licence\?/);
     const { eula } = releaseList();
@@ -704,7 +848,7 @@ describe("pidgen setup", () => {
 
     // Enroll and start: one enrollment, the worker enrolled, then started detached.
     expect(enrollments(h)).toHaveLength(1);
-    expect(enrollments(h)[0]!.body).toEqual({ label: HOST });
+    expect(enrollments(h)[0]!.body).toEqual({ label: HOST, install_id: ANY_INSTALL_ID });
     const worker = await h.workerLog();
     // The detached start (no subcommand) logs whenever its background process runs, which can be
     // after the doctor; the order the CLI ran them in is checked in the log above.
@@ -736,7 +880,7 @@ describe("pidgen setup", () => {
 
   it("asks which Account the worker serves when the User belongs to more than one", async () => {
     const h = await harness({
-      answers: ["Other", "", "", "", ""],
+      answers: ["Other", "", "", "", "", ""],
       state: {
         memberships: [
           { account_id: "ACC-EXAMPLE", account_name: "Example", role: "administrator" },
@@ -749,7 +893,7 @@ describe("pidgen setup", () => {
     const { code, stderr, log } = await h.run("setup", "--url", SERVER);
 
     expect(code).toBe(ExitCode.Ok);
-    expect(h.questions).toHaveLength(5);
+    expect(h.questions).toHaveLength(6);
     expect(h.prompts[0]).toMatchObject({
       kind: "select",
       message: "Which Account will this worker serve?",
@@ -897,7 +1041,8 @@ describe("pidgen setup", () => {
 
   // AC-753c2c51c3a6: re-running resumes, skipping what is already done.
   it("resumes: a signed-in profile, an installed worker and an enrolled, running host are skipped", async () => {
-    const h = await harness({ answers: ["", "", "", "", "", "", ""] });
+    // The first run's four questions and the worker's name, then the re-run's.
+    const h = await harness({ answers: ["", "", "", "", "", "", "", ""] });
     expect((await h.run("setup", "--url", SERVER)).code).toBe(ExitCode.Ok);
     const enrolledBefore = enrollments(h).length;
     const installsBefore = (await h.uvRuns()).length;
@@ -935,7 +1080,8 @@ describe("pidgen setup", () => {
   });
 
   it("resumes with an enrolled host whose worker is not running: starts it without enrolling", async () => {
-    const h = await harness({ answers: ["", "", "", "", "", "", ""] });
+    // The first run's four questions and the worker's name, then the re-run's.
+    const h = await harness({ answers: ["", "", "", "", "", "", "", ""] });
     expect((await h.run("setup", "--url", SERVER)).code).toBe(ExitCode.Ok);
     h.started.value = false;
 
@@ -997,12 +1143,14 @@ describe("pidgen setup", () => {
 
   it("a failed check names step 1 and continues from step 1", async () => {
     const h = await harness({ answers: [] });
-    await writeFile(join(h.pathDir, "git"), "#!/bin/sh\necho 'git version 2.20.1'\n");
+    await writeFile(join(h.pathDir, "git"), "#!/bin/sh\necho 'git version 2.37.9'\n");
 
     const { body, log } = await h.run("setup", "--url", SERVER);
 
     expect(body.error!.message).toContain("Check this machine");
-    expect(body.error!.message).toContain("git: install git with your package manager");
+    expect(body.error!.message).toContain(
+      "git: install git 2.38 or later with your package manager: https://git-scm.com/downloads/linux",
+    );
     expect(body.error!.message).toMatch(/Run `pidgen setup` again to continue from here\.$/);
     expect(log).not.toContain("$ pidgen auth login");
   });
@@ -1152,17 +1300,29 @@ describe("pidgen setup", () => {
     });
   });
 
-  // c1-git: setup's check step runs the doctor's git check.
-  it("stops at the check step when git is older than 2.25, with the platform's fix", async () => {
-    const h = await harness({ answers: ["", "", "", ""] });
-    await writeFile(join(h.pathDir, "git"), "#!/bin/sh\necho 'git version 2.20.1'\n");
+  // c1-git: setup's check step runs the doctor's git check. AC-0616bcdd68cc
+  it("stops at the check step when git is older than 2.38", async () => {
+    const h = await harness({
+      answers: ["", "", "", ""],
+      osRelease: 'NAME="Ubuntu"\nVERSION_ID="22.04"\nID=ubuntu\nID_LIKE=debian\n',
+    });
+    await writeFile(join(h.pathDir, "git"), "#!/bin/sh\necho 'git version 2.37.9'\n");
 
-    const { code, body } = await h.run("setup", "--url", SERVER);
+    const { code, body, stderr } = await h.run("setup", "--url", SERVER);
 
     expect(code).toBe(ExitCode.Unexpected);
     expect(body.error).toMatchObject({ code: "DOCTOR_FAILED", details: { step: "check" } });
-    expect(String(body.error!.details["fix"])).toContain(
-      "git: install git with your package manager",
+    expect(body.error!.message).toContain("Check this machine");
+    const ppa =
+      "sudo add-apt-repository ppa:git-core/ppa && sudo apt update && sudo apt install git";
+    expect(String(body.error!.details["fix"])).toContain(`git: Install git from the git-core PPA`);
+    expect(String(body.error!.details["fix"])).toContain(`\`${ppa}\``);
+    // The screen shows the fix without the backticks.
+    expect(stderr).toContain(ppa);
+    expect(stderr).not.toContain(`\`${ppa}\``);
+    const checks = body.error!.details["checks"] as { id: string; summary: string }[];
+    expect(checks.find((entry) => entry.id === "git")?.summary).toMatch(
+      /^git 2\.37\.9 at .* is older than 2\.38, the oldest the worker supports\.$/,
     );
   });
 
@@ -1204,7 +1364,7 @@ describe("pidgen setup", () => {
   });
 
   it("uses a uv in ~/.local/bin that PATH does not have yet, without asking", async () => {
-    const h = await harness({ answers: ["", "", "", ""], uv: false });
+    const h = await harness({ answers: ["", "", "", "", ""], uv: false });
     const uv = join(h.directory, ".local", "bin", "uv");
     await mkdir(join(uv, ".."), { recursive: true });
     await writeFile(uv, fakeUv());
@@ -1213,7 +1373,7 @@ describe("pidgen setup", () => {
     const { code, stderr, log } = await h.run("setup", "--url", SERVER);
 
     expect(code).toBe(ExitCode.Ok);
-    expect(h.questions).toHaveLength(4);
+    expect(h.questions).toHaveLength(5);
     expect(h.questions[3]).toMatch(/Install pidgen-worker/);
     expect(stderr).not.toContain(UV_INSTALL);
     expect(log).toContain(`$ ${uv} tool install`);
@@ -1244,7 +1404,7 @@ describe("pidgen setup", () => {
 
   it("a failing check stops setup before anything is changed, with each check's fix", async () => {
     const h = await harness({ answers: ["", "", "", ""] });
-    await writeFile(join(h.pathDir, "git"), "#!/bin/sh\necho 'git version 2.20.1'\n");
+    await writeFile(join(h.pathDir, "git"), "#!/bin/sh\necho 'git version 2.37.9'\n");
 
     const { code, body } = await h.run("setup", "--url", SERVER);
 
@@ -1254,7 +1414,7 @@ describe("pidgen setup", () => {
       details: { step: "check", command: "pidgen doctor" },
     });
     expect(String(body.error!.details["fix"])).toContain(
-      "git: install git with your package manager",
+      "git: install git 2.38 or later with your package manager: https://git-scm.com/downloads/linux",
     );
     expect(body.error!.details.steps!.map((entry) => entry.status)).toEqual(["failed"]);
     expect(h.requests.some((request) => request.url.endsWith("/auth/device"))).toBe(false);
@@ -1295,7 +1455,7 @@ describe("pidgen setup", () => {
     expect(step(body, "enroll").command).toBe(
       "pidgen worker enroll --label 'build box' -- --host-id 'build box' && pidgen worker start --detach",
     );
-    expect(enrollments(h)[0]!.body).toEqual({ label: "build box" });
+    expect(enrollments(h)[0]!.body).toEqual({ label: "build box", install_id: ANY_INSTALL_ID });
     // --label is the worker's host id too: pidgen-worker enroll gets it as --host-id.
     const enroll = (await h.workerLog()).find((args) => args[0] === "enroll")!;
     expect(enroll.slice(-2)).toEqual(["--host-id", "build box"]);
@@ -1412,13 +1572,19 @@ describe("pidgen setup enrollment state", () => {
   const LAPTOP = "sams-laptop";
   const otherInstall = (hostId: string) =>
     workerResource(true, { host_id: hostId, created_at: "2026-09-20T09:00:00Z" });
-  const credential = (server = SERVER, hostId = HOST) => [
+  const credential = (server = SERVER, hostId = HOST, token = "pidgen_node_fake_credential") => [
     `PIDGEN_SERVICE_URL=${server}`,
-    "PIDGEN_NODE_TOKEN=pidgen_node_fake_credential",
+    `PIDGEN_NODE_TOKEN=${token}`,
     `PIDGEN_LOCALITY_DOMAIN=${hostId}`,
   ];
   const enrollArgs = async (h: Harness) =>
     (await h.workerLog()).filter((args) => args[0] === "enroll");
+  /** What each `pidgen-worker enroll` did with the token: exchanged it, or skipped it. */
+  const exchanges = async (h: Harness) =>
+    (await readFile(`${h.ctx.env["FAKE_WORKER_LOG"]}.exchanges`, "utf8"))
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => (JSON.parse(line) as string[])[1]);
 
   // state-adopt: another install's worker under this host name is not adopted.
   it("offers the next free name when the Account lists another install's worker under this host name", async () => {
@@ -1439,11 +1605,11 @@ describe("pidgen setup enrollment state", () => {
       "It isn't this install: it keeps its settings in another folder on this machine.",
     );
     expect(h.questions).toHaveLength(5);
-    expect(h.prompts[4]).toMatchObject({ kind: "text", message: "Name for this worker" });
+    expect(h.prompts[4]).toMatchObject({ kind: "text", message: "Worker name" });
     expect(h.questions[4]).toContain(`│  ${LAPTOP}-2\n`);
     expect(stderr).toContain(`◇  Worker name · ${LAPTOP}-2\n`);
     expect(enrollments(h)).toHaveLength(1);
-    expect(enrollments(h)[0]!.body).toEqual({ label: `${LAPTOP}-2` });
+    expect(enrollments(h)[0]!.body).toEqual({ label: `${LAPTOP}-2`, install_id: ANY_INSTALL_ID });
     const [enroll] = await enrollArgs(h);
     expect(enroll!.slice(-2)).toEqual(["--host-id", `${LAPTOP}-2`]);
     expect(log).toContain(`$ pidgen worker enroll --label ${LAPTOP}-2 -- --host-id ${LAPTOP}-2`);
@@ -1518,26 +1684,54 @@ describe("pidgen setup enrollment state", () => {
     expect(step(body, "enroll")).toMatchObject({ host_id: "build-box", connected: true });
   });
 
-  it("enrolls when worker.env's credential is for another server", async () => {
+  // AC-27bdbf24464e: a credential for another server stops setup before any enrollment is created.
+  it("stops before enrolling when worker.env's credential is for another server, naming the file and that server", async () => {
+    const other = "https://other.example.com";
     const h = await harness({ answers: [...ANSWERS, ""], state: { others: [otherInstall(HOST)] } });
-    await writeWorkerEnv(h.ctx.homeDir, credential("https://other.example.com"));
+    await writeWorkerEnv(h.ctx.homeDir, credential(other));
+    const envPath = join(h.ctx.homeDir, ".pidgen", "worker.env");
+    const before = await readFile(envPath, "utf8");
 
-    const { code } = await h.run("setup", "--url", SERVER);
+    const { code, body, stderr, log } = await h.run("setup", "--url", SERVER);
 
-    expect(code).toBe(ExitCode.Ok);
-    expect(enrollments(h)).toHaveLength(1);
-    expect((await enrollArgs(h))[0]!.slice(-2)).toEqual(["--host-id", `${HOST}-2`]);
+    expect(code).toBe(ExitCode.Refused);
+    expect(body.error).toMatchObject({
+      code: "WORKER_CREDENTIAL_PRESENT",
+      details: { step: "enroll", path: envPath, server: other },
+    });
+    expect(body.error!.message).toContain(envPath);
+    expect(body.error!.message).toContain(other);
+    expect(enrollments(h)).toHaveLength(0);
+    expect(await enrollArgs(h)).toEqual([]);
+    expect(h.started.value).toBe(false);
+    expect(await readFile(envPath, "utf8")).toBe(before);
+    // One block: the headline names the file and the server it points at.
+    expect(stderr).toMatch(
+      /■ {2}.*worker\.env holds a worker credential for https:\/\/other\.example\.com/,
+    );
+    expect(stderr).not.toContain("pidgen_node_fake_credential");
+    expect(log).not.toContain("pidgen_node_fake_credential");
   });
 
-  it("enrolls when the server does not list worker.env's host id", async () => {
-    const h = await harness({ answers: ANSWERS });
-    await writeWorkerEnv(h.ctx.homeDir, credential(SERVER, "gone-box"));
+  // A credential for this server that the Account does not list is no longer live: as revoked. The
+  // Account lists no removed worker by its name, so the suggestion is this host's name.
+  it("asks to enroll again when the server does not list worker.env's host id, and replaces it", async () => {
+    const h = await harness({ answers: [...ANSWERS, "", ""] });
+    await writeWorkerEnv(h.ctx.homeDir, credential(SERVER, "gone-box", REVOKED_CREDENTIAL));
 
-    const { code } = await h.run("setup", "--url", SERVER);
+    const { code, body } = await h.run("setup", "--url", SERVER);
 
     expect(code).toBe(ExitCode.Ok);
+    expect(h.prompts[4]).toMatchObject({
+      kind: "confirm",
+      message: "This machine's worker was removed from Example. Enroll it again?",
+    });
+    expect(h.prompts[5]).toMatchObject({ kind: "text", message: "Worker name" });
+    expect(h.questions[5]).toContain(`│  ${HOST}\n`);
     expect(enrollments(h)).toHaveLength(1);
     expect((await enrollArgs(h))[0]!.slice(-2)).toEqual(["--host-id", HOST]);
+    expect(await exchanges(h)).toEqual(["done"]);
+    expect(step(body, "enroll")).toMatchObject({ host_id: HOST, connected: true });
   });
 
   it("with a credential that cannot read GET /workers, the local credential decides", async () => {
@@ -1562,25 +1756,52 @@ describe("pidgen setup enrollment state", () => {
   });
 
   // state-revoked: a revoked credential is enrolled again only after the person agrees.
-  it("asks whether to enroll again when the server lists this home's worker as revoked", async () => {
+  // AC-031e28814063: worker.env is moved aside before pidgen-worker enroll runs, so the worker
+  // exchanges the new enrollment and starts and connects with the new credential.
+  it("asks whether to enroll again when the server lists this home's worker as revoked, and replaces its credential", async () => {
     const h = await harness({
-      answers: [...ANSWERS, ""],
+      answers: [...ANSWERS, "", ""],
       state: { enrolled: true, revoked: true },
     });
-    await writeWorkerEnv(h.ctx.homeDir, credential());
+    await writeWorkerEnv(h.ctx.homeDir, credential(SERVER, HOST, REVOKED_CREDENTIAL));
+    const pidgenHome = join(h.ctx.homeDir, ".pidgen");
 
-    const { code, body } = await h.run("setup", "--url", SERVER);
+    const { code, body, stderr, log } = await h.run("setup", "--url", SERVER);
 
+    expect(body.error, stderr).toBeNull();
     expect(code).toBe(ExitCode.Ok);
-    expect(h.questions).toHaveLength(5);
+    expect(h.questions).toHaveLength(6);
     expect(h.prompts[4]).toMatchObject({
       kind: "confirm",
       message: "This machine's worker was removed from Example. Enroll it again?",
     });
     expect(h.questions[4]).toContain("│  ● Yes  ○ No");
+    expect(h.prompts[5]).toMatchObject({ kind: "text", message: "Worker name" });
+    expect(h.questions[5]).toContain(`│  ${HOST}\n`);
     expect(enrollments(h)).toHaveLength(1);
     expect((await enrollArgs(h))[0]!.slice(-2)).toEqual(["--host-id", HOST]);
-    expect(step(body, "enroll")).toMatchObject({ host_id: HOST, connected: true });
+    // The fake pidgen-worker found no saved credential, so it redeemed the new enrollment.
+    expect(await exchanges(h)).toEqual(["done"]);
+    const moved = (await readdir(pidgenHome)).filter((name) =>
+      /^worker\.env\.replaced-\d{8}T\d{6}Z$/.test(name),
+    );
+    expect(moved).toHaveLength(1);
+    const movedPath = join(pidgenHome, moved[0]!);
+    expect(await readFile(movedPath, "utf8")).toContain(REVOKED_CREDENTIAL);
+    expect((await stat(movedPath)).mode & 0o777).toBe(0o600);
+    expect((await readWorkerEnv(h.ctx.homeDir))?.["PIDGEN_NODE_TOKEN"]).toBe(
+      "pidgen_node_fake_credential",
+    );
+    // The setup log records the move by path, and the command with the flag; never the token.
+    expect(log).toContain(
+      `$ pidgen worker enroll --replace-credential --label ${HOST} -- --host-id ${HOST}`,
+    );
+    expect(log).toContain(movedPath);
+    expect(log).not.toContain(REVOKED_CREDENTIAL);
+    expect(stderr).not.toContain(REVOKED_CREDENTIAL);
+    expect(JSON.stringify(body)).not.toContain(REVOKED_CREDENTIAL);
+    expect(h.started.value).toBe(true);
+    expect(step(body, "enroll")).toMatchObject({ status: "done", host_id: HOST, connected: true });
   });
 
   it("declining to enroll a revoked worker again stops setup without enrolling or starting", async () => {
@@ -1632,28 +1853,633 @@ describe("pidgen setup enrollment state", () => {
 
     expect(code).toBe(ExitCode.Ok);
     expect(h.questions).toHaveLength(4);
-    expect(enrollments(h)[0]!.body).toEqual({ label: "studio" });
+    expect(enrollments(h)[0]!.body).toEqual({ label: "studio", install_id: ANY_INSTALL_ID });
     expect((await enrollArgs(h))[0]!.slice(-2)).toEqual(["--host-id", "studio"]);
     expect(step(body, "enroll")).toMatchObject({ host_id: "studio", connected: true });
   });
 
-  it("--label naming another install's worker stops before enrolling", async () => {
+  // AC-43bd1897c9e5, AC-674ba019b050: a name the server refuses (HTTP 409 WORKER_HOST_TAKEN), which
+  // the Account's list cannot show, is met with one line and the name question; setup enrolls under
+  // the answer with the same enrollment and goes on to a running worker.
+  it("recovers from WORKER_HOST_TAKEN: one line, the name question, then the same enrollment under the next free name", async () => {
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: [...ANSWERS, "", ""],
+      env: { FAKE_TAKEN_HOSTS: LAPTOP },
+    });
+
+    const { code, body, stderr, log } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    const line = `│\n▲  ${LAPTOP} is taken in Pidgen, so this worker needs another name.\n`;
+    expect(stderr).toContain(line);
+    expect(stderr.split("is taken in Pidgen")).toHaveLength(2);
+    expect(h.questions).toHaveLength(6);
+    expect(h.prompts[4]).toMatchObject({ kind: "text", message: "Worker name" });
+    expect(h.questions[4]).toContain(`│  ${LAPTOP}\n`);
+    expect(h.prompts[5]).toMatchObject({ kind: "text", message: "Worker name" });
+    expect(h.questions[5]).toContain(`│  ${LAPTOP}-2\n`);
+    order(stderr, line, `◇  Worker name · ${LAPTOP}-2\n`, `Enrolled as ${LAPTOP}-2 in Example`);
+    expect(stderr).not.toContain("ENROLL_FAILED");
+    expect(stderr).not.toContain("■");
+    // One enrollment: its unspent token is offered again under the new name.
+    expect(enrollments(h)).toHaveLength(1);
+    const runs = await enrollArgs(h);
+    expect(runs.map((args) => args.slice(-2))).toEqual([
+      ["--host-id", LAPTOP],
+      ["--host-id", `${LAPTOP}-2`],
+    ]);
+    expect(runs[1]![2]).toBe(runs[0]![2]);
+    expect(await exchanges(h)).toEqual(["done"]);
+    expect(log).toContain(`${LAPTOP} is taken in Pidgen (HTTP 409 WORKER_HOST_TAKEN)`);
+    expect(log).not.toContain(ENROLL_TOKEN);
+    expect(h.started.value).toBe(true);
+    expect(step(body, "enroll")).toMatchObject({
+      status: "done",
+      host_id: `${LAPTOP}-2`,
+      connected: true,
+      command: `pidgen worker enroll --label ${LAPTOP}-2 -- --host-id ${LAPTOP}-2 && pidgen worker start --detach`,
+    });
+  });
+
+  it("a refused next name is refused too: the question comes again, defaulting to the one after", async () => {
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: [...ANSWERS, "", "", ""],
+      env: { FAKE_TAKEN_HOSTS: `${LAPTOP},${LAPTOP}-2` },
+    });
+
+    const { code, stderr } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Ok);
+    expect(stderr).toContain(
+      `▲  ${LAPTOP}-2 is taken in Pidgen, so this worker needs another name.`,
+    );
+    expect(h.questions[6]).toContain(`│  ${LAPTOP}-3\n`);
+    expect(enrollments(h)).toHaveLength(1);
+    expect((await enrollArgs(h)).map((args) => args.at(-1))).toEqual([
+      LAPTOP,
+      `${LAPTOP}-2`,
+      `${LAPTOP}-3`,
+    ]);
+    expect(stderr).toContain(`Enrolled as ${LAPTOP}-3 in Example`);
+  });
+
+  it("the name question refuses a name the server already refused in this run", async () => {
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: [...ANSWERS, "", LAPTOP, "studio"],
+      env: { FAKE_TAKEN_HOSTS: LAPTOP },
+    });
+
+    const { code } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.questions).toHaveLength(7);
+    expect(h.questions[6]).toContain(`▲  ${LAPTOP} is taken in Pidgen`);
+    expect((await enrollArgs(h)).at(-1)!.at(-1)).toBe("studio");
+  });
+
+  // AC-674ba019b050: when the refused token cannot be offered again, one new enrollment is made, and
+  // the log names the one left unused.
+  it("when the same enrollment fails under the new name, enrolls once more with a new one and logs the unused one", async () => {
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: [...ANSWERS, "", ""],
+      env: { FAKE_TAKEN_HOSTS: LAPTOP, FAKE_FAIL_ENROLL_RUN: "2" },
+    });
+
+    const { code, body, stderr, log } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(enrollments(h)).toHaveLength(2);
+    expect(enrollments(h)[1]!.body).toEqual({ label: `${LAPTOP}-2`, install_id: ANY_INSTALL_ID });
+    expect((await enrollArgs(h)).map((args) => args.at(-1))).toEqual([
+      LAPTOP,
+      `${LAPTOP}-2`,
+      `${LAPTOP}-2`,
+    ]);
+    expect(log).toMatch(/enrollment enr-example-1 .*unused.*It was withdrawn\./i);
+    // AC-b25f2e3c4fcc: the enrollment it could not use is withdrawn, not left waiting.
+    expect(withdrawals(h)).toEqual(["/api/v1/workers/enrollments/enr-example-1"]);
+    expect(step(body, "enroll")).toMatchObject({ host_id: `${LAPTOP}-2`, connected: true });
+  });
+
+  // AC-60239736b93c: --label answered the name question in advance, so a refusal stops setup.
+  it("--label refused by the server stops at the enroll step with one block naming the next free name, and starts nothing", async () => {
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: ANSWERS,
+      env: { FAKE_TAKEN_HOSTS: "studio" },
+    });
+
+    const { code, body, stderr } = await h.run("setup", "--url", SERVER, "--label", "studio");
+
+    expect(code).toBe(ExitCode.Refused);
+    expect(body.error).toMatchObject({
+      code: "WORKER_HOST_TAKEN",
+      details: {
+        step: "enroll",
+        host_id: "studio",
+        fix: expect.stringContaining("`pidgen setup --label studio-2`"),
+      },
+    });
+    expect(h.questions).toHaveLength(4);
+    expect(enrollments(h)).toHaveLength(1);
+    expect(await enrollArgs(h)).toHaveLength(1);
+    expect(h.started.value).toBe(false);
+    expect(stderr.match(/■ {2}/g)).toHaveLength(1);
+    expect(stderr).toMatch(/■ {2}studio is taken in Pidgen/);
+    expect(stderr).toContain("pidgen setup --label studio-2");
+    expect(stderr).not.toContain("Workers page");
+    // AC-b25f2e3c4fcc: the refused enrollment is withdrawn before setup stops.
+    expect(withdrawals(h)).toEqual(["/api/v1/workers/enrollments/enr-example-1"]);
+  });
+
+  // AC-4768245ea412: a removed worker is offered its own name first; only a refusal moves it on.
+  it("re-enrolling a revoked worker tries its own name first and falls back only when the server refuses it", async () => {
+    const h = await harness({
+      answers: [...ANSWERS, "", "", ""],
+      state: { enrolled: true, revoked: true },
+      env: { FAKE_TAKEN_HOSTS: HOST },
+    });
+    await writeWorkerEnv(h.ctx.homeDir, credential(SERVER, HOST, REVOKED_CREDENTIAL));
+
+    const { code, body, stderr } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.prompts[4]).toMatchObject({ kind: "confirm" });
+    expect(h.prompts[5]).toMatchObject({ kind: "text", message: "Worker name" });
+    expect(h.questions[5]).toContain(`│  ${HOST}\n`);
+    expect(h.prompts[6]).toMatchObject({ kind: "text", message: "Worker name" });
+    expect(h.questions[6]).toContain(`│  ${HOST}-2\n`);
+    expect((await enrollArgs(h)).map((args) => args.at(-1))).toEqual([HOST, `${HOST}-2`]);
+    expect(enrollments(h)).toHaveLength(1);
+    expect(step(body, "enroll")).toMatchObject({ host_id: `${HOST}-2`, connected: true });
+  });
+
+  // AC-c41e956cfcf0: a --label the Account already lists is taken: setup stops, exit 5, naming the
+  // suggested name in its fix, and never asks.
+  it("--label naming another install's worker stops before enrolling with WORKER_NAME_TAKEN, exit 5", async () => {
     const h = await harness({
       hostName: LAPTOP,
       answers: ANSWERS,
       state: { others: [otherInstall(LAPTOP)] },
     });
 
-    const { code, body } = await h.run("setup", "--url", SERVER, "--label", LAPTOP);
+    const { code, body } = await h.run("setup", "--url", SERVER, "--label", LAPTOP.toUpperCase());
 
-    expect(code).toBe(ExitCode.Usage);
+    expect(code).toBe(ExitCode.Refused);
     expect(body.error).toMatchObject({
-      // root-json: a --label that cannot be used is a usage error, as before.
-      code: "CLI_USAGE",
-      details: { step: "enroll", fix: expect.stringContaining(`--label ${LAPTOP}-2`) },
+      code: "WORKER_NAME_TAKEN",
+      details: {
+        step: "enroll",
+        display_name: LAPTOP.toUpperCase(),
+        suggested_name: `${LAPTOP.toUpperCase()}-2`,
+        fix: expect.stringContaining(`\`pidgen setup --label ${LAPTOP.toUpperCase()}-2\``),
+      },
     });
+    expect(h.questions).toHaveLength(4);
     expect(enrollments(h)).toHaveLength(0);
     expect(h.started.value).toBe(false);
+  });
+
+  // AC-315b0c1692aa: on a fresh machine the name question is asked before any enrollment exists,
+  // with this host's name filled in; Enter accepts it.
+  it("always asks the worker's name before enrolling, suggesting this host's name, and Enter accepts it", async () => {
+    let before: number | null = null;
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: [
+        ...ANSWERS,
+        () => {
+          before = enrollments(h).length;
+          return "";
+        },
+      ],
+    });
+
+    const { code, body, stderr, log } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.questions).toHaveLength(5);
+    expect(h.prompts[4]).toMatchObject({ kind: "text", message: "Worker name" });
+    expect(h.questions[4]).toContain(`│  ${LAPTOP}\n`);
+    expect(before).toBe(0);
+    expect(stderr).toContain(`◇  Worker name · ${LAPTOP}\n`);
+    expect(stderr).not.toContain("already has a worker named");
+    expect(enrollments(h)).toHaveLength(1);
+    expect(enrollments(h)[0]!.body).toEqual({ label: LAPTOP, install_id: ANY_INSTALL_ID });
+    expect((await enrollArgs(h))[0]!.slice(-2)).toEqual(["--host-id", LAPTOP]);
+    expect(log).toContain(`Suggested worker name ${LAPTOP}: this host's name.`);
+    expect(step(body, "enroll")).toMatchObject({ status: "done", host_id: LAPTOP });
+  });
+
+  // AC-315b0c1692aa: a live worker holding this host's name, in any case, makes the suggestion the
+  // next free name.
+  it("suggests the next free name when a live worker holds this host's name in another case", async () => {
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: [...ANSWERS, ""],
+      state: { others: [otherInstall(LAPTOP.toUpperCase())] },
+    });
+
+    const { code, log } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.prompts[4]).toMatchObject({ kind: "text", message: "Worker name" });
+    expect(h.questions[4]).toContain(`│  ${LAPTOP}-2\n`);
+    expect(enrollments(h)[0]!.body).toEqual({ label: `${LAPTOP}-2`, install_id: ANY_INSTALL_ID });
+    expect(log).toContain(`Suggested worker name ${LAPTOP}-2:`);
+  });
+
+  // AC-315b0c1692aa: the credential names a worker the Account lists as removed: its name is the
+  // suggestion, not this host's name.
+  it("suggests the removed worker's own name when this machine's credential names it", async () => {
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: [...ANSWERS, "", ""],
+      state: { enrolled: true, revoked: true },
+    });
+    await writeWorkerEnv(h.ctx.homeDir, credential(SERVER, "old-box", REVOKED_CREDENTIAL));
+
+    const { code, body, stderr, log } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.prompts[4]).toMatchObject({ kind: "confirm" });
+    expect(h.prompts[5]).toMatchObject({ kind: "text", message: "Worker name" });
+    expect(h.questions[5]).toContain("│  old-box\n");
+    expect(enrollments(h)[0]!.body).toEqual({ label: "old-box", install_id: ANY_INSTALL_ID });
+    expect((await enrollArgs(h))[0]!.slice(-2)).toEqual(["--host-id", "old-box"]);
+    expect(log).toContain("Suggested worker name old-box: this machine's removed worker's name.");
+  });
+
+  // AC-3be7f35ed28d: an edited name is the enrollment's label and the worker's host id.
+  it("enrolls under a typed name: the enrollment's --label and the worker's --host-id", async () => {
+    const h = await harness({ hostName: LAPTOP, answers: [...ANSWERS, "  studio  "] });
+
+    const { code, body, log } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.questions[4]).toContain(`│  ${LAPTOP}\n`);
+    expect(enrollments(h)).toHaveLength(1);
+    expect(enrollments(h)[0]!.body).toEqual({ label: "studio", install_id: ANY_INSTALL_ID });
+    expect((await enrollArgs(h))[0]!.slice(-2)).toEqual(["--host-id", "studio"]);
+    expect(log).toContain("$ pidgen worker enroll --label studio -- --host-id studio");
+    expect(step(body, "enroll")).toMatchObject({
+      host_id: "studio",
+      command:
+        "pidgen worker enroll --label studio -- --host-id studio && pidgen worker start --detach",
+    });
+  });
+
+  it("the name question refuses an empty name, one over 100 characters and a live worker's name in any case", async () => {
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: [...ANSWERS, "   ", "x".repeat(101), "BUILD-BOX", "studio"],
+      state: { others: [otherInstall("build-box")] },
+    });
+
+    const { code } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.questions).toHaveLength(8);
+    expect(h.questions[5]).toContain("▲  Enter a name for this worker.");
+    expect(h.questions[6]).toContain("at most 100 characters");
+    expect(h.questions[7]).toContain("▲  BUILD-BOX is taken");
+    expect(enrollments(h)[0]!.body).toEqual({ label: "studio", install_id: ANY_INSTALL_ID });
+  });
+
+  // AC-912e7fb02a03: the server refuses the name (409 WORKER_NAME_TAKEN): nothing was created, so
+  // setup asks again with the server's suggested name filled in and enrolls under the answer.
+  it("asks again with the server's suggested name when the enrollment is refused with WORKER_NAME_TAKEN", async () => {
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: [...ANSWERS, "", ""],
+      state: { takenNames: { [LAPTOP]: `${LAPTOP}-7` } },
+    });
+
+    const { code, body, stderr, log } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    const line = `│\n▲  ${LAPTOP} is taken in Pidgen, so this worker needs another name.\n`;
+    expect(stderr).toContain(line);
+    expect(stderr).not.toContain("■");
+    expect(h.questions).toHaveLength(6);
+    expect(h.prompts[5]).toMatchObject({ kind: "text", message: "Worker name" });
+    expect(h.questions[5]).toContain(`│  ${LAPTOP}-7\n`);
+    order(stderr, line, `◇  Worker name · ${LAPTOP}-7\n`, `Enrolled as ${LAPTOP}-7 in Example`);
+    expect(enrollments(h).map((request) => request.body)).toEqual([
+      { label: LAPTOP, install_id: ANY_INSTALL_ID },
+      { label: `${LAPTOP}-7`, install_id: ANY_INSTALL_ID },
+    ]);
+    // The refused name created no enrollment, so pidgen-worker ran once, under the new name.
+    expect((await enrollArgs(h)).map((args) => args.at(-1))).toEqual([`${LAPTOP}-7`]);
+    expect(log).toContain(
+      `${LAPTOP} is taken in Pidgen (HTTP 409 WORKER_NAME_TAKEN): no enrollment was created; Pidgen suggests ${LAPTOP}-7.`,
+    );
+    expect(h.started.value).toBe(true);
+    expect(step(body, "enroll")).toMatchObject({ status: "done", host_id: `${LAPTOP}-7` });
+  });
+
+  it("the question asked again after WORKER_NAME_TAKEN refuses the refused name", async () => {
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: [...ANSWERS, "", LAPTOP.toUpperCase(), "studio"],
+      state: { takenNames: { [LAPTOP]: `${LAPTOP}-7` } },
+    });
+
+    const { code } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.questions).toHaveLength(7);
+    expect(h.questions[6]).toContain(`▲  ${LAPTOP.toUpperCase()} is taken in Pidgen`);
+    expect(enrollments(h).at(-1)!.body).toEqual({ label: "studio", install_id: ANY_INSTALL_ID });
+  });
+
+  // AC-c41e956cfcf0: --label never prompts: a free one enrolls at once.
+  it("a free --label never asks the name question", async () => {
+    const h = await harness({ hostName: LAPTOP, answers: ANSWERS });
+
+    const { code } = await h.run("setup", "--url", SERVER, "--label", "studio");
+
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.questions).toHaveLength(4);
+    expect(h.prompts.some((prompt) => prompt.message === "Worker name")).toBe(false);
+    expect(enrollments(h)[0]!.body).toEqual({ label: "studio", install_id: ANY_INSTALL_ID });
+  });
+
+  // AC-c41e956cfcf0, AC-912e7fb02a03: a --label the server refuses stops setup, exit 5, with the
+  // server's suggested name in the fix; nothing is asked or started.
+  it("--label refused with WORKER_NAME_TAKEN stops at the enroll step, exit 5, naming the server's suggestion", async () => {
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: ANSWERS,
+      state: { takenNames: { studio: "studio-4" } },
+    });
+
+    const { code, body, stderr } = await h.run("setup", "--url", SERVER, "--label", "studio");
+
+    expect(code).toBe(ExitCode.Refused);
+    expect(body.error).toMatchObject({
+      code: "WORKER_NAME_TAKEN",
+      details: {
+        step: "enroll",
+        display_name: "studio",
+        suggested_name: "studio-4",
+        fix: expect.stringContaining("`pidgen setup --label studio-4`"),
+      },
+    });
+    expect(h.questions).toHaveLength(4);
+    expect(enrollments(h)).toHaveLength(1);
+    expect(await enrollArgs(h)).toEqual([]);
+    expect(h.started.value).toBe(false);
+    expect(stderr.match(/■ {2}/g)).toHaveLength(1);
+    expect(stderr).toMatch(/■ {2}studio is taken in Pidgen/);
+    expect(stderr).toContain("pidgen setup --label studio-4");
+  });
+});
+
+// AC-d5cd762a88e7, AC-111e49710df5: setup recognises this install's worker by the install id it
+// keeps in the worker home, even when the credential file is gone.
+describe("pidgen setup and this install's id", () => {
+  const ANSWERS = ["", "", "", ""];
+  const LAPTOP = "sams-laptop";
+  const ID = "0123456789abcdef0123456789abcdef";
+  const OTHER_ID = "fedcba9876543210fedcba9876543210";
+  const otherInstall = (hostId: string) =>
+    workerResource(true, { host_id: hostId, created_at: "2026-09-20T09:00:00Z" });
+  const workerReads = (h: Harness) =>
+    h.requests.filter((request) => request.method === "GET" && request.url.endsWith("/workers"))
+      .length;
+  const enrollArgs = async (h: Harness) =>
+    (await h.workerLog()).filter((args) => args[0] === "enroll");
+
+  it("creates the install id on a fresh machine and sends it with the enrollment", async () => {
+    const h = await harness({ hostName: LAPTOP, answers: ANSWERS });
+
+    const { code } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Ok);
+    const text = await readFile(join(h.ctx.homeDir, ".pidgen", "install-id"), "utf8");
+    expect(text).toMatch(/^[0-9a-f]{32}\n$/);
+    expect(enrollments(h).map((request) => request.body)).toEqual([
+      { label: LAPTOP, install_id: text.trim() },
+    ]);
+  });
+
+  it("names this install's live worker whose credential is missing, asks to replace it, and once it is listed removed enrolls under its name", async () => {
+    const mine = workerResource(true, {
+      host_id: "build-box",
+      install_id: ID,
+      created_at: "2026-09-20T09:00:00Z",
+    });
+    let atQuestion: number | null = null;
+    let readsAtRemoval = 0;
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: [
+        ...ANSWERS,
+        () => {
+          atQuestion = enrollments(h).length;
+          return "y";
+        },
+        // Not removed yet: setup reads the list again, says so, and asks again.
+        "y",
+        () => {
+          mine.revoked_at = "2026-09-28T10:00:00Z";
+          mine.connected = false;
+          readsAtRemoval = workerReads(h);
+          return "y";
+        },
+      ],
+      state: { others: [mine, otherInstall(LAPTOP)] },
+    });
+    await writeInstallId(h.ctx.homeDir, ID);
+
+    const { code, body, stderr, log } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(stderr).toContain(
+      "This install's worker build-box is still listed but its credential is missing.",
+    );
+    expect(h.prompts[4]).toMatchObject({ kind: "confirm", message: "Replace build-box?" });
+    // Nothing was enrolled beside the live worker while the person decided.
+    expect(atQuestion).toBe(0);
+    expect(stderr).toContain("Remove build-box on the Workers page");
+    expect(h.prompts[5]).toMatchObject({
+      kind: "confirm",
+      message: "Removed build-box on the Workers page?",
+    });
+    expect(stderr).toContain("build-box is still listed live in Example");
+    expect(h.prompts[6]).toMatchObject({ kind: "confirm" });
+    expect(workerReads(h)).toBeGreaterThan(readsAtRemoval);
+    expect(h.prompts[7]).toMatchObject({ kind: "text", message: "Worker name" });
+    expect(h.questions[7]).toContain("│  build-box\n");
+    expect(enrollments(h).map((request) => request.body)).toEqual([
+      { label: "build-box", install_id: ID },
+    ]);
+    expect((await enrollArgs(h))[0]!.slice(-2)).toEqual(["--host-id", "build-box"]);
+    expect(log).toContain("build-box is listed as removed");
+    expect(step(body, "enroll")).toMatchObject({ host_id: "build-box", connected: true });
+  });
+
+  it("declining to replace this install's live worker suggests a new name", async () => {
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: [...ANSWERS, "n", ""],
+      state: {
+        others: [workerResource(true, { host_id: "build-box", install_id: ID })],
+      },
+    });
+    await writeInstallId(h.ctx.homeDir, ID);
+
+    const { code, body, stderr, log } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.prompts[4]).toMatchObject({ kind: "confirm", message: "Replace build-box?" });
+    expect(h.prompts[5]).toMatchObject({ kind: "text", message: "Worker name" });
+    expect(h.questions[5]).toContain("│  build-box-2\n");
+    expect(stderr).not.toContain("It isn't this install");
+    expect(log).toContain("Suggested worker name build-box-2:");
+    expect(enrollments(h).map((request) => request.body)).toEqual([
+      { label: "build-box-2", install_id: ID },
+    ]);
+  });
+
+  it("with this install's worker listed removed, suggests its name: the newest one's", async () => {
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: [...ANSWERS, ""],
+      state: {
+        others: [
+          workerResource(false, {
+            host_id: "box-a",
+            install_id: ID,
+            created_at: "2026-09-01T09:00:00Z",
+            revoked_at: "2026-09-02T09:00:00Z",
+          }),
+          workerResource(false, {
+            host_id: "box-b",
+            install_id: ID,
+            created_at: "2026-09-20T09:00:00Z",
+            revoked_at: "2026-09-21T09:00:00Z",
+          }),
+          workerResource(true, { host_id: "box-c", install_id: OTHER_ID }),
+        ],
+      },
+    });
+    await writeInstallId(h.ctx.homeDir, ID);
+
+    const { code, body, stderr, log } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.prompts.slice(4).filter((prompt) => prompt.kind === "confirm")).toHaveLength(0);
+    expect(h.prompts[4]).toMatchObject({ kind: "text", message: "Worker name" });
+    expect(h.questions[4]).toContain("│  box-b\n");
+    expect(log).toContain("Suggested worker name box-b: this install's removed worker's name.");
+    expect(enrollments(h).map((request) => request.body)).toEqual([
+      { label: "box-b", install_id: ID },
+    ]);
+  });
+
+  it("another install's worker under this host's name is still not this install's", async () => {
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: [...ANSWERS, ""],
+      state: { others: [workerResource(true, { host_id: LAPTOP, install_id: OTHER_ID })] },
+    });
+    await writeInstallId(h.ctx.homeDir, ID);
+
+    const { code, stderr } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Ok);
+    expect(stderr).toContain("It isn't this install");
+    expect(h.prompts.some((prompt) => prompt.message.startsWith("Replace"))).toBe(false);
+    expect(h.questions[4]).toContain(`│  ${LAPTOP}-2\n`);
+  });
+
+  it("an invalid install-id is left alone with a note, and the enrollment carries no id", async () => {
+    const h = await harness({ hostName: LAPTOP, answers: ANSWERS });
+    await mkdir(join(h.ctx.homeDir, ".pidgen"), { recursive: true });
+    const file = join(h.ctx.homeDir, ".pidgen", "install-id");
+    await writeFile(file, "not an id\n");
+
+    const { code, log } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Ok);
+    expect(await readFile(file, "utf8")).toBe("not an id\n");
+    expect(log).toContain("is not an install id");
+    expect(enrollments(h).map((request) => request.body)).toEqual([{ label: LAPTOP }]);
+  });
+});
+
+// AC-b25f2e3c4fcc: a run that fails after creating an enrollment withdraws it before exiting.
+describe("pidgen setup withdraws an enrollment it cannot use", () => {
+  const ANSWERS = ["", "", "", ""];
+  const WITHDRAW = "/api/v1/workers/enrollments/enr-example-1";
+
+  it("pidgen-worker enroll fails: DELETE the enrollment, then ENROLL_FAILED, exit 1, saying it was withdrawn", async () => {
+    const h = await harness({ answers: ANSWERS, env: { FAKE_FAIL_ENROLL_RUN: "1" } });
+
+    const { code, body, stderr, log } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Unexpected);
+    expect(body.error).toMatchObject({
+      code: "ENROLL_FAILED",
+      details: {
+        step: "enroll",
+        exit_code: 1,
+        withdrawn: true,
+        fix: expect.stringContaining("was withdrawn"),
+      },
+    });
+    expect(enrollments(h)).toHaveLength(1);
+    expect(withdrawals(h)).toEqual([WITHDRAW]);
+    expect(stderr).toContain("was withdrawn");
+    expect(log).toContain("Withdrew the enrollment enr-example-1");
+    expect(h.started.value).toBe(false);
+    expect(log).not.toContain(ENROLL_TOKEN);
+  });
+
+  it("a failed withdraw is a note: ENROLL_FAILED, exit 1, and the enrollment expires on its own", async () => {
+    const h = await harness({
+      answers: ANSWERS,
+      env: { FAKE_FAIL_ENROLL_RUN: "1" },
+      state: { withdrawRefusal: () => refusal(500, "INTERNAL_ERROR", "Something went wrong.") },
+    });
+
+    const { code, body, log } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Unexpected);
+    expect(body.error).toMatchObject({
+      code: "ENROLL_FAILED",
+      details: {
+        withdrawn: false,
+        withdraw_error: { code: "INTERNAL_ERROR" },
+        fix: expect.stringContaining("expires on its own"),
+      },
+    });
+    expect(withdrawals(h)).toEqual([WITHDRAW]);
+    expect(log).toContain("Could not withdraw the enrollment enr-example-1");
+  });
+
+  it("a completed setup withdraws nothing", async () => {
+    const h = await harness({ answers: ANSWERS });
+
+    const { code } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Ok);
+    expect(withdrawals(h)).toEqual([]);
   });
 });
 
@@ -1796,8 +2622,8 @@ describe("pidgen setup coding agents", () => {
     );
 
     expect(code).toBe(ExitCode.Ok);
-    // Only each agent's sessions, then the install.
-    expect(h.questions).toHaveLength(3);
+    // Only each agent's sessions, the install, then the worker's name.
+    expect(h.questions).toHaveLength(4);
     expect(h.questions.some((question) => /Which coding agents/.test(question))).toBe(false);
     expect(h.questions[2]).toMatch(/Install pidgen-worker/);
     expect(stderr).toContain("◇  Coding agents · Claude Code, Codex (from --agent)\n");
@@ -1842,6 +2668,7 @@ describe("pidgen setup coding agents", () => {
       "Codex needs you to sign in. Its own sign-in runs here; setup continues after it.",
       "Codex: how many sessions should run at once?",
       "Install pidgen-worker 1.0.0 and accept its licence?",
+      "Worker name",
     ]);
     expect(log).toContain(`$ ${CODEX_INSTALL}`);
     const npm = h.spawns.filter((spawn) => spawn.command === "npm");
@@ -1955,8 +2782,8 @@ describe("pidgen setup coding agents", () => {
       command: "pidgen worker login claude && pidgen worker login codex",
       logins: { claude: "ready", codex: "ready" },
     });
-    // Codex's sign-in, each agent's sessions, and the install.
-    expect(h.questions).toHaveLength(4);
+    // Codex's sign-in, each agent's sessions, the install, and the worker's name.
+    expect(h.questions).toHaveLength(5);
     expect(h.questions[0]).toBe(
       [
         "│",
@@ -2016,7 +2843,8 @@ describe("pidgen setup capacity", () => {
     const { code, body, stderr } = await h.run("setup", "--url", SERVER, "--agent", kind);
 
     expect(code).toBe(ExitCode.Ok);
-    expect(h.questions).toHaveLength(2);
+    // The sessions, the install, then the worker's name.
+    expect(h.questions).toHaveLength(3);
     const name = kind === "claude" ? "Claude Code" : "Codex";
     expect(h.prompts[0]).toMatchObject({
       kind: "select",
@@ -2060,7 +2888,8 @@ describe("pidgen setup capacity", () => {
     );
 
     expect(code).toBe(ExitCode.Ok);
-    expect(h.questions).toHaveLength(1);
+    // The install, then the worker's name.
+    expect(h.questions).toHaveLength(2);
     expect(h.questions[0]).toMatch(/Install pidgen-worker/);
     expect(stderr).toContain("◇  Claude Code · 2 sessions at a time (from --plan)");
     expect(step(body, "capacity")).toMatchObject({
@@ -2250,7 +3079,11 @@ describe("pidgen setup capacity", () => {
   });
 
   it("re-running asks the sessions again when no --sessions or --plan answers it", async () => {
-    const h = await harness({ agents: { claude: { signedIn: true } }, answers: ["2", "", "4"] });
+    // The first run's sessions, install and worker's name, then the re-run's sessions.
+    const h = await harness({
+      agents: { claude: { signedIn: true } },
+      answers: ["2", "", "", "4"],
+    });
     expect((await h.run("setup", "--url", SERVER, "--agent", "claude")).code).toBe(ExitCode.Ok);
     h.questions.length = 0;
 
@@ -2364,6 +3197,7 @@ describe("pidgen setup prompts", () => {
       "select",
       "select",
       "confirm",
+      "text",
     ]);
     // What stays on screen is each answer's one line, not the open question.
     for (const line of [
@@ -2371,6 +3205,7 @@ describe("pidgen setup prompts", () => {
       "│\n◇  Claude Code · 1 session at a time\n",
       "│\n◇  Codex · 1 session at a time\n",
       "│\n◇  Install pidgen-worker 1.0.0 and accept its licence? · Yes\n",
+      `│\n◇  Worker name · ${HOST}\n`,
     ])
       expect(stderr).toContain(line);
     // No open question is left on screen; the one ◆ is the sign-in block's.
@@ -2411,14 +3246,15 @@ describe("pidgen setup prompts", () => {
 
     expect(body.error, stderr).toBeNull();
     expect(code).toBe(ExitCode.Ok);
-    // The agents, the new agent's own sign-in, each one's sessions, and the install: no question
-    // about installing Codex.
+    // The agents, the new agent's own sign-in, each one's sessions, the install and the worker's
+    // name: no question about installing Codex.
     expect(h.prompts.map((prompt) => prompt.message)).toEqual([
       "Which coding agents will this worker run?",
       "Codex needs you to sign in. Its own sign-in runs here; setup continues after it.",
       "Claude Code: how many sessions should run at once?",
       "Codex: how many sessions should run at once?",
       "Install pidgen-worker 1.0.0 and accept its licence?",
+      "Worker name",
     ]);
     const npm = h.spawns.filter((spawn) => spawn.command === "npm");
     expect(npm.map((spawn) => spawn.args)).toEqual([["install", "-g", "@openai/codex"]]);
@@ -2869,7 +3705,8 @@ describe("pidgen setup output", () => {
 // Setup's human output: a summary card on success, one ■ block on failure, the re-run menu, and
 // the sign-in block. JSON is unchanged.
 describe("pidgen setup finish", () => {
-  const ANSWERS = ["", "", "", ""];
+  // A first run's questions: the coding agents, each one's sessions, the install, the worker's name.
+  const ANSWERS = ["", "", "", "", ""];
 
   /** Runs the CLI as a terminal does: standard output is a terminal, so the human rendering. */
   async function runTerminal(h: Harness, ...argv: string[]) {
@@ -3255,6 +4092,212 @@ describe("pidgen setup finish", () => {
   });
 });
 
+/** A fresh machine's answers: the coding agents, each one's sessions, the install and the name. */
+const FIRST_RUN = ["", "", "", "", ""];
+
+/**
+ * A machine setup left installed and not enrolled, its install recorded as `recorded` (unless
+ * `null`). `starts` is the recorded version each start of the detached worker ran.
+ */
+async function partDone(
+  answers: Answer[],
+  recorded: string | null = "0.9.0",
+  options: HarnessOptions = {},
+) {
+  const h = await harness({ answers: [...FIRST_RUN, ...answers], ...options });
+  const first = await h.run("setup", "--url", SERVER);
+  expect(first.code, first.stderr).toBe(ExitCode.Ok);
+  // Installed, not enrolled: no credential in the worker home, none listed, nothing running.
+  await rm(join(h.pidgenHome, "worker.env"));
+  h.state.enrolled = false;
+  h.started.value = false;
+  const recordPath = join(h.pidgenHome, "run", "pidgen-install.json");
+  if (recorded !== null) {
+    const record = JSON.parse(await readFile(recordPath, "utf8")) as Record<string, unknown>;
+    await writeFile(recordPath, JSON.stringify({ ...record, version: recorded }));
+  }
+  const starts: string[] = [];
+  const runtime = h.ctx.workerRuntime;
+  h.ctx.workerRuntime = {
+    ...runtime,
+    spawn: (command, args, spawnOptions) => {
+      if (spawnOptions.detached === true) {
+        const record = JSON.parse(readFileSync(recordPath, "utf8")) as { version: string };
+        starts.push(record.version);
+      }
+      return runtime.spawn(command, args, spawnOptions);
+    },
+  };
+  const installs = async () => (await h.uvRuns()).filter((run) => run.args[1] === "install").length;
+  const installsBefore = await installs();
+  h.prompts.length = 0;
+  return { h, starts, installs, installsBefore, recordPath };
+}
+
+// ADR-164 D5 row 9: every run that starts the worker reconciles its version first. The fake index's
+// one verifiable wheel is 1.0.0, so "installed" is the install record rewritten to an older version
+// (0.9.0, of a series the server still supports) and 1.0.0 is the newer release on its track.
+// Each test runs setup twice, installing and verifying a wheel each time: more than the default 5 s
+// under a loaded full run.
+describe("pidgen setup and a newer worker release", { timeout: 20_000 }, () => {
+  /** The questions a re-run asks before the update question: the agents and their sessions. */
+  const AGENT_ANSWERS = ["", "", ""];
+  const UPDATE = "pidgen-worker 1.0.0 is available (0.9.0 installed). Update before starting?";
+  const LICENCE = "Install pidgen-worker 1.0.0 and accept its licence?";
+
+  const beta = (version: string): IndexFile => {
+    const filename = `pidgen_worker-${version}-py3-none-any.whl`;
+    return {
+      filename,
+      url: `https://files.pythonhosted.org/packages/py3/p/pidgen-worker/${filename}`,
+      digests: { sha256: "2".repeat(64) },
+    };
+  };
+
+  // AC-7924bd4dc57b: yes updates (after the licence question) before enrolling and starting.
+  it("asks to update before enrolling and starting; yes installs it after the licence question", async () => {
+    const { h, starts, installs, installsBefore, recordPath } = await partDone([
+      ...AGENT_ANSWERS,
+      "",
+      "",
+    ]);
+
+    const { code, body, stderr, log } = await h.run("setup");
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(stderr).toContain(
+      "◇  Already done · signed in to Example · pidgen-worker 0.9.0 installed\n",
+    );
+    // The update, its licence, then the worker's name before the enrollment.
+    expect(h.prompts.slice(-3).map((prompt) => [prompt.kind, prompt.message])).toEqual([
+      ["confirm", UPDATE],
+      ["confirm", LICENCE],
+      ["text", "Worker name"],
+    ]);
+    expect(await installs()).toBe(installsBefore + 1);
+    expect(step(body, "install")).toMatchObject({
+      status: "done",
+      command: "pidgen worker update --restart",
+      version: "1.0.0",
+    });
+    // The update comes before the enrollment, and the worker started is the newer release.
+    order(log, `question: ${UPDATE}`, "$ pidgen worker update --restart", "$ pidgen worker enroll");
+    expect(step(body, "enroll").status).toBe("done");
+    expect(starts).toEqual(["1.0.0"]);
+    expect(JSON.parse(await readFile(recordPath, "utf8"))).toMatchObject({ version: "1.0.0" });
+  });
+
+  // AC-7924bd4dc57b: no keeps the installed release.
+  it("no keeps the installed release, starts it, and says how to update later", async () => {
+    const { h, starts, installs, installsBefore } = await partDone([...AGENT_ANSWERS, "n"]);
+
+    const { code, body, stderr } = await h.run("setup");
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    const messages = h.prompts.map((prompt) => prompt.message);
+    expect(messages.slice(-2)).toEqual([UPDATE, "Worker name"]);
+    expect(messages).not.toContain(LICENCE);
+    expect(stderr).toContain(`◇  ${UPDATE} · No\n`);
+    expect(stderr).toContain(
+      "pidgen-worker 0.9.0 is installed · update it later with pidgen worker update\n",
+    );
+    expect(await installs()).toBe(installsBefore);
+    expect(step(body, "install").status).toBe("skipped");
+    expect(starts).toEqual(["0.9.0"]);
+  });
+
+  it("declining the new release's licence keeps and starts the installed release", async () => {
+    const { h, starts, installs, installsBefore } = await partDone([...AGENT_ANSWERS, "", "n"]);
+
+    const { code, body, stderr } = await h.run("setup");
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(stderr).toContain(`◇  ${LICENCE} · No\n`);
+    expect(stderr).toContain(
+      "pidgen-worker 0.9.0 is installed · update it later with pidgen worker update\n",
+    );
+    expect(await installs()).toBe(installsBefore);
+    expect(starts).toEqual(["0.9.0"]);
+  });
+
+  // AC-e47f5b880ab2: --accept-licence answers both questions in advance.
+  it("--accept-licence applies the update without asking the update or licence question", async () => {
+    const { h, starts, installs, installsBefore } = await partDone([...AGENT_ANSWERS]);
+
+    const { code, body, stderr } = await h.run("setup", "--accept-licence");
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.prompts.filter((prompt) => prompt.kind === "confirm")).toEqual([]);
+    expect(stderr).toContain(`◇  ${UPDATE} · Yes (from --accept-licence)\n`);
+    expect(stderr).toContain(`◇  ${LICENCE} · Yes (from --accept-licence)\n`);
+    expect(await installs()).toBe(installsBefore + 1);
+    expect(starts).toEqual(["1.0.0"]);
+  });
+
+  // AC-e47f5b880ab2: without a terminal nothing changes.
+  it("without a terminal still exits 2 with TERMINAL_REQUIRED and installs nothing", async () => {
+    const { h, starts, installs, installsBefore } = await partDone([]);
+    h.ctx.prompter = null;
+
+    const { code, body } = await h.run("setup", "--accept-licence");
+
+    expect(code).toBe(ExitCode.Usage);
+    expect(body.error!.code).toBe("TERMINAL_REQUIRED");
+    expect(await installs()).toBe(installsBefore);
+    expect(starts).toEqual([]);
+  });
+
+  // AC-8f36152781a7: a newer pre-release is not offered while the installed release is final.
+  it("asks nothing when only newer pre-releases are published and the installed release is final", async () => {
+    const index: Record<string, IndexFile[]> = { "1.0.0": [RECORDED_WHEEL] };
+    const { h, starts, installs, installsBefore } = await partDone([...AGENT_ANSWERS], null, {
+      index,
+    });
+    index["1.0.1b1"] = [beta("1.0.1b1")];
+    index["1.1.0b1"] = [beta("1.1.0b1")];
+
+    const { code, body, stderr } = await h.run("setup");
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.prompts.filter((prompt) => prompt.kind === "confirm")).toEqual([]);
+    expect(stderr).not.toMatch(/is available/);
+    expect(await installs()).toBe(installsBefore);
+    expect(starts).toEqual(["1.0.0"]);
+  });
+
+  // AC-5d9b12b4f732: a check-only run reports the newer release, asking and installing nothing.
+  it('"Check everything and stop" reports the newer release without asking or installing', async () => {
+    const h = await harness({ answers: [...FIRST_RUN, "check"] });
+    expect((await h.run("setup", "--url", SERVER)).code).toBe(ExitCode.Ok);
+    await mkdir(join(h.pidgenHome, "config"), { recursive: true });
+    await writeFile(
+      join(h.pidgenHome, "config", "node.yaml"),
+      "version: 2\nharnesses:\n  claude: {max: 1}\n",
+    );
+    const recordPath = join(h.pidgenHome, "run", "pidgen-install.json");
+    const record = JSON.parse(await readFile(recordPath, "utf8")) as Record<string, unknown>;
+    await writeFile(recordPath, JSON.stringify({ ...record, version: "0.9.0" }));
+    const installs = (await h.uvRuns()).filter((run) => run.args[1] === "install").length;
+    h.prompts.length = 0;
+
+    const { code, body, stderr } = await h.run("setup");
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.prompts.map((prompt) => prompt.message)).toEqual(["What do you want to do?"]);
+    expect(stderr).toContain(
+      "◇  pidgen-worker 1.0.0 is available (0.9.0 installed) · update with pidgen worker update\n",
+    );
+    expect((await h.uvRuns()).filter((run) => run.args[1] === "install").length).toBe(installs);
+    expect(step(body, "install").status).toBe("skipped");
+  });
+});
+
 describe("pidgen setup, one action at a time", () => {
   const LAPTOP = "sams-laptop";
 
@@ -3284,6 +4327,8 @@ describe("pidgen setup, one action at a time", () => {
     "◇  Install pidgen-worker 1.0.0 and accept its licence? · Yes",
     "│",
     "◇  pidgen-worker 1.0.0 installed and verified",
+    "│",
+    `◇  Worker name · ${LAPTOP}`,
     "│",
     `◇  Enrolled as ${LAPTOP} in Example`,
     "│",
@@ -3316,7 +4361,7 @@ describe("pidgen setup, one action at a time", () => {
   // root-fresh: a first run on a fresh machine collapses every action to one line, ends with the
   // summary card, and leaves the worker running and connected.
   it("a first run on a fresh machine matches the drawn whole-run screen", async () => {
-    const h = await harness({ hostName: LAPTOP, answers: ["", "", "", ""] });
+    const h = await harness({ hostName: LAPTOP, answers: ["", "", "", "", ""] });
     h.ctx.io.stdoutIsTTY = true;
 
     const code = await runCli(["setup", "--url", SERVER], h.ctx);
@@ -3333,6 +4378,7 @@ describe("pidgen setup, one action at a time", () => {
       "select",
       "select",
       "confirm",
+      "text",
     ]);
     expect(stderr).not.toMatch(/^\$ |Step \d|Details:|licence notice|Installing it accepts/m);
     expect(stderr).not.toContain(ENROLL_TOKEN);
@@ -3494,5 +4540,435 @@ describe("pidgen setup documentation", () => {
 
     const readme = await read("docs/README.md");
     expect(readme).toContain("pidgen setup");
+  });
+});
+
+/**
+ * The state table of enrolling a machine (App Service ADR-164 D6): each state a machine can be in
+ * when `pidgen setup` runs, one test per row, titled with the row's number. Each runs against the
+ * fake pidgen-worker (WORKER_SCRIPT), which follows the worker's three saved-credential rules
+ * written down at its definition; rows 2, 3 and 7 exercise one rule each. Row 13, a copied worker
+ * home, cannot be told apart from the original by setup: docs/troubleshooting.md documents it.
+ */
+describe("enrollment states", { timeout: 20_000 }, () => {
+  /** The coding agents, each one's sessions and the install: every question before the name. */
+  const ANSWERS = ["", "", "", ""];
+  /** What a re-run asks before the name: the coding agents and each one's sessions. */
+  const RERUN = ["", "", ""];
+  const LAPTOP = "sams-laptop";
+  const OTHER_SERVER = "https://other.example.com";
+  const INSTALL_ID = "0123456789abcdef0123456789abcdef";
+  const OTHER_INSTALL_ID = "fedcba9876543210fedcba9876543210";
+  const credential = (server = SERVER, hostId = HOST, token = "pidgen_node_fake_credential") => [
+    `PIDGEN_SERVICE_URL=${server}`,
+    `PIDGEN_NODE_TOKEN=${token}`,
+    `PIDGEN_LOCALITY_DOMAIN=${hostId}`,
+  ];
+  const otherInstall = (hostId: string, overrides: Partial<WorkerResource> = {}) =>
+    workerResource(true, {
+      host_id: hostId,
+      created_at: "2026-09-20T09:00:00Z",
+      install_id: OTHER_INSTALL_ID,
+      ...overrides,
+    });
+  const enrollArgs = async (h: Harness) =>
+    (await h.workerLog()).filter((args) => args[0] === "enroll");
+  const readLines = async (path: string) => {
+    try {
+      return (await readFile(path, "utf8"))
+        .split("\n")
+        .filter((line) => line !== "")
+        .map((line) => JSON.parse(line) as string[]);
+    } catch {
+      return [];
+    }
+  };
+  /** What each `pidgen-worker enroll` did with the one-time token: `done` or `skipped`. */
+  const exchanges = async (log: string) =>
+    (await readLines(`${log}.exchanges`)).map((entry) => entry[1]);
+  /** What each `pidgen-worker enroll` did with a saved credential: kept, moved-aside or refused. */
+  const decisions = async (log: string) =>
+    (await readLines(`${log}.credentials`)).map((entry) => entry[1]);
+  const envPath = (h: Harness) => join(h.pidgenHome, "worker.env");
+
+  /**
+   * Runs the fake pidgen-worker by itself, as `pidgen-worker enroll --token … --server <server>
+   * --no-start [extra]` would run on this machine, in a worker home of its own holding `lines` as
+   * its worker.env: its exit code, standard error, the files it left in that home and its logs.
+   */
+  async function workerAlone(h: Harness, lines: string[], server: string, extra: string[] = []) {
+    const root = join(h.directory, `alone-${Math.random().toString(16).slice(2)}`);
+    const home = join(root, ".pidgen");
+    await writeWorkerEnv(root, lines);
+    const log = join(root, "worker.log");
+    const run = spawnSync(
+      h.ctx.env["PIDGEN_WORKER_BIN"]!,
+      ["enroll", "--token", ENROLL_TOKEN, "--server", server, "--no-start", ...extra],
+      {
+        env: { ...h.ctx.env, PIDGEN_HOME: home, FAKE_WORKER_LOG: log },
+        encoding: "utf8",
+      },
+    );
+    return {
+      code: run.status,
+      stderr: run.stderr,
+      files: (await readdir(home)).sort(),
+      env: await readWorkerEnv(root),
+      home,
+      exchanges: await exchanges(log),
+      decisions: await decisions(log),
+    };
+  }
+
+  it("row 1: a fresh machine enrolls once under this host's name and connects", async () => {
+    const h = await harness({ hostName: LAPTOP, answers: ANSWERS });
+
+    const { code, body, stderr } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    const id = (await readFile(join(h.pidgenHome, "install-id"), "utf8")).trim();
+    expect(enrollments(h).map((request) => request.body)).toEqual([
+      { label: LAPTOP, install_id: id },
+    ]);
+    expect((await enrollArgs(h)).map((args) => args.slice(-2))).toEqual([["--host-id", LAPTOP]]);
+    expect(await exchanges(h.ctx.env["FAKE_WORKER_LOG"]!)).toEqual(["done"]);
+    expect(await decisions(h.ctx.env["FAKE_WORKER_LOG"]!)).toEqual([]);
+    expect(withdrawals(h)).toEqual([]);
+    expect(step(body, "enroll")).toMatchObject({
+      status: "done",
+      host_id: LAPTOP,
+      connected: true,
+    });
+  });
+
+  // Rule 1: pidgen-worker keeps a saved credential the service accepts, so an enrollment created
+  // here would never be redeemed: setup creates none and starts the worker with the saved one.
+  it("row 2: a live credential for this server is kept: no enrollment, the worker started with it", async () => {
+    const h = await harness({ answers: ANSWERS, state: { enrolled: true } });
+    await writeWorkerEnv(h.ctx.homeDir, credential());
+    const before = await readFile(envPath(h), "utf8");
+
+    const { code, body, stderr, log } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(enrollments(h)).toHaveLength(0);
+    expect(await enrollArgs(h)).toEqual([]);
+    expect(log).not.toContain("$ pidgen worker enroll");
+    expect(await readFile(envPath(h), "utf8")).toBe(before);
+    expect(h.started.value).toBe(true);
+    expect(step(body, "enroll")).toMatchObject({ host_id: HOST, connected: true });
+
+    const alone = await workerAlone(h, credential(), SERVER);
+    expect(alone.code).toBe(0);
+    expect(alone.decisions).toEqual(["kept"]);
+    expect(alone.exchanges).toEqual(["skipped"]);
+    expect(alone.files).toEqual(["worker.env"]);
+    expect(alone.env?.["PIDGEN_NODE_TOKEN"]).toBe("pidgen_node_fake_credential");
+  });
+
+  // Rule 2: pidgen-worker moves aside a saved credential the service refuses (HTTP 401) and
+  // redeems the enrollment. Setup moves it aside itself first (--replace-credential), so with
+  // either the worker redeems the one enrollment setup creates.
+  it("row 3: a revoked credential is moved aside, one enrollment is redeemed, and the worker connects", async () => {
+    const h = await harness({
+      answers: [...ANSWERS, "", ""],
+      state: { enrolled: true, revoked: true },
+    });
+    await writeWorkerEnv(h.ctx.homeDir, credential(SERVER, HOST, REVOKED_CREDENTIAL));
+
+    const { code, body, stderr, log } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.prompts[4]).toMatchObject({
+      kind: "confirm",
+      message: "This machine's worker was removed from Example. Enroll it again?",
+    });
+    expect(enrollments(h)).toHaveLength(1);
+    expect(log).toContain(
+      `$ pidgen worker enroll --replace-credential --label ${HOST} -- --host-id ${HOST}`,
+    );
+    const moved = (await readdir(h.pidgenHome)).filter((name) =>
+      /^worker\.env\.replaced-\d{8}T\d{6}Z$/.test(name),
+    );
+    expect(moved).toHaveLength(1);
+    expect(await readFile(join(h.pidgenHome, moved[0]!), "utf8")).toContain(REVOKED_CREDENTIAL);
+    expect(await exchanges(h.ctx.env["FAKE_WORKER_LOG"]!)).toEqual(["done"]);
+    expect((await readWorkerEnv(h.ctx.homeDir))?.["PIDGEN_NODE_TOKEN"]).toBe(
+      "pidgen_node_fake_credential",
+    );
+    expect(step(body, "enroll")).toMatchObject({ status: "done", host_id: HOST, connected: true });
+
+    const alone = await workerAlone(h, credential(SERVER, HOST, REVOKED_CREDENTIAL), SERVER);
+    expect(alone.code).toBe(0);
+    expect(alone.stderr).toContain("HTTP 401");
+    expect(alone.decisions).toEqual(["moved-aside"]);
+    expect(alone.exchanges).toEqual(["done"]);
+    expect(alone.files).toEqual(["worker.env", "worker.env.refused"]);
+    expect(await readFile(join(alone.home, "worker.env.refused"), "utf8")).toContain(
+      REVOKED_CREDENTIAL,
+    );
+    expect(alone.env?.["PIDGEN_NODE_TOKEN"]).toBe("pidgen_node_fake_credential");
+  });
+
+  it("row 4: a name held only by a removed worker is free: setup suggests it and enrolls under it", async () => {
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: ANSWERS,
+      state: {
+        others: [otherInstall(LAPTOP, { connected: false, revoked_at: "2026-09-25T09:00:00Z" })],
+      },
+    });
+
+    const { code, body, stderr } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(stderr).not.toContain("already has a worker named");
+    expect(h.prompts[4]).toMatchObject({ kind: "text", message: "Worker name" });
+    expect(h.questions[4]).toContain(`│  ${LAPTOP}\n`);
+    expect(enrollments(h).map((request) => request.body)).toEqual([
+      { label: LAPTOP, install_id: ANY_INSTALL_ID },
+    ]);
+    expect((await enrollArgs(h)).map((args) => args.slice(-2))).toEqual([["--host-id", LAPTOP]]);
+    expect(step(body, "enroll")).toMatchObject({
+      status: "done",
+      host_id: LAPTOP,
+      connected: true,
+    });
+  });
+
+  // The Account's list cannot show another Account's worker. A current server scopes names to the
+  // Account and enrolls; an older one refuses the host id at the worker's exchange (HTTP 409
+  // WORKER_HOST_TAKEN), and setup falls back to the next free name with the same enrollment.
+  it("row 5: a name held in another Account enrolls under it on a current server", async () => {
+    const h = await harness({ hostName: LAPTOP, answers: ANSWERS });
+
+    const { code, body, stderr } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(stderr).not.toContain("is taken in Pidgen");
+    expect(enrollments(h)).toHaveLength(1);
+    expect((await enrollArgs(h)).map((args) => args.at(-1))).toEqual([LAPTOP]);
+    expect(step(body, "enroll")).toMatchObject({ host_id: LAPTOP, connected: true });
+  });
+
+  it("row 5: a name held in another Account falls back to the next free name on an older server's WORKER_HOST_TAKEN", async () => {
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: [...ANSWERS, "", ""],
+      env: { FAKE_TAKEN_HOSTS: LAPTOP },
+    });
+
+    const { code, body, stderr, log } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(stderr).toContain(`▲  ${LAPTOP} is taken in Pidgen, so this worker needs another name.`);
+    expect(h.questions[5]).toContain(`│  ${LAPTOP}-2\n`);
+    expect(log).toContain(`${LAPTOP} is taken in Pidgen (HTTP 409 WORKER_HOST_TAKEN)`);
+    expect(enrollments(h)).toHaveLength(1);
+    expect((await enrollArgs(h)).map((args) => args.at(-1))).toEqual([LAPTOP, `${LAPTOP}-2`]);
+    expect(step(body, "enroll")).toMatchObject({ host_id: `${LAPTOP}-2`, connected: true });
+  });
+
+  it("row 6: a name held by a live worker of the Account suggests the next free name", async () => {
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: ANSWERS,
+      state: { others: [otherInstall(LAPTOP)] },
+    });
+
+    const { code, body, stderr } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(stderr).toContain(
+      `Example already has a worker named ${LAPTOP} (connected; enrolled 20 Sep).`,
+    );
+    expect(h.questions[4]).toContain(`│  ${LAPTOP}-2\n`);
+    expect(enrollments(h).map((request) => request.body)).toEqual([
+      { label: `${LAPTOP}-2`, install_id: ANY_INSTALL_ID },
+    ]);
+    expect(step(body, "enroll")).toMatchObject({ host_id: `${LAPTOP}-2`, connected: true });
+  });
+
+  // Rule 3: pidgen-worker refuses another server's saved credential without --replace, so setup
+  // refuses before creating an enrollment; once the person moves it aside, setup enrolls.
+  it("row 7: a credential for another server is refused before any enrollment, until it is moved aside", async () => {
+    const h = await harness({ answers: [...ANSWERS, ...RERUN] });
+    await writeWorkerEnv(h.ctx.homeDir, credential(OTHER_SERVER));
+    const before = await readFile(envPath(h), "utf8");
+
+    const refused = await h.run("setup", "--url", SERVER);
+
+    expect(refused.code).toBe(ExitCode.Refused);
+    expect(refused.body.error).toMatchObject({
+      code: "WORKER_CREDENTIAL_PRESENT",
+      details: { step: "enroll", path: envPath(h), server: OTHER_SERVER },
+    });
+    const fix = `mv ${envPath(h)} ${envPath(h)}.old`;
+    expect(refused.body.error!.details["fix"]).toContain(fix);
+    expect(enrollments(h)).toHaveLength(0);
+    expect(await enrollArgs(h)).toEqual([]);
+    expect(h.started.value).toBe(false);
+    expect(await readFile(envPath(h), "utf8")).toBe(before);
+
+    const alone = await workerAlone(h, credential(OTHER_SERVER), SERVER);
+    expect(alone.code).toBe(1);
+    expect(alone.stderr).toContain(OTHER_SERVER);
+    expect(alone.stderr).toContain("--replace");
+    expect(alone.decisions).toEqual(["refused"]);
+    expect(alone.exchanges).toEqual([]);
+    expect(alone.files).toEqual(["worker.env"]);
+    const replaced = await workerAlone(h, credential(OTHER_SERVER), SERVER, ["--replace"]);
+    expect(replaced.code).toBe(0);
+    expect(replaced.decisions).toEqual(["moved-aside"]);
+    expect(replaced.exchanges).toEqual(["done"]);
+    expect(replaced.env?.["PIDGEN_SERVICE_URL"]).toBe(SERVER);
+
+    // The fix setup names: the file moved aside, a re-run enrolls this machine here.
+    await rename(envPath(h), `${envPath(h)}.old`);
+    const { code, body, stderr } = await h.run("setup");
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(enrollments(h)).toHaveLength(1);
+    expect(await readFile(`${envPath(h)}.old`, "utf8")).toBe(before);
+    expect((await readWorkerEnv(h.ctx.homeDir))?.["PIDGEN_SERVICE_URL"]).toBe(SERVER);
+    expect(step(body, "enroll")).toMatchObject({ status: "done", connected: true });
+  });
+
+  it("row 8: a run failing after it created an enrollment withdraws it", async () => {
+    const h = await harness({ answers: ANSWERS, env: { FAKE_FAIL_ENROLL_RUN: "1" } });
+
+    const { code, body } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Unexpected);
+    expect(body.error).toMatchObject({
+      code: "ENROLL_FAILED",
+      details: { step: "enroll", withdrawn: true },
+    });
+    expect(enrollments(h)).toHaveLength(1);
+    expect(withdrawals(h)).toEqual(["/api/v1/workers/enrollments/enr-example-1"]);
+    expect(h.started.value).toBe(false);
+  });
+
+  it("row 9: a newer release on the track is offered before the worker starts", async () => {
+    const UPDATE = "pidgen-worker 1.0.0 is available (0.9.0 installed). Update before starting?";
+    const { h, starts } = await partDone([...RERUN, "n"]);
+
+    const { code, body, stderr, log } = await h.run("setup");
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.prompts.map((prompt) => prompt.message).slice(-2)).toEqual([UPDATE, "Worker name"]);
+    order(log, `question: ${UPDATE}`, "$ pidgen worker enroll", "$ pidgen worker start --detach");
+    expect(starts).toEqual(["0.9.0"]);
+  });
+
+  it("row 10: with its credential lost and this install's worker live, setup names it and asks to replace it", async () => {
+    const mine = workerResource(true, { host_id: "build-box", install_id: INSTALL_ID });
+    let enrolledAtQuestion: number | null = null;
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: [
+        ...ANSWERS,
+        () => {
+          enrolledAtQuestion = enrollments(h).length;
+          return "y";
+        },
+        () => {
+          mine.revoked_at = "2026-09-28T10:00:00Z";
+          mine.connected = false;
+          return "y";
+        },
+      ],
+      state: { others: [mine] },
+    });
+    await writeInstallId(h.ctx.homeDir, INSTALL_ID);
+
+    const { code, body, stderr } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(stderr).toContain(
+      "This install's worker build-box is still listed but its credential is missing.",
+    );
+    expect(h.prompts[4]).toMatchObject({ kind: "confirm", message: "Replace build-box?" });
+    expect(enrolledAtQuestion).toBe(0);
+    expect(h.questions[6]).toContain("│  build-box\n");
+    expect(enrollments(h).map((request) => request.body)).toEqual([
+      { label: "build-box", install_id: INSTALL_ID },
+    ]);
+    expect(step(body, "enroll")).toMatchObject({ host_id: "build-box", connected: true });
+  });
+
+  // Another person's pending enrollment is not in the Account's list: only the server's 409 shows it.
+  it("row 11: a name held by another person's pending enrollment is refused 409 WORKER_NAME_TAKEN, and the name asked again", async () => {
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: [...ANSWERS, "", ""],
+      state: { takenNames: { [LAPTOP]: `${LAPTOP}-2` } },
+    });
+
+    const { code, body, stderr } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.questions[4]).toContain(`│  ${LAPTOP}\n`);
+    expect(stderr).toContain(`▲  ${LAPTOP} is taken in Pidgen, so this worker needs another name.`);
+    expect(h.prompts[5]).toMatchObject({ kind: "text", message: "Worker name" });
+    expect(h.questions[5]).toContain(`│  ${LAPTOP}-2\n`);
+    expect(enrollments(h).map((request) => request.body)).toEqual([
+      { label: LAPTOP, install_id: ANY_INSTALL_ID },
+      { label: `${LAPTOP}-2`, install_id: ANY_INSTALL_ID },
+    ]);
+    expect((await enrollArgs(h)).map((args) => args.at(-1))).toEqual([`${LAPTOP}-2`]);
+    expect(step(body, "enroll")).toMatchObject({ host_id: `${LAPTOP}-2`, connected: true });
+  });
+
+  it("row 12: a re-run with an edited name sends one enrollment, with the same install id", async () => {
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: [...ANSWERS, "", ...RERUN, "studio"],
+      env: { FAKE_FAIL_ENROLL_RUN: "1" },
+    });
+    const failed = await h.run("setup", "--url", SERVER);
+    expect(failed.body.error).toMatchObject({ code: "ENROLL_FAILED" });
+    const id = (await readFile(join(h.pidgenHome, "install-id"), "utf8")).trim();
+    expect(enrollments(h).map((request) => request.body)).toEqual([
+      { label: LAPTOP, install_id: id },
+    ]);
+    const sent = enrollments(h).length;
+
+    const { code, body, stderr } = await h.run("setup");
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.questions.at(-1)).toContain(`│  ${LAPTOP}\n`);
+    expect(
+      enrollments(h)
+        .slice(sent)
+        .map((request) => request.body),
+    ).toEqual([{ label: "studio", install_id: id }]);
+    expect((await enrollArgs(h)).at(-1)!.slice(-2)).toEqual(["--host-id", "studio"]);
+    expect(step(body, "enroll")).toMatchObject({ host_id: "studio", connected: true });
+  });
+
+  // Row 13, a copied worker home, is documented only. The rows a person can meet are explained in
+  // docs/troubleshooting.md, each with the command that fixes it.
+  it("row 13 is documented in docs/troubleshooting.md, with rows 3, 4, 6, 7, 10 and 11, each with its fix", async () => {
+    const text = await readFile(new URL("../../docs/troubleshooting.md", import.meta.url), "utf8");
+    for (const row of [3, 4, 6, 7, 10, 11, 13]) {
+      const line = text.split("\n").find((entry) => entry.includes(`(row ${row})`));
+      expect(line, `row ${row}`).toBeDefined();
+      // Its last column, the fix, names a command to run.
+      expect(line!.split(" | ").at(-1), `row ${row}`).toMatch(/`(pidgen|mv) [^`]+`/);
+    }
+    expect(text).toContain("row 13");
   });
 });

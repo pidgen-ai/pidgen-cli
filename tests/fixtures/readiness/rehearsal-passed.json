@@ -1,0 +1,41 @@
+{
+  "rehearsal_id": "reh-example-1",
+  "state": "passed",
+  "ref": "pidgen/setup",
+  "commit": "9b8a7c6d5e4f30211f2e3d4c5b6a79881a2b3c4d",
+  "worker": "build-box",
+  "steps": [
+    {
+      "step": "provision",
+      "state": "passed",
+      "exit_code": 0,
+      "duration_seconds": 161,
+      "summary": null
+    },
+    {
+      "step": "activate",
+      "state": "passed",
+      "exit_code": 0,
+      "duration_seconds": 1,
+      "summary": null
+    },
+    {
+      "step": "database",
+      "state": "passed",
+      "exit_code": 0,
+      "duration_seconds": 9,
+      "summary": null
+    },
+    {
+      "step": "tests",
+      "state": "passed",
+      "exit_code": 0,
+      "duration_seconds": 192,
+      "summary": "212 passed"
+    }
+  ],
+  "verdict": "The setup works: provision 2:41, activate 0:01, database 0:09 and tests 3:12 with 212 passed on build-box.",
+  "requested_at": "2026-10-19T09:10:00Z",
+  "finished_at": "2026-10-19T09:16:10Z",
+  "log_artifact_id": "art-example-rehearsal-1"
+}

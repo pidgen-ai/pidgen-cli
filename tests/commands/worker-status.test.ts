@@ -202,6 +202,7 @@ describe("pidgen worker status", () => {
       expect(code).toBe(ExitCode.Ok);
       expect(body.ok).toBe(true);
       expect(body.data).toEqual({
+        installed: false,
         record: RECORD,
         running: true,
         server: {
@@ -319,6 +320,7 @@ describe("pidgen worker status", () => {
 
       expect(code).toBe(ExitCode.Ok);
       expect(body.data).toMatchObject({
+        installed: false,
         record: null,
         running: false,
         server: { enrolled: true, worker: { host_id: HOST } },
@@ -349,6 +351,7 @@ describe("pidgen worker status", () => {
       "human unreachable status preserves exit and requests at width %s",
       async (columns) => {
         const { ctx, calls } = await setup({
+          installed: "1.0.0",
           respond: () => Promise.reject(new TypeError("fetch failed")),
         });
         ctx.io.stdoutColumns = columns;
@@ -376,6 +379,7 @@ describe("pidgen worker status", () => {
       expect(body.ok).toBe(true);
       expect(body.error).toBeNull();
       expect(body.data).toEqual({
+        installed: false,
         record: RECORD,
         running: true,
         server: null,
@@ -474,6 +478,7 @@ describe("pidgen worker status", () => {
       expect(body.ok).toBe(true);
       expect(body.error).toBeNull();
       expect(body.data).toEqual({
+        installed: false,
         record: RECORD,
         running: true,
         server: {
@@ -587,6 +592,7 @@ describe("pidgen worker status", () => {
 
       const { body } = await status(ctx);
 
+      expect(body.data?.["installed"]).toBe(true);
       expect(body.data?.["update"]).toEqual({
         installed: "1.0.0",
         current: "1.0",
@@ -627,6 +633,7 @@ describe("pidgen worker status", () => {
 
       expect(code).toBe(ExitCode.Ok);
       expect(body.data).toEqual({
+        installed: false,
         record: RECORD,
         running: true,
         update: LOCAL_UPDATE,
@@ -650,6 +657,108 @@ describe("pidgen worker status", () => {
     });
   });
 
+  // AC-c8e82b49e423, AC-d420a2efc504, AC-ef1f07adbd88, AC-8512a7c82f82, AC-fa34f8a0cb38,
+  // AC-8ac423527b9f, AC-431a20d66a7a, AC-b831a27ef21f: the install state, in JSON and for people.
+  describe("install state", () => {
+    /** Runs `worker status` as JSON and then for a terminal; returns both. */
+    async function both(ctx: TestContext, calls: Call[]) {
+      const json = (await expectMutationParity(
+        ctx,
+        calls,
+        ["worker", "status"],
+        [],
+      )) as unknown as Body;
+      return { json, human: ctx.out[0] ?? "" };
+    }
+
+    it("reports installed: false, exit 0 and a not-installed heading with no install record and no credential", async () => {
+      const { ctx, calls } = await setup({ config: null, record: null });
+
+      const { json, human } = await both(ctx, calls);
+
+      expect(json).toMatchObject({ ok: true, error: null });
+      expect(json.data).toEqual({
+        installed: false,
+        record: null,
+        running: false,
+        update: LOCAL_UPDATE,
+      });
+      const lines = human.split("\n");
+      expect(lines[0]).toBe("Worker not installed.");
+      expect(lines).not.toContain("Worker status");
+      expect(human).toContain("pidgen worker install");
+      expect(human).not.toContain("still enrolled");
+      expect(calls).toHaveLength(0);
+    });
+
+    it("explains a machine still enrolled with its credential kept when no install record exists", async () => {
+      const { ctx, calls } = await setup({
+        record: null,
+        respond: () => Promise.resolve(ok(workerList([worker(HOST)]))),
+      });
+
+      const { json, human } = await both(ctx, calls);
+
+      expect(json).toMatchObject({ ok: true, error: null });
+      expect(json.data).toEqual({
+        installed: false,
+        record: null,
+        running: false,
+        server: {
+          host_id: HOST,
+          enrolled: true,
+          worker: worker(HOST),
+          service_protocol: "2.3",
+          accepted_protocols: ["2.2", "2.3"],
+        },
+        update: NO_UPDATE,
+        warnings: [],
+      });
+      const prose = human.replace(/\s+/g, " ");
+      expect(human.split("\n")[0]).toBe("Worker not installed.");
+      expect(prose).toContain("pidgen worker install");
+      expect(prose).toContain("still enrolled on the App Service");
+      expect(prose).toContain("credential was kept");
+      expect(prose).toContain("--purge");
+    });
+
+    it("reports installed: false, exit 0, when the server cannot be reached and nothing is installed", async () => {
+      const { ctx, calls } = await setup({
+        record: null,
+        respond: () => Promise.reject(new TypeError("fetch failed")),
+      });
+
+      const { json, human } = await both(ctx, calls);
+
+      expect(json).toMatchObject({ ok: true, error: null });
+      expect(json.data).toEqual({
+        installed: false,
+        record: null,
+        running: false,
+        server: null,
+        update: LOCAL_UPDATE,
+        warnings: [expect.objectContaining({ code: "NETWORK" })],
+      });
+      expect(human.split("\n")[0]).toBe("Worker not installed.");
+      expect(human).not.toContain("still enrolled");
+    });
+
+    it("reports installed: true and keeps the Worker status heading with a valid install record", async () => {
+      const { ctx, calls } = await setup({
+        installed: "1.0.0",
+        respond: () => Promise.resolve(ok(workerList([worker(HOST)]))),
+      });
+
+      const { json, human } = await both(ctx, calls);
+
+      expect(json).toMatchObject({ ok: true, data: { installed: true, running: true } });
+      expect(human.split("\n")[0]).toBe("Worker status");
+      expect(human).not.toContain("Worker not installed.");
+      expect(human).not.toContain("pidgen worker install");
+      expect(human).not.toContain("still enrolled");
+    });
+  });
+
   describe("local only", () => {
     it("keeps the local-only status with no configuration and makes no request", async () => {
       const { ctx, calls } = await setup({ config: null });
@@ -657,7 +766,12 @@ describe("pidgen worker status", () => {
       const { code, body } = await status(ctx);
 
       expect(code).toBe(ExitCode.Ok);
-      expect(body.data).toEqual({ record: RECORD, running: true, update: LOCAL_UPDATE });
+      expect(body.data).toEqual({
+        installed: false,
+        record: RECORD,
+        running: true,
+        update: LOCAL_UPDATE,
+      });
       expect(body.meta).toMatchObject({ profile: null, account: null, request_id: null });
       expect(calls).toHaveLength(0);
     });
@@ -673,7 +787,12 @@ describe("pidgen worker status", () => {
       const { code, body } = await status(ctx);
 
       expect(code).toBe(ExitCode.Ok);
-      expect(body.data).toEqual({ record: RECORD, running: true, update: LOCAL_UPDATE });
+      expect(body.data).toEqual({
+        installed: false,
+        record: RECORD,
+        running: true,
+        update: LOCAL_UPDATE,
+      });
       expect(calls).toHaveLength(0);
     });
 
@@ -684,6 +803,7 @@ describe("pidgen worker status", () => {
 
       expect(code).toBe(ExitCode.Ok);
       expect(body.data).toEqual({
+        installed: false,
         record: { ...RECORD, pid: 99 },
         running: false,
         update: LOCAL_UPDATE,

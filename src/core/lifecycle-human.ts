@@ -16,6 +16,7 @@ export const LIFECYCLE_PRESENTATIONS: Readonly<Record<string, string>> = {
   "worker enroll": "Worker enrolled.",
   "worker start": "Worker started in background.",
   "worker stop": "Worker stopped.",
+  "worker restart": "Worker restarted in background.",
   "worker status": "Worker status",
   "worker verify": "Worker verification",
   "worker doctor": "Worker diagnostics",
@@ -50,6 +51,17 @@ export function renderLifecycle(
     heading = "Worker already installed.";
   if (command === "worker update" && row["updated"] === false)
     heading = "Worker already up to date.";
+  if (command === "worker restart" && isRecord(row["record"])) {
+    // As `worker start --detach` shows it: the new worker's pid, or the container's name.
+    const record = row["record"];
+    const where =
+      typeof record["pid"] === "number"
+        ? `pid ${record["pid"]}`
+        : typeof record["container"] === "string"
+          ? `container ${record["container"]}`
+          : undefined;
+    if (where !== undefined) heading = `Worker restarted in background (${where}).`;
+  }
   if (command === "worker login" && row["login"] === "unknown") {
     heading = "Coding agent login finished; it cannot report whether it is signed in.";
   }
@@ -57,6 +69,15 @@ export function renderLifecycle(
     heading = "Outcome unknown — check the worker's subscriptions before retrying.";
   }
   if (command === "worker status") {
+    if (row["installed"] === false) {
+      heading = "Worker not installed.";
+      notes.push("Install it with `pidgen worker install`.");
+      if (isRecord(row["server"]) && row["server"]["enrolled"] === true) {
+        notes.push(
+          "This machine is still enrolled on the App Service and its worker credential was kept: `pidgen worker uninstall` keeps both unless `--purge` is given. The server's record below is that enrollment, not an installed worker.",
+        );
+      }
+    }
     if (!("server" in row)) notes.push("Local status only; server not checked.");
     else if (row["server"] === null)
       notes.push("Server status unavailable; showing local status only.");

@@ -1,0 +1,130 @@
+{
+  "project_id": "proj-example-sto",
+  "project_key": "STO",
+  "project_name": "Storefront",
+  "repository": "example-org/storefront",
+  "inspection": {
+    "state": "inspecting",
+    "ref": "main",
+    "commit": "3f2c1a9e5b7d4c6a8f0e1d2c3b4a59687f6e5d4c",
+    "source": "forge",
+    "started_at": "2026-10-19T09:00:00Z",
+    "finished_at": null,
+    "failure": null
+  },
+  "areas": [
+    {
+      "area": "checkout",
+      "title": "Checkout",
+      "state": "ok",
+      "summary": "42 MB to clone; no submodules or LFS.",
+      "proposal": null,
+      "ask": null
+    },
+    {
+      "area": "tools",
+      "title": "Tools on the worker",
+      "state": "proposed",
+      "summary": "uv 0.4, Node 22 and Docker 24, from .python-version, .nvmrc and compose.yaml.",
+      "proposal": "[worker] tools lists uv, node and docker.",
+      "ask": null
+    },
+    {
+      "area": "dependencies",
+      "title": "Dependencies in each workspace",
+      "state": "proposed",
+      "summary": "uv.lock (84 packages) and package-lock.json (212 packages).",
+      "proposal": "provision runs uv sync and npm ci with a worker-wide cache.",
+      "ask": null
+    },
+    {
+      "area": "services",
+      "title": "Services",
+      "state": "proposed",
+      "summary": "compose.yaml starts postgres:16 and redis:7; CI uses the same two.",
+      "proposal": "One Compose project per workspace; teardown removes it.",
+      "ask": null
+    },
+    {
+      "area": "database",
+      "title": "Database setup",
+      "state": "proposed",
+      "summary": "alembic.ini and migrations/; CI runs alembic upgrade head.",
+      "proposal": "provision migrates once the services are up.",
+      "ask": null
+    },
+    {
+      "area": "tests",
+      "title": "Tests",
+      "state": "proposed",
+      "summary": "CI runs uv run pytest -m 'not slow' and npm test.",
+      "proposal": "[tests] command runs both; timeout 900 s until a rehearsal measures it.",
+      "ask": null
+    },
+    {
+      "area": "ci",
+      "title": "CI",
+      "state": "ok",
+      "summary": ".github/workflows/ci.yml runs on every pull request.",
+      "proposal": null,
+      "ask": null
+    },
+    {
+      "area": "secrets",
+      "title": "Secrets and data",
+      "state": "needs_you",
+      "summary": "CI reads STRIPE_TEST_KEY.",
+      "proposal": null,
+      "ask": "Add STRIPE_TEST_KEY as a Project secret, or let the tests that need it skip."
+    }
+  ],
+  "questions": [
+    {
+      "question_id": "stripe-test-key",
+      "area": "secrets",
+      "question": "Should workspaces receive STRIPE_TEST_KEY, or do the tests that need it skip?",
+      "evidence": [".github/workflows/ci.yml passes secrets.STRIPE_TEST_KEY to the test job."],
+      "choices": ["pass", "skip"],
+      "default": "skip",
+      "answer": "skip"
+    }
+  ],
+  "proposal": {
+    "state": "draft",
+    "files": [
+      {
+        "path": ".pidgen/pidgen.toml",
+        "executable": false,
+        "bytes": 350
+      },
+      {
+        "path": ".pidgen/scripts/provision",
+        "executable": true,
+        "bytes": 202
+      },
+      {
+        "path": ".pidgen/scripts/activate",
+        "executable": true,
+        "bytes": 118
+      },
+      {
+        "path": ".pidgen/scripts/teardown",
+        "executable": true,
+        "bytes": 131
+      },
+      {
+        "path": ".pidgen/scripts/test",
+        "executable": true,
+        "bytes": 55
+      }
+    ],
+    "assumptions": [
+      "Tests run with uv run pytest -m 'not slow' and npm test, as CI runs them.",
+      "postgres:16 and redis:7 start from compose.yaml, one Compose project per workspace.",
+      "Migrations run with alembic upgrade head after the services start."
+    ],
+    "pull_request": null
+  },
+  "rehearsal": null,
+  "updated_at": "2026-10-19T09:05:00Z"
+}

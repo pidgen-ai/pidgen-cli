@@ -9,7 +9,8 @@ import {
   noInstallRecord,
   readInstallRecord,
   removeKeptArtifact,
-  retireSharedInstall,
+  restartDetached,
+  settleWorkerPath,
   writeInstallRecord,
   type InstallRecord,
   licenceNotice,
@@ -92,7 +93,7 @@ export const workerUpdate: CommandSpec = {
     const local = await adapter.status();
     if (!restart || !local.running || local.record === null) {
       await dropSuperseded(previous, installed);
-      await retireSharedInstall(ctx, previous, local);
+      await settleWorkerPath(ctx, previous, installed, local);
       return {
         data: {
           ...installed,
@@ -105,18 +106,14 @@ export const workerUpdate: CommandSpec = {
       };
     }
 
-    const args = workerArgs(local.record);
-    await adapter.stop(false, global.timeoutSeconds);
-    let started: RunRecord;
-    try {
-      started = await startDetached(adapter, args);
-    } catch (error) {
-      if (!(error instanceof CliError)) throw error;
-      return await rollBack(ctx, adapter, previous, installed, args, error);
-    }
+    const { record: started } = await restartDetached(
+      adapter,
+      { force: false, timeoutSeconds: global.timeoutSeconds },
+      (error, args) => rollBack(ctx, adapter, previous, installed, args, error),
+    );
     await dropSuperseded(previous, installed);
     // Nothing runs from the previous install now.
-    await retireSharedInstall(ctx, previous, null);
+    await settleWorkerPath(ctx, previous, installed, null);
     return {
       data: {
         ...installed,
@@ -130,15 +127,6 @@ export const workerUpdate: CommandSpec = {
     };
   },
 };
-
-async function startDetached(adapter: WorkerAdapter, args: readonly string[]): Promise<RunRecord> {
-  return (await adapter.start(args, true)) as RunRecord;
-}
-
-/** The arguments the running worker was started with: after the command, or the container's. */
-function workerArgs(record: RunRecord): string[] {
-  return "command" in record ? record.command.slice(1) : record.args;
-}
 
 /** The superseded install's kept wheel is removed once the new one is in place. */
 async function dropSuperseded(previous: InstallRecord, installed: InstallRecord): Promise<void> {
@@ -190,7 +178,7 @@ async function rollBack(
   let worker: RunRecord | null = null;
   let restartError: { code: string; message: string } | null = null;
   try {
-    worker = await startDetached(adapter, args);
+    worker = (await adapter.start(args, true)) as RunRecord;
   } catch (error) {
     if (!(error instanceof CliError)) throw error;
     restartError = { code: error.code, message: error.message };

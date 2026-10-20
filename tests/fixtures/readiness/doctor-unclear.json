@@ -1,0 +1,101 @@
+{
+  "project_key": "STO",
+  "project_name": "Storefront",
+  "repository": "acme/storefront",
+  "ref": "main",
+  "commit": "9d02a41c7e5b3f1a2d4e",
+  "since": "2026-10-11T00:00:00Z",
+  "window_days": 7,
+  "ran_at": "2026-10-18T09:12:00Z",
+  "verdict": "unclear",
+  "summary": "1 run failed since 11 Oct and the doctor cannot tell why: STO-42 stopped in its tests on a connection refused to localhost:6379, which neither the setup nor the Ticket's changes explain. Every other workspace built since 1 Oct provisioned and activated.",
+  "groups": [
+    {
+      "group": "setup_files",
+      "title": "Setup files on main",
+      "checks": [
+        {
+          "state": "ok",
+          "summary": ".pidgen/pidgen.toml at 9d02a41, 4 hooks, [tests] and [worker] set",
+          "evidence": null,
+          "tickets": [],
+          "cause": null,
+          "fix": null
+        }
+      ]
+    },
+    {
+      "group": "workers",
+      "title": "Workers",
+      "checks": [
+        {
+          "state": "ok",
+          "summary": "ada-mbp and build-02 meet [worker] tools",
+          "evidence": null,
+          "tickets": [],
+          "cause": null,
+          "fix": null
+        }
+      ]
+    },
+    {
+      "group": "secrets",
+      "title": "Secrets",
+      "checks": [
+        {
+          "state": "ok",
+          "summary": "STRIPE_TEST_KEY set",
+          "evidence": null,
+          "tickets": [],
+          "cause": null,
+          "fix": null
+        }
+      ]
+    },
+    {
+      "group": "workspaces",
+      "title": "Workspaces, 7 days",
+      "checks": [
+        {
+          "state": "ok",
+          "summary": "9 workspaces built; no provision, activation or teardown failures",
+          "evidence": null,
+          "tickets": [],
+          "cause": null,
+          "fix": null
+        }
+      ]
+    },
+    {
+      "group": "tests",
+      "title": "Tests, 7 days",
+      "checks": [
+        {
+          "state": "needs_you",
+          "summary": "1 failure the doctor cannot classify (STO-42)",
+          "evidence": "ConnectionRefusedError: [Errno 111] Connection refused (localhost:6379)",
+          "tickets": ["STO-42"],
+          "cause": null,
+          "fix": "Open the run's test log; if the tests need Redis, add it to compose.yaml and rehearse again."
+        }
+      ]
+    },
+    {
+      "group": "drift",
+      "title": "Drift",
+      "checks": [
+        {
+          "state": "needs_you",
+          "summary": "main is 23 commits past the last rehearsal (1 Oct); .pidgen/ is unchanged",
+          "evidence": null,
+          "tickets": [],
+          "cause": null,
+          "fix": null
+        }
+      ]
+    }
+  ],
+  "fix": null,
+  "failed_tickets": ["STO-42"],
+  "rehearse": "refresh the timings from main (about 6 min)"
+}

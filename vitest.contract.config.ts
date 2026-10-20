@@ -11,6 +11,9 @@ export default defineConfig({
   test: {
     include: ["tests/contract/**/*.test.ts"],
     environment: "node",
+    // Removes the temporary directories tests make (tests/support/temp.ts).
+    setupFiles: ["tests/support/setup.ts"],
+    globalSetup: ["tests/support/global-setup.ts"],
     fileParallelism: false,
     hookTimeout: 60_000,
     testTimeout: 30_000,

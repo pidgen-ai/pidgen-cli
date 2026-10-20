@@ -1,6 +1,17 @@
 import { constants } from "node:os";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
-import { access, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  link,
+  mkdir,
+  open,
+  readFile,
+  rename,
+  rm,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { execFile, spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { CliError } from "./errors.js";
@@ -47,6 +58,14 @@ export function collectedOutput(
   secrets: readonly string[] = [],
 ): ChildOutputWriter | null {
   if (io?.pipeChildren !== true) return null;
+  return lineWriter((text) => io.stderr(text), secrets);
+}
+
+/** A writer of whole lines to `write`, with every one of `secrets` replaced by `[redacted]`. */
+function lineWriter(
+  write: (text: string) => void,
+  secrets: readonly string[] = [],
+): ChildOutputWriter {
   const hide = (text: string) =>
     secrets.reduce(
       (shown, secret) => (secret === "" ? shown : shown.split(secret).join(REDACTED)),
@@ -58,11 +77,11 @@ export function collectedOutput(
       pending += chunk.toString();
       const end = pending.lastIndexOf("\n");
       if (end < 0) return;
-      io.stderr(hide(pending.slice(0, end + 1)));
+      write(hide(pending.slice(0, end + 1)));
       pending = pending.slice(end + 1);
     },
     end() {
-      if (pending !== "") io.stderr(hide(`${pending}\n`));
+      if (pending !== "") write(hide(`${pending}\n`));
       pending = "";
     },
   };
@@ -72,6 +91,11 @@ export interface WorkerRuntime {
   platform: NodeJS.Platform;
   /** The processor architecture; `process.arch` when absent. Picks the worker wheel to install. */
   arch?: NodeJS.Architecture;
+  /**
+   * The contents of `/etc/os-release`, or `null` when it cannot be read. The doctor's `git` check
+   * reads it, on Linux and only when git fails, to name the distribution's way to install git.
+   */
+  osRelease(): Promise<string | null>;
   canExecute(path: string): Promise<void>;
   spawn(command: string, args: readonly string[], options: SpawnOptions): ChildProcess;
   isWorkerProcess(pid: number, executable: string): Promise<boolean>;
@@ -105,6 +129,7 @@ const LOG_NAME = "worker-manager.log";
 export const defaultWorkerRuntime: WorkerRuntime = {
   platform: process.platform,
   arch: process.arch,
+  osRelease: () => readFile("/etc/os-release", "utf8").catch(() => null),
   canExecute: (path) => access(path, fsConstants.X_OK),
   spawn: (command, args, options) => spawn(command, args, options),
   isWorkerProcess: defaultIsWorkerProcess,
@@ -256,6 +281,73 @@ export async function readWorkerCredential(
   };
 }
 
+/** The suffix a moved-aside `worker.env` takes, before its UTC timestamp. */
+export const REPLACED_SUFFIX = ".replaced-";
+
+/**
+ * Moves the worker home's `worker.env` aside to `worker.env.replaced-<UTC timestamp>` in the same
+ * directory, mode 0600, so `pidgen-worker enroll` finds no saved credential and exchanges a new
+ * enrollment. The file is renamed, never read, copied, printed or deleted; an earlier moved file is
+ * never overwritten. Returns the new path, or `null` when there is no `worker.env`.
+ */
+export async function moveWorkerCredentialAside(
+  config: Pick<WorkerConfig, "env" | "homeDir">,
+  now: number,
+): Promise<string | null> {
+  const path = join(resolvePidgenHome(config), WORKER_ENV_NAME);
+  const stamp = new Date(now)
+    .toISOString()
+    .replace(/[-:]/g, "")
+    .replace(/\.\d+Z$/, "Z");
+  const base = `${path}${REPLACED_SUFFIX}${stamp}`;
+  for (let attempt = 1; ; attempt++) {
+    const target = attempt === 1 ? base : `${base}-${attempt}`;
+    try {
+      // link() refuses an existing target, so an earlier moved file is never overwritten.
+      await link(path, target);
+      await unlink(path);
+    } catch (error) {
+      if (isFileNotFoundError(error)) return null;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EEXIST") continue;
+      // A file system without hard links: rename, after checking the name is free.
+      if (code !== "EPERM" && code !== "ENOTSUP" && code !== "ENOSYS") throw error;
+      if (await pathExists(target)) continue;
+      try {
+        await rename(path, target);
+      } catch (renameError) {
+        if (isFileNotFoundError(renameError)) return null;
+        throw renameError;
+      }
+    }
+    await chmod(target, 0o600);
+    return target;
+  }
+}
+
+/**
+ * Puts a `worker.env` that `moveWorkerCredentialAside` moved back, when nothing has been written in
+ * its place since: used when no enrollment was created after all. Never overwrites a `worker.env`.
+ */
+export async function restoreWorkerCredential(
+  config: Pick<WorkerConfig, "env" | "homeDir">,
+  moved: string,
+): Promise<void> {
+  const path = join(resolvePidgenHome(config), WORKER_ENV_NAME);
+  if (await pathExists(path)) return;
+  await rename(moved, path);
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch (error) {
+    if (isFileNotFoundError(error)) return false;
+    throw error;
+  }
+}
+
 /** True when the worker runs on `runtime`'s platform: Linux and macOS. */
 export function workerPlatformSupported(runtime: Pick<WorkerRuntime, "platform">): boolean {
   return runtime.platform === "linux" || runtime.platform === "darwin";
@@ -290,13 +382,35 @@ export async function findWorker(
 }
 
 /**
+ * The mark `pidgen-worker enroll` puts in its refusal line when the server refuses its host id
+ * because a worker already holds it (exit 1): `host id '<id>' is already enrolled in this Account
+ * (HTTP 409 WORKER_HOST_TAKEN).` Host ids are unique across Accounts, so the holder may be a worker
+ * of another Account the CLI cannot see, or this Account's removed worker on a server that does not
+ * let an Account reclaim a removed worker's name. The server leaves the enrollment unspent.
+ */
+export const HOST_TAKEN_MARK = "(HTTP 409 WORKER_HOST_TAKEN)";
+
+/** How a `pidgen-worker enroll` run ended. */
+export interface WorkerEnrollResult {
+  /** The worker's exit status. */
+  status: number;
+  /**
+   * Whether the server refused the host id as taken (exit 1, with `HOST_TAKEN_MARK` in its output).
+   */
+  hostTaken: boolean;
+  /** The host id the refusal names, when it names one. */
+  refusedHostId: string | null;
+}
+
+/**
  * Runs `pidgen-worker enroll --token <token> --server <server> --no-start [args]`. The one-time
  * token goes only to the worker on its command line; the worker exchanges it for its credential at
  * `server`, the server the enrollment was created on, and stores that itself. `--no-start` leaves
  * starting to `pidgen worker start`, which records the worker it starts. `args` come last, so the
- * caller's own flags win. The worker's output goes to the CLI's standard error, or, when the caller
- * collects it (`io.pipeChildren`), to `io.stderr()` after the command's line, with the token
- * replaced by `[redacted]` in both. Returns the worker's exit status.
+ * caller's own flags win. The worker's output is read, to recognise the server's host-taken
+ * refusal, and goes on to the CLI's standard error, or, when the caller collects it
+ * (`io.pipeChildren`), to `io.stderr()` after the command's line, with the token replaced by
+ * `[redacted]` in both. Returns the worker's exit status and whether its host id was refused.
  */
 export async function runWorkerEnroll(
   config: WorkerConfig,
@@ -305,24 +419,41 @@ export async function runWorkerEnroll(
   server: string,
   args: readonly string[],
   runtime: WorkerRuntime = defaultWorkerRuntime,
-): Promise<number> {
+): Promise<WorkerEnrollResult> {
   const enroll = ["enroll", "--token", token, "--server", server, "--no-start", ...args];
   const collected = collectedOutput(config.io, [token]);
   if (collected !== null) {
     const shown = [worker, ...enroll].map((arg) => (arg === token ? REDACTED : arg));
     config.io!.stderr(`$ ${displayCommand(shown)}\n`);
   }
+  // Without a collecting caller the worker's lines still go to the CLI's standard error, whole.
+  const output =
+    collected ?? lineWriter((text) => (config.io ?? processStderr).stderr(text), [token]);
+  let seen = "";
   const child = runtime.spawn(worker, enroll, {
     cwd: config.cwd,
     env: workerEnvironment(config),
-    stdio: collected ? ["inherit", "pipe", "pipe"] : ["inherit", 2, 2],
+    stdio: ["inherit", "pipe", "pipe"],
   });
-  child.stdout?.on("data", (chunk: string | Buffer) => collected?.write(chunk));
-  child.stderr?.on("data", (chunk: string | Buffer) => collected?.write(chunk));
+  const read = (chunk: string | Buffer) => {
+    const text = chunk.toString();
+    // Only the tail is kept: enough to hold the refusal line, never the whole output.
+    seen = (seen + text).slice(-SEEN_LIMIT);
+    output.write(text);
+  };
+  child.stdout?.on("data", read);
+  child.stderr?.on("data", read);
   const status = await waitForChild(child);
-  collected?.end();
-  return status;
+  output.end();
+  const hostTaken = status === 1 && seen.includes(HOST_TAKEN_MARK);
+  const named = hostTaken ? /host id '([^']+)'/.exec(seen) : null;
+  return { status, hostTaken, refusedHostId: named?.[1] ?? null };
 }
+
+/** How much of `pidgen-worker enroll`'s last output is kept to find its refusal line. */
+const SEEN_LIMIT = 4096;
+
+const processStderr: ChildOutputIo = { stderr: (text) => void process.stderr.write(text) };
 
 export async function runWorkerForeground(
   config: WorkerConfig,
@@ -608,7 +739,10 @@ async function writeWorkerRecord(config: WorkerConfig, record: WorkerRecord): Pr
   });
 }
 
-async function removeWorkerRecord(config: WorkerConfig): Promise<void> {
+/** Removes the detached worker's run record, if there is one. */
+export async function removeWorkerRecord(
+  config: Pick<WorkerConfig, "env" | "homeDir">,
+): Promise<void> {
   await rm(workerRecordPath(config), { force: true });
 }
 

@@ -31,9 +31,11 @@ changes, update the matching page in the same change. Contributor material belon
    `contracts/pending/` (an OpenAPI document holding only that route and its schemas), with its
    types generated from it, responses validated against it, and contract tests served from it by
    the Prism mock. When the server publishes the route, it is pulled with the public document and
-   the fragment is deleted. There are none today: the worker release, domain, Domain Epic,
-   contract, contract creation, contract publishing and Request routes are published, and their
-   fragments are deleted.
+   the fragment is deleted. There are two today: `contracts/pending/worker-enrollments.json` (the
+   install id on the enrollment create and the worker list, the caller's enrollment list, and the
+   enrollment withdraw) and `contracts/pending/project-readiness.json` (a Project's readiness, its
+   proposal archive and pull request, answers, rehearsal and the Project doctor). The worker release, domain, Domain Epic, contract, contract creation,
+   contract publishing and Request routes are published, and their fragments are deleted.
 3. **The worker is separate.** Never bundle, pin, vendor, or import `pidgen-worker`. `pidgen worker`
    commands run the installed `pidgen-worker` as a subprocess, and the CLI never stores the credential.
 4. **No telemetry.** The CLI sends nothing anywhere except the requests a command makes to the

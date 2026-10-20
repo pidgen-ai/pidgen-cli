@@ -1,11 +1,11 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll } from "vitest";
+import { tempDirSync } from "./temp.js";
 
 /**
  * Runs Prism (`@stoplight/prism-cli`) in mock mode for an OpenAPI document, on a free loopback
@@ -60,7 +60,7 @@ export function committedDocumentForStaticMock(examples: Record<string, unknown>
     if (json === undefined) throw new Error(`${route} has no 2xx JSON answer in the document`);
     json["example"] = example;
   }
-  const file = join(mkdtempSync(join(tmpdir(), "pidgen-mock-")), "openapi.json");
+  const file = join(tempDirSync("pidgen-mock-"), "openapi.json");
   writeFileSync(file, JSON.stringify(document));
   return file;
 }

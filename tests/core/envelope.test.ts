@@ -816,6 +816,20 @@ describe.each([40, 80, 120])("lifecycle presentation at %s columns", (columns) =
     ["worker start", "Worker started in background.", { running: true, record: { pid: 123 } }],
     ["worker stop", "Worker stopped.", { forced: false, record: { pid: 123 } }],
     [
+      "worker restart",
+      "Worker restarted in background",
+      { stopped: { forced: false, record: { pid: 123 } }, record: { pid: 124 }, running: true },
+    ],
+    [
+      "worker restart",
+      "Worker restarted in background",
+      {
+        stopped: { forced: false, record: { container: "pidgen-worker" } },
+        record: { container: "pidgen-worker", status: "running" },
+        running: true,
+      },
+    ],
+    [
       "worker status",
       "Worker status",
       {
@@ -963,6 +977,88 @@ it("counts both worker and CLI diagnostic check shapes without treating skips as
     ],
   });
   expect(output).toContain("Checks: 1 ok, 0 warnings, 1 failed, 1 skipped.");
+});
+
+// AC-c8e82b49e423, AC-d420a2efc504, AC-431a20d66a7a, AC-8ac423527b9f: `worker status` says when no
+// worker is installed, how to install one, and why the server may still list this machine.
+describe("worker status install state", () => {
+  const ENROLLED = {
+    host_id: "worker.example.com",
+    enrolled: true,
+    worker: { host_id: "worker.example.com", revoked_at: null },
+    service_protocol: "2.3",
+    accepted_protocols: ["2.3"],
+  };
+
+  it("leads with Worker not installed. and the install command when nothing is installed", () => {
+    const output = humanRead("worker status", {
+      installed: false,
+      record: null,
+      running: false,
+      update: { installed: null, current: null, needed: false, reason: null },
+    });
+    const lines = output.split("\n");
+    expect(lines[0]).toBe("Worker not installed.");
+    expect(lines).not.toContain("Worker status");
+    expect(output).toContain("pidgen worker install");
+    expect(output).not.toContain("still enrolled");
+  });
+
+  it("explains a machine still enrolled, with its credential kept, under the not-installed heading", () => {
+    const output = humanRead("worker status", {
+      installed: false,
+      record: null,
+      running: false,
+      server: ENROLLED,
+      update: { installed: null, current: "1.0", needed: false, reason: null },
+      warnings: [],
+    });
+    const prose = output.replace(/\s+/g, " ");
+    expect(output.split("\n")[0]).toBe("Worker not installed.");
+    expect(prose).toContain("pidgen worker install");
+    expect(prose).toContain("still enrolled on the App Service");
+    expect(prose).toContain("credential was kept");
+    expect(prose).toContain("--purge");
+  });
+
+  it("does not mention enrollment when the server does not list this machine as enrolled", () => {
+    const output = humanRead("worker status", {
+      installed: false,
+      record: null,
+      running: false,
+      server: { ...ENROLLED, enrolled: false, worker: null },
+      update: { installed: null, current: "1.0", needed: false, reason: null },
+      warnings: [],
+    });
+    expect(output.split("\n")[0]).toBe("Worker not installed.");
+    expect(output).not.toContain("still enrolled");
+  });
+
+  it.each([40, 80, 120])("wraps the not-installed notes at width %s", (columns) => {
+    const output = humanRead(
+      "worker status",
+      { installed: false, record: null, running: false, server: ENROLLED, warnings: [] },
+      columns,
+    );
+    expect(output.split("\n")[0]).toBe("Worker not installed.");
+    for (const line of output.trimEnd().split("\n"))
+      expect(line.length).toBeLessThanOrEqual(columns);
+  });
+
+  it("keeps the Worker status heading, with no install hint, when a worker is installed", () => {
+    const output = humanRead("worker status", {
+      installed: true,
+      record: null,
+      running: false,
+      server: ENROLLED,
+      update: { installed: "1.0.0", current: "1.0", needed: false, reason: null },
+      warnings: [],
+    });
+    expect(output.split("\n")[0]).toBe("Worker status");
+    expect(output).not.toContain("Worker not installed.");
+    expect(output).not.toContain("pidgen worker install");
+    expect(output).not.toContain("still enrolled");
+  });
 });
 
 it.each([40, 80, 120])("wraps lifecycle summary prose at width %s", (columns) => {

@@ -91,6 +91,8 @@ repository instead. Start a new agent session, then ask it, for example:
 | `pidgen-replay-node` | Re-run one step of a run as a new attempt |
 | `pidgen-unstick-ticket` | Choose between answering a clarification, retrying, or filing new work |
 | `pidgen-setup-worker` | Set up, verify, and configure a worker on this machine |
+| `pidgen-project-readiness` | Get a project's repository ready, and ask whether its setup is why work fails |
+| `pidgen-setup-workspace` | Make a repository's tests pass in isolated ticket workspaces with a `pidgen.toml` |
 
 After updating the CLI, run `pidgen skills install` again to update installed copies. See
 [Install agent skills](docs/install-skills.md) for a walkthrough and the

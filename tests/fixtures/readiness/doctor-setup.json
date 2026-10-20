@@ -1,0 +1,122 @@
+{
+  "project_key": "STO",
+  "project_name": "Storefront",
+  "repository": "acme/storefront",
+  "ref": "main",
+  "commit": "7c1e0f2a9b8d4c3e1f0a",
+  "since": "2026-10-11T00:00:00Z",
+  "window_days": 7,
+  "ran_at": "2026-10-18T09:12:00Z",
+  "verdict": "setup",
+  "summary": "5 of the 6 runs that failed since 11 Oct stopped before any test ran: activate exits 1 whenever uv.lock differs from what provision installed. STO-31 changed uv.lock on 15 Oct, and every workspace built since fails the same way.",
+  "groups": [
+    {
+      "group": "setup_files",
+      "title": "Setup files on main",
+      "checks": [
+        {
+          "state": "ok",
+          "summary": ".pidgen/pidgen.toml at 7c1e0f2, 4 hooks, [tests] and [worker] set",
+          "evidence": null,
+          "tickets": [],
+          "cause": null,
+          "fix": null
+        }
+      ]
+    },
+    {
+      "group": "workers",
+      "title": "Workers",
+      "checks": [
+        {
+          "state": "ok",
+          "summary": "ada-mbp meets uv >= 0.4, node >= 22, docker >= 24 (the only one that does)",
+          "evidence": null,
+          "tickets": [],
+          "cause": null,
+          "fix": null
+        }
+      ]
+    },
+    {
+      "group": "secrets",
+      "title": "Secrets",
+      "checks": [
+        {
+          "state": "ok",
+          "summary": "STRIPE_TEST_KEY set",
+          "evidence": null,
+          "tickets": [],
+          "cause": null,
+          "fix": null
+        }
+      ]
+    },
+    {
+      "group": "workspaces",
+      "title": "Workspaces, 7 days",
+      "checks": [
+        {
+          "state": "failed",
+          "summary": "5 of 6 failures are activate exiting 1",
+          "evidence": "uv.lock changed since provision; run provision",
+          "tickets": ["STO-33", "STO-34", "STO-35", "STO-36", "STO-37"],
+          "cause": ".pidgen/scripts/activate was changed on 14 Oct by STO-30 to fail when the lockfile hash differs.",
+          "fix": "activate must not fail on something a Ticket changes: warn on stderr and exit 0."
+        },
+        {
+          "state": "ok",
+          "summary": "No provision failures, no hook timeouts, no residue blocks",
+          "evidence": null,
+          "tickets": [],
+          "cause": null,
+          "fix": null
+        }
+      ]
+    },
+    {
+      "group": "tests",
+      "title": "Tests, 7 days",
+      "checks": [
+        {
+          "state": "ok",
+          "summary": "1 failure was code, not environment (STO-32)",
+          "evidence": null,
+          "tickets": ["STO-32"],
+          "cause": null,
+          "fix": null
+        }
+      ]
+    },
+    {
+      "group": "drift",
+      "title": "Drift",
+      "checks": [
+        {
+          "state": "needs_you",
+          "summary": "main is 23 commits past the last rehearsal (1 Oct)",
+          "evidence": null,
+          "tickets": [],
+          "cause": null,
+          "fix": null
+        },
+        {
+          "state": "needs_you",
+          "summary": "1 leaked Compose project on ada-mbp (STO-29)",
+          "evidence": null,
+          "tickets": ["STO-29"],
+          "cause": null,
+          "fix": null
+        }
+      ]
+    }
+  ],
+  "fix": {
+    "summary": "activate: warn instead of failing when uv.lock changes",
+    "template": "activate_warn",
+    "pull_request": null,
+    "retry": ["STO-33", "STO-34", "STO-35", "STO-36", "STO-37"]
+  },
+  "failed_tickets": ["STO-32", "STO-33", "STO-34", "STO-35", "STO-36", "STO-37"],
+  "rehearse": "refresh the timings from main (about 6 min)"
+}

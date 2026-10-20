@@ -19,6 +19,10 @@ the machine is documented by the worker itself:
 [Worker troubleshooting codes](https://docs.pidgen.ai/worker/troubleshooting/), and
 [Run as a service](https://docs.pidgen.ai/worker/run-as-a-service/) under a service manager.
 
+For model upgrades and local harness customization, see [Use a new model on a worker](worker-models.md)
+and the versioned [Worker policy reference](worker-policy.md). Capacity and subscriptions still
+belong in `node.yaml`; harness policy is a separate file.
+
 ## Set up a worker
 
 ```console
@@ -178,6 +182,20 @@ command runs the `pidgen-worker` its `location` names.
 name yourself, put its bin directory on `PATH` (`export PATH="$HOME/.pidgen/worker/bin:$PATH"`,
 or `$PIDGEN_HOME/worker/bin`), or run `~/.pidgen/worker/bin/pidgen-worker`.
 
+After a wheel install or update, the CLI says in one line on standard error when running
+`pidgen-worker` by name no longer reaches the worker it installed, with the `export PATH=…` line
+for its bin directory:
+
+- Another `pidgen-worker` is first on `PATH`, such as one you installed with `uv tool install` or
+  pipx. The CLI neither runs nor updates that copy, so the two can drift apart; `pidgen doctor`
+  warns about it too.
+- An earlier CLI's install in uv's shared slot (`~/.local/bin/pidgen-worker`) was just removed, so
+  `pidgen-worker` is no longer on `PATH` at all. A service manager or script that names the old
+  path must name the new one.
+
+Nothing is said when the installed `pidgen-worker`, or a symlink to it, is first on `PATH`. The
+JSON envelope is unchanged.
+
 ## Verify the installed worker
 
 ```console
@@ -278,17 +296,36 @@ filesystem root. With no install record it exits 4 with `WORKER_NOT_INSTALLED`.
 
 `data` is `uninstalled` (the removed install record), `stopped` (`{record, forced}` of the worker it
 stopped, or `null`), `removed` (what was removed, such as `tool pidgen-worker` or
-`image <reference>@<digest>`), `purged` and `worker_home`.
+`image <reference>@<digest>`), `purged` and `worker_home`. A stale detached run record (a recorded
+worker that already exited) is removed too, so a later `worker status` reports `record: null`.
+
+Uninstalling does not revoke the enrollment on the App Service. Afterwards `pidgen worker status`
+reports `installed: false` and, in a terminal, starts with `Worker not installed.` and the
+`pidgen worker install` command; when a credential is configured and the server still lists this
+machine as enrolled, it adds that the enrollment and the worker's credential were kept because
+`--purge` was not given ([The App Service's view](#the-app-services-view)).
 
 ## Enroll a worker
 
 ```console
-$ pidgen worker enroll [--label <label>] [--install | --no-install] [-- args]
+$ pidgen worker enroll [--label <label>] [--install | --no-install] [--replace-credential] [-- args]
 ```
 
 One command takes a machine with a worker installed, or one it may install, to an enrolled worker.
 The install comes first, so the enrollment is created only once a verified worker is present:
 
+0. First it reads the worker home's `worker.env` (`$PIDGEN_HOME/worker.env`, normally
+   `~/.pidgen/worker.env`), for whether it holds a credential (`PIDGEN_NODE_TOKEN`) and nothing
+   else. `pidgen-worker enroll` skips the token exchange and keeps a saved credential, so an
+   enrollment created then would never be used. Without `--replace-credential`, a home holding a
+   credential exits 5 with `WORKER_CREDENTIAL_PRESENT` before anything is installed or an
+   enrollment is created, and leaves `worker.env` as it is; the message names the file and both
+   ways on: `pidgen worker start` to use the saved credential, or `--replace-credential` to enroll
+   anew. With `--replace-credential`, just before step 3 creates the enrollment, the CLI renames
+   `worker.env` to `worker.env.replaced-<UTC timestamp>` in the same folder (mode 0600; an earlier
+   moved file is never overwritten) and reports the new path in `data.replaced`. It never reads
+   the credential's value, prints it, returns it, or deletes the moved file; when the server
+   refuses the enrollment, the file is put back. With no `worker.env`, the flag changes nothing.
 1. When `pidgen-worker` is already installed (the worker the install record names, at
    `PIDGEN_WORKER_BIN`, or with no record on `PATH`), it skips to step 3.
 2. Otherwise, with `--install`, it runs the same install as `pidgen worker install`
@@ -311,24 +348,53 @@ The install comes first, so the enrollment is created only once a verified worke
      `PATH`. An install whose worker cannot be run from there exits 2 with `WORKER_NOT_FOUND` and
      the install record in `error.details.installed`.
 3. Only now it creates an enrollment in the current Account (`POST /api/v1/workers/enrollments`,
-   with `--label` as its name). This needs the Account Owner or Administrator role, or a Personal
+   with `--label` as its name and this install's id as `install_id`; see
+   [This install's id](#this-installs-id)). This needs the Account Owner or Administrator role, or a Personal
    API Token with `workers:enroll`; any other caller exits 3 with `FORBIDDEN` and no worker is
    enrolled (a worker installed in step 2 stays installed). The enrollment counts against the
    Account's worker allowance.
 4. It runs `pidgen-worker enroll --token <one-time token> --server <server> --no-start` followed by
-   the arguments after `--`, which win over the CLI's own. `<server>` is the server the enrollment
+   the arguments after `--`, which win over the CLI's own. The worker home holds no credential at
+   this point (step 0), so the worker redeems this enrollment. `<server>` is the server the enrollment
    was created on. The worker exchanges the one-time token there for its credential and stores it.
    The one-time token expires after 24 hours and can be used once. Enrolling does not start the
    worker: run `pidgen worker start --detach`, which records the worker so that `worker status`,
-   `worker stop` and `worker update --restart` can find it (`pidgen setup` does this for you). A failing worker exits 1 with `ENROLL_FAILED` and its status
-   in `error.details.exit_code`.
+   `worker stop`, `worker restart` and `worker update --restart` can find it (`pidgen setup` does this for you). A failing worker exits 1 with `ENROLL_FAILED` and its status
+   in `error.details.exit_code`. When the server refuses the worker's host id because another
+   worker holds it (`HTTP 409 WORKER_HOST_TAKEN` in the worker's output), the command exits 5 with
+   `WORKER_HOST_TAKEN` and the host id in `error.details.host_id`; enroll again under another name.
 
 The enrollment response also lists install options (a container image and a Python package); the
 CLI reports them in `data.install` but never runs them, and never runs any command string from a
 server response. Every command the CLI runs is composed by the CLI and run with an argument list,
 never through a shell. The install's and the worker's output go to standard error, so standard
-output carries only the CLI result (an envelope in JSON mode). An enrollment the CLI created but could not hand to a worker is
-not used and expires on its own.
+output carries only the CLI result (an envelope in JSON mode).
+
+An enrollment the CLI created but could not use is withdrawn before the command exits: when
+`pidgen-worker enroll` fails (`ENROLL_FAILED`, exit 1), the server refuses its host id
+(`WORKER_HOST_TAKEN`, exit 5), or anything else fails after the enrollment was created, the CLI
+sends `DELETE /api/v1/workers/enrollments/{enrollment_id}` for it, says so on standard error, and
+reports the failure with its own code and exit code, `error.details.withdrawn: true` and a message
+ending `The enrollment <id> was withdrawn.` A failed withdraw is only a note: `withdrawn` is
+`false`, `error.details.withdraw_error` names the server's code and message, and the enrollment
+expires on its own after 24 hours. A failed run leaves no enrollment waiting.
+
+### This install's id
+
+The worker home keeps a random id for this install in `install-id` (`~/.pidgen/install-id`, or
+`$PIDGEN_HOME/install-id`): one line of 32 lowercase hex characters from 16 random bytes. It names
+the install, not the machine (it is never derived from hardware; another worker home on the same
+machine has its own), and it is not a credential. `pidgen worker enroll` and `pidgen setup`
+create it when it is absent and never overwrite it; `pidgen-worker` keeps the same file, and
+whichever runs first creates it. Moving `worker.env` aside (`--replace-credential`) leaves it alone.
+A file that holds anything else is left as it is, with a note on standard error, and no id is sent.
+
+The CLI sends it as `install_id` when it creates an enrollment, and reports what it sent in
+`data.install_id`. The App Service then replaces this install's earlier pending enrollment instead
+of keeping both, and lists the worker it enrolls with the id (`install_id` on each worker of
+`GET /api/v1/workers`), so setup can tell this install's worker even after `worker.env` is gone. A
+server from before install ids refuses the field (`422` naming `install_id`): the CLI creates the
+enrollment once more without it, and `data.install_id` is `null`.
 
 `pidgen worker enroll` enrolls the `pidgen-worker` the CLI runs (see [below](#run-and-check-a-worker)). Enrolling a worker
 installed in the container form through `pidgen worker enroll` is *planned*.
@@ -344,6 +410,7 @@ credential.
 | `pidgen worker start [-- args]` | Runs `pidgen-worker` in the foreground with inherited standard streams and the arguments that follow `--` |
 | `pidgen worker start --detach [-- args]` | Starts `pidgen-worker` in its own session and writes its output to the worker-manager log |
 | `pidgen worker stop [--force]` | Stops the worker started with `--detach`; `--force` kills it if it does not stop before the global `--timeout` |
+| `pidgen worker restart [--force]` | Stops the worker started with `--detach` as `worker stop` does and starts it detached again with the arguments in its run record |
 | `pidgen worker status [--host <host_id>]` | Shows the detached worker record, whether that process is still the recorded `pidgen-worker`, and the App Service's record of this worker ([below](#the-app-services-view)) |
 | `pidgen worker doctor [-- args]` | Runs `pidgen-worker doctor --json` and returns the report using the selected output format (an envelope in JSON mode); for this machine before a worker is installed, use [`pidgen doctor`](#check-this-machine) |
 
@@ -374,6 +441,27 @@ stale record with `running: false`. `worker stop` sends `SIGTERM` and waits for 
 (120 seconds by default). It exits 8 with `TIMEOUT` if the process remains, or sends `SIGKILL` when
 `--force` is present. With no running record, it exits 4 with `WORKER_NOT_RUNNING`.
 
+`worker restart` restarts the detached worker with the arguments it was started with, after you
+change its environment or when it misbehaves: it stops the worker exactly as `worker stop` does,
+then starts it detached again with the arguments recorded in `pidgen-worker.json` (the command
+after the worker's path), in the environment of the shell you run it from, and waits two seconds as
+`worker start --detach` does. It exits 0 with `stopped` (what `worker stop` reports for the old
+process), `record` (the new run record, with the new process id) and `running: true`; in a
+terminal it says `Worker restarted in background (pid <pid>).` It adds no exit codes of its own:
+
+- With no running record (none, or a stale one), it exits 4 with `WORKER_NOT_RUNNING`, naming
+  `pidgen worker start --detach`, and starts nothing.
+- A worker still running after the global `--timeout` exits 8 with `TIMEOUT` and is left running;
+  with `--force` it is killed with `SIGKILL`, as `worker stop --force` kills it, and the restart
+  continues.
+- A new worker that exits during the startup check exits 1 with `WORKER_EXITED` and the last 20 log
+  lines in `error.details.log_tail`.
+
+Restart takes no `-- args`; an unknown option or a stray argument exits 2 with `CLI_USAGE`. To
+change the arguments, run `worker stop`, then `worker start --detach -- <args>`. A foreground
+`worker start` has no record: stop it and start it again yourself. `worker update --restart`
+restarts the worker the same way after an update.
+
 A failed doctor exits 1 with `DOCTOR_FAILED` and includes the diagnostic report in `error.details`.
 The worker documents its diagnostic codes in
 [Worker troubleshooting codes](https://docs.pidgen.ai/worker/troubleshooting/).
@@ -394,6 +482,7 @@ record decides; none of the commands takes `--runtime`.
 | `worker start [-- args]` | `docker run --rm --interactive --name pidgen-worker --volume pidgen-worker-home:/pidgen --env PIDGEN_HOME=/pidgen <reference>@<digest> [args]` in the foreground, forwarding `SIGINT` and `SIGTERM`, and exits with its status |
 | `worker start --detach [-- args]` | The same with `--detach` instead of `--rm --interactive`; both label the container with its arguments (`--label ai.pidgen.worker.args=<JSON>`). It waits two seconds and reads the container's state; a container that has already stopped exits 1 with `WORKER_EXITED` and the last 20 lines of `docker logs` in `error.details.log_tail` |
 | `worker stop [--force]` | `docker kill --signal SIGTERM pidgen-worker`, waits for the global `--timeout`, then `docker rm pidgen-worker`. A container still running exits 8 with `TIMEOUT`, or with `--force` is killed (`docker kill`) and removed |
+| `worker restart [--force]` | What `worker stop [--force]` runs, then what `worker start --detach` runs with the arguments kept in the old container's `ai.pidgen.worker.args` label. `data` is `stopped`, `record` (the new container's) and `running: true`; in a terminal it says `Worker restarted in background (container pidgen-worker).` No running container exits 4 with `WORKER_NOT_RUNNING`, `TIMEOUT` (exit 8) leaves it running, and a new container that stops at once exits 1 with `WORKER_EXITED` |
 | `worker status` | `docker inspect --type container pidgen-worker`: `record` is `{container, id, image, volume, status, started_at, args}` (or `null` when there is no container) and `running` |
 | `worker doctor [-- args]` | `docker exec pidgen-worker pidgen-worker doctor --json [args]` in the running container |
 
@@ -410,7 +499,7 @@ When a credential is configured, `pidgen worker status` also reads the Account's
 id given with `--host`. That route needs the Account Owner or Administrator role; no Personal API
 Token scope reaches it.
 
-`data` then has `record`, `running` and `update` as before, plus:
+`data` then has `installed`, `record`, `running` and `update` as before, plus:
 
 - `server`: `host_id` (the host id looked for), `enrolled`, `worker`, and the service's
   `service_protocol` and `accepted_protocols`. `worker` is the server's record of this worker —
@@ -422,7 +511,7 @@ Token scope reaches it.
 
 | Situation | Result |
 |---|---|
-| No server or no credential configured | Local only: `data` is `{record, running, update}` and no request is made |
+| No server or no credential configured | Local only: `data` is `{installed, record, running, update}` and no request is made |
 | The server lists a worker with this host id | `server.enrolled: true`, `server.worker` is its record; an unrevoked record is preferred over a revoked one |
 | No worker with this host id, or only a revoked one | `server.enrolled: false`, `server.worker` is `null` (or the revoked record); exit 0, not an error |
 | The server cannot be reached, times out, or refuses | `server: null` and a warning carrying the error's code (`NETWORK`, `TIMEOUT`, `FORBIDDEN`, …); exit 0 |
@@ -430,7 +519,15 @@ Token scope reaches it.
 
 `worker status` always exits 0 once it has read the local record; only a usage error (an empty
 `--host`) or an unsupported platform fails it. An install record that cannot be read is a
-warning (`INSTALL_RECORD_INVALID`) with `update.installed: null`.
+warning (`INSTALL_RECORD_INVALID`) with `installed: false` and `update.installed: null`.
+
+`installed` is `true` when a valid install record exists (either form) and `false` when there is
+none. With no install record, as after `pidgen worker uninstall`, the worker is reported as not
+installed and the command still exits 0, not `WORKER_NOT_INSTALLED`: in a terminal the output starts
+with `Worker not installed.` and names `pidgen worker install`. When a credential is configured and
+the server still lists this machine as enrolled, a note says the machine is still enrolled on the
+App Service and its worker credential was kept (`worker uninstall` keeps both unless `--purge` is
+given), so the server's record below it is that enrollment, not an installed worker.
 
 ### Is an update needed
 
