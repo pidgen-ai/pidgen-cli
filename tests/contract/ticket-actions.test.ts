@@ -104,6 +104,8 @@ describe("Ticket actions against the Prism mock of the committed document", () =
         url: `${server().url}/api/v1/tickets/PIDGEN-4/actions?family=recovery&run_id=run-2`,
         method: "GET",
       },
+      // The ticket, for its failure projection.
+      { url: `${server().url}/api/v1/tickets/PIDGEN-4`, method: "GET" },
     ]);
   });
 
@@ -213,6 +215,8 @@ describe("Ticket actions against the Prism mock of the committed document", () =
         url: `${server().url}/api/v1/tickets/PIDGEN-4/actions?family=ticket_control&prerequisite_id=TKT-prereq-example`,
         method: "GET",
       },
+      // The ticket, for its failure projection.
+      { url: `${server().url}/api/v1/tickets/PIDGEN-4`, method: "GET" },
     ]);
   });
 
@@ -383,6 +387,8 @@ describe("Decision follow-up actions against the Prism mock of the committed doc
         url: `${server().url}/api/v1/tickets/PIDGEN-4/actions?family=decision_followup`,
         method: "GET",
       },
+      // The ticket, for its failure projection.
+      { url: `${server().url}/api/v1/tickets/PIDGEN-4`, method: "GET" },
     ]);
     expect(Array.isArray((body.data as { actions: unknown[] }).actions)).toBe(true);
   });
@@ -566,6 +572,8 @@ describe("Plan, start, approve and override actions against the Prism mock of th
         url: `${server().url}/api/v1/tickets/PIDGEN-4/actions?family=decision_answers`,
         method: "GET",
       },
+      // The ticket, for its failure projection.
+      { url: `${server().url}/api/v1/tickets/PIDGEN-4`, method: "GET" },
     ]);
     expect(Array.isArray((body.data as { actions: unknown[] }).actions)).toBe(true);
   });
