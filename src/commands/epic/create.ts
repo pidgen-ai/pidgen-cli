@@ -11,12 +11,13 @@ import { createTicket, DOMAIN_OPTION, givenDomain } from "../ticket/create.js";
  * `data` is the created Epic. A server refusal keeps its code, e.g. `PROJECT_NOT_FOUND` (exit
  * code 4) or `EPIC_FIELD_REFUSED` (exit code 2).
  *
- * `--domain <domain>` files a Domain Epic, as `pidgen ticket create --domain` does: `domain_id`
+ * `--domain <domain>` files an Initiative (an Epic in a domain), as `pidgen ticket create --domain` does: `domain_id`
  * instead of `project_id`, and no `branch_mode` or `feature_branch`.
  */
 export const epicCreate: CommandSpec = {
   path: ["epic", "create"],
-  summary: "Create an Epic from a JSON or YAML file (ticket create --kind epic)",
+  summary:
+    "Create an Epic from a JSON or YAML file (ticket create --kind epic); --domain an Initiative",
   configure(command: Command) {
     command
       .requiredOption("-f, --file <file>", "the Epic as JSON or YAML; - reads standard input")

@@ -5,6 +5,7 @@ import { DOMAIN_EPIC_REFUSED_FIELDS } from "../../core/domain-epics.js";
 import { optionalText } from "../../core/domains.js";
 import { inputInvalid, readInput, validateBody, type InputIssue } from "../../core/input.js";
 import type { CommandResult, CommandSpec } from "../../core/registry.js";
+import { renderDetails } from "../../core/resource-human.js";
 import { openSession } from "../../core/session.js";
 import type { components } from "../../generated/api.js";
 import { givenKind, kindOption, type TicketKind } from "./kind.js";
@@ -18,11 +19,13 @@ export const CREATE_ROUTE = { method: "post", path: "/tickets" } as const;
  * Creates a ticket from the file `source` names (`-` reads standard input) with `POST /tickets`.
  * With `kind`, the body's `kind` is set to it; a file that names another kind is `INPUT_INVALID`.
  *
- * With `domain`, the ticket is a Domain Epic: the body is sent with `kind: epic` and `domain_id`
+ * With `domain`, the ticket is an Initiative (an Epic filed in a domain, which the API calls a
+ * Domain Epic): the body is sent with `kind: epic` and `domain_id`
  * set to the domain instead of a `project_id`, and validated against the published request, which
  * carries `domain_id`. Another `kind`, or a file that names
  * `project_id`, `branch_mode`, `feature_branch`, another kind or another `domain_id`, is
- * `INPUT_INVALID` and nothing is sent. Without `domain` nothing changes.
+ * `INPUT_INVALID` and nothing is sent. A terminal is told `Initiative <key> created.` Without
+ * `domain` nothing changes.
  */
 export async function createTicket(
   ctx: RunContext,
@@ -32,7 +35,7 @@ export async function createTicket(
   domain?: string,
 ): Promise<CommandResult> {
   if (domain !== undefined && kind !== undefined && kind !== "epic") {
-    throw inputInvalid(`--domain files a Domain Epic, which is not a ${kind}.`, {
+    throw inputInvalid(`--domain files an Initiative, which is not a ${kind}.`, {
       option: "--kind",
       value: kind,
     });
@@ -59,11 +62,19 @@ export async function createTicket(
     path: CREATE_ROUTE.path,
     body,
   });
-  return { data: response.data, meta: session.meta(response) };
+  const result: CommandResult = { data: response.data, meta: session.meta(response) };
+  if (domain !== undefined) result.human = initiativeCreated(response.data, ctx.io.stdoutColumns);
+  return result;
+}
+
+/** A terminal's confirmation of a filed Initiative: `Initiative <key> created.`, then its fields. */
+function initiativeCreated(data: CreatedTicket, columns?: number): string {
+  const key = isRecord(data) && typeof data["ticket_key"] === "string" ? data["ticket_key"] : "";
+  return `${key === "" ? "Initiative created." : `Initiative ${key} created.`}\n${renderDetails(data, columns)}\n`;
 }
 
 /**
- * A Domain Epic's body: the file's fields with `domain_id` set to `domain`. A file that names a
+ * An Initiative's body: the file's fields with `domain_id` set to `domain`. A file that names a
  * field the domain stands in for (`project_id`, `branch_mode`, `feature_branch`, even as null), or
  * another `domain_id`, is `INPUT_INVALID` naming every such field.
  */
@@ -72,7 +83,7 @@ function domainEpicBody(value: Record<string, unknown>, domain: string): Record<
     Object.hasOwn(value, field),
   ).map((field) => ({
     path: `$.${field}`,
-    message: `Remove ${field}: a Domain Epic is filed in the domain's home and owns no branch.`,
+    message: `Remove ${field}: an Initiative is filed in the domain's home and owns no branch.`,
   }));
   if (Object.hasOwn(value, "domain_id") && value["domain_id"] !== domain) {
     issues.push({
@@ -82,7 +93,7 @@ function domainEpicBody(value: Record<string, unknown>, domain: string): Record<
   }
   if (issues.length > 0) {
     const fields = issues.map((issue) => issue.path.slice(2)).join(", ");
-    throw inputInvalid(`A Domain Epic's file may not name ${fields}.`, {
+    throw inputInvalid(`An Initiative's file may not name ${fields}.`, {
       method: "POST",
       path: CREATE_ROUTE.path,
       issues,
@@ -94,7 +105,7 @@ function domainEpicBody(value: Record<string, unknown>, domain: string): Record<
 /** The `--domain <domain>` option of the commands that file an Epic. */
 export const DOMAIN_OPTION = [
   "--domain <domain>",
-  "file a Domain Epic in this domain (its key, e.g. PAY, or its id) instead of a project",
+  "file an Initiative, an Epic in this domain (its key, e.g. PAY, or its id), instead of a project",
 ] as const;
 
 /** The `--domain` a command was given, trimmed; given empty, it is a usage error (exit 2). */
@@ -118,7 +129,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * 4) or `UNKNOWN_WORKFLOW_TYPE` (exit code 2). `pidgen ticket template` writes a file to start
  * from.
  *
- * `--domain <domain>` files a Domain Epic: an Epic that holds work from the domain's projects,
+ * `--domain <domain>` files an Initiative: an Epic that holds work from the domain's projects,
  * filed in the domain's home and owning no branch. The body is sent with `kind: epic` and
  * `domain_id` instead of `project_id`; see `createTicket`. `--kind story` or `--kind task` with it,
  * or a file naming `project_id`, `branch_mode` or `feature_branch`, is `INPUT_INVALID` (exit 2).
@@ -128,7 +139,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export const ticketCreate: CommandSpec = {
   path: ["ticket", "create"],
   summary:
-    "Create a ticket from a JSON or YAML file; --kind epic files an Epic, --domain a Domain Epic",
+    "Create a ticket from a JSON or YAML file; --kind epic files an Epic, --domain an Initiative",
   configure(command: Command) {
     command
       .requiredOption(

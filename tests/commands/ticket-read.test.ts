@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import bundled from "../../contracts/openapi.json" with { type: "json" };
 import { runCli } from "../../src/cli.js";
@@ -5,6 +6,7 @@ import { INTERVENTION_TYPES, TICKET_STAGES } from "../../src/commands/ticket/lis
 import { saveConfig, type Config } from "../../src/core/config.js";
 import { ExitCode } from "../../src/core/exit-codes.js";
 import { MAX_PAGES, PAGE_SIZE } from "../../src/core/read.js";
+import { renderDetails } from "../../src/core/resource-human.js";
 import { envelope, jsonResponse, testContext, type TestContext } from "../support/context.js";
 
 const SERVER = "https://pidgen.example.com";
@@ -600,4 +602,142 @@ it.each([40, 80, 120])("resource presentation: ticket show at %s columns", async
   expect(calls).toEqual(previousCalls);
   expect(ctx.err).toEqual(previousErrors);
   expect(json.ok).toBe(true);
+});
+
+/** The App Service's failure projection on a failed step (ADR-169 Decision 4), as a fixture. */
+const FAILED_ATTENTION = JSON.parse(
+  readFileSync(
+    new URL(
+      "../fixtures/failure-projection/workflow-attention-push-protected.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+) as Record<string, unknown> & { failure: Record<string, unknown> };
+
+/** Serves DETAIL with `extra` merged in, and the other ticket routes as `server()` does. */
+function detailServer(extra: Record<string, unknown>) {
+  const base = server();
+  return (call: Call): Response =>
+    call.url.pathname === "/api/v1/tickets/ALPHA-12"
+      ? jsonResponse(
+          200,
+          { status: "ok", data: { ...DETAIL, ...extra }, meta: null },
+          { "x-request-id": "req_fake_ticket" },
+        )
+      : base(call);
+}
+
+async function table(ctx: TestContext, columns = 200): Promise<string> {
+  ctx.out.length = 0;
+  ctx.io.stdoutColumns = columns;
+  expect(await runCli(["ticket", "show", "ALPHA-12", "--format", "table"], ctx)).toBe(ExitCode.Ok);
+  return ctx.out.join("");
+}
+
+function inOrder(output: string, values: string[]): void {
+  let from = -1;
+  for (const value of values) {
+    const at = output.indexOf(value, from + 1);
+    expect(at, `${value} after position ${from}`).toBeGreaterThan(from);
+    from = at;
+  }
+}
+
+describe("pidgen ticket show explains a failed step", () => {
+  // c1-show
+  it("prints the failure's title, explanation, fix and actor, then its technical details", async () => {
+    const { ctx } = await setup({
+      respond: detailServer({ workflow_attention: FAILED_ATTENTION }),
+    });
+    const output = await table(ctx);
+    const failure = FAILED_ATTENTION.failure;
+    const technical = failure["technical"] as Record<string, unknown>;
+    inOrder(output, [
+      "Ticket\n",
+      `Failed step: ${String(failure["title"])}`,
+      String(failure["explanation"]),
+      `Fix: ${String(failure["fix"])}`,
+      "Who can fix it: A repository administrator",
+      "Technical details\n",
+      `  Operation: ${String(technical["operation"])}`,
+      `  Exit status: ${String(technical["exit_status"])}`,
+      String(technical["excerpt"]),
+      "Ticket key: ALPHA-12",
+    ]);
+    // The excerpt is shown once, as technical detail, not again inside the attention record.
+    expect(output.split(String(technical["excerpt"])).length).toBe(2);
+    expect(ctx.err).toEqual([]);
+  });
+
+  // c1-show
+  it("wraps the failure at narrow terminals without losing any part of it", async () => {
+    const { ctx } = await setup({
+      respond: detailServer({ workflow_attention: FAILED_ATTENTION }),
+    });
+    const output = await table(ctx, 40);
+    for (const value of ["Failed step:", "Fix:", "Who can fix it:", "Technical details", "GH006:"])
+      expect(output).toContain(value);
+  });
+
+  // c1-show
+  it("a failure without technical detail prints no Technical details heading", async () => {
+    const attention = {
+      ...FAILED_ATTENTION,
+      failure: { ...FAILED_ATTENTION.failure, actor: "pidgen", technical: null },
+    };
+    const { ctx } = await setup({ respond: detailServer({ workflow_attention: attention }) });
+    const output = await table(ctx);
+    inOrder(output, [
+      `Failed step: ${String(FAILED_ATTENTION.failure["title"])}`,
+      "Who can fix it: Pidgen",
+    ]);
+    expect(output).not.toContain("Technical details");
+  });
+
+  // c1-show
+  it("reads a failed node's failure when the attention carries none", async () => {
+    const failedNodes = [
+      { node_id: "plan", status: "failed" },
+      { node_id: "deliver", status: "failed", failure: FAILED_ATTENTION.failure },
+    ];
+    const { ctx } = await setup({ respond: detailServer({ failed_nodes: failedNodes }) });
+    const output = await table(ctx);
+    inOrder(output, [
+      `Failed step: ${String(FAILED_ATTENTION.failure["title"])}`,
+      "Technical details",
+      "Ticket key: ALPHA-12",
+    ]);
+  });
+
+  // c1-absent
+  it.each([
+    ["no workflow attention", { workflow_attention: null }],
+    [
+      "an attention without a failure (an older App Service)",
+      { workflow_attention: { ...FAILED_ATTENTION, failure: undefined } },
+    ],
+    [
+      "a failure that is not a projection",
+      { workflow_attention: { ...FAILED_ATTENTION, failure: "boom" } },
+    ],
+  ])("a ticket with %s renders exactly as before", async (_, extra) => {
+    const { ctx } = await setup({ respond: detailServer(extra) });
+    expect(await runCli(["ticket", "show", "ALPHA-12", "--format", "json"], ctx)).toBe(ExitCode.Ok);
+    const data = envelope(ctx)["data"];
+    const output = await table(ctx);
+    expect(output).toBe(`Ticket\n${renderDetails(data, 200)}\n`);
+    expect(output).not.toContain("Failed step");
+    expect(output).not.toContain("Technical details");
+  });
+
+  // c1-json
+  it("--format json passes the projection through unchanged", async () => {
+    const { ctx } = await setup({
+      respond: detailServer({ workflow_attention: FAILED_ATTENTION }),
+    });
+    const { code, body } = await run(ctx, "ticket", "show", "ALPHA-12", "--format", "json");
+    expect(code).toBe(ExitCode.Ok);
+    expect((body.data as Record<string, unknown>)["workflow_attention"]).toEqual(FAILED_ATTENTION);
+  });
 });

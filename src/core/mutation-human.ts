@@ -1,3 +1,4 @@
+import { INITIATIVE_REFUSALS } from "./errors.js";
 import { renderDetails, wrap } from "./resource-human.js";
 
 /** Mutation surface outside auth, account, worker and setup; usable by the response audit. */
@@ -132,6 +133,9 @@ export function renderMutationFailure(
 ): string | undefined {
   if (!MUTATION_PRESENTATIONS.has(command)) return undefined;
   const parts = [`error ${error.code}: ${error.message}`];
+  const sentence = INITIATIVE_REFUSALS[error.code];
+  if (sentence !== undefined)
+    parts.push(wrap(sentence, columns !== undefined && columns > 0 ? Math.floor(columns) : 80));
   if (
     error.code === "TIMEOUT" &&
     (error.details["handle"] !== undefined || error.details["last"] !== undefined)

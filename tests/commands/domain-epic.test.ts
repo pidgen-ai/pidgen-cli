@@ -464,8 +464,8 @@ it.each([40, 80, 120])("resource presentation: domain board at %s columns", asyn
   expect(await runCli([...argv, "--format", "table"], ctx)).toBe(ExitCode.Ok);
   const output = ctx.out.join("");
   for (const value of [
-    "Domain Epics",
-    "Epics (1 displayed)",
+    "Initiatives",
+    "Initiatives (1 displayed)",
     "PAY-12",
     "ALPHA",
     "BETA",
@@ -474,7 +474,96 @@ it.each([40, 80, 120])("resource presentation: domain board at %s columns", asyn
     "TKT-example-beta-7",
   ])
     expect(output).toContain(value);
+  expect(output.split("\n")[0]).toBe("Initiatives");
+  expect(output).not.toMatch(/Domain Epic|Account Epic/);
   expect(calls).toEqual(previousCalls);
   expect(ctx.err).toEqual(previousErrors);
   expect(json.ok).toBe(true);
+});
+
+// A Domain Epic is called an Initiative wherever a person reads it; command names, flags and JSON
+// are unchanged.
+describe("Initiative: what a person reads about a Domain Epic", () => {
+  it.each([
+    ["ticket create --domain", ["ticket", "create", "--domain", "PAY", "-f"]],
+    ["epic create --domain", ["epic", "create", "--domain", "PAY", "-f"]],
+  ])("%s confirms Initiative <key> created, and its JSON is unchanged", async (_, argv) => {
+    const { ctx } = await setup();
+    ctx.io.stdoutColumns = 80;
+    const name = await file(ctx, "epic.json", DOMAIN_EPIC);
+    const { code, body } = await run(ctx, ...argv, name);
+    expect(code).toBe(ExitCode.Ok);
+    expect(body).toEqual({ ok: true, data: CREATED, error: null, meta: META });
+
+    ctx.out.length = 0;
+    expect(await runCli([...argv, name, "--format", "table"], ctx)).toBe(ExitCode.Ok);
+    const output = ctx.out.join("");
+    expect(output).toContain("Initiative COM-12 created.");
+    expect(output).toContain("COM-12");
+    expect(output).toContain(DOMAIN_EPIC.title);
+    expect(output).not.toMatch(/Domain Epic|Account Epic/);
+  });
+
+  it("a Project Epic's create does not say Initiative", async () => {
+    const { ctx } = await setup();
+    const name = await file(ctx, "epic.json", { ...DOMAIN_EPIC, project_id: "ALPHA" });
+    expect(await runCli(["epic", "create", "-f", name, "--format", "table"], ctx)).toBe(
+      ExitCode.Ok,
+    );
+    expect(ctx.out.join("")).not.toContain("Initiative");
+  });
+
+  it("the CLI's own refusals of an Initiative's file say Initiative", async () => {
+    const { ctx } = await setup();
+    const name = await file(ctx, "epic.json", DOMAIN_EPIC);
+    const kind = await run(
+      ctx,
+      "ticket",
+      "create",
+      "--kind",
+      "story",
+      "--domain",
+      "PAY",
+      "-f",
+      name,
+    );
+    expect(kind.body.error?.message).toBe("--domain files an Initiative, which is not a story.");
+
+    const named = await file(ctx, "named.json", { ...DOMAIN_EPIC, project_id: "ALPHA" });
+    const field = await run(ctx, "epic", "create", "--domain", "PAY", "-f", named);
+    expect(field.body.error).toMatchObject({
+      code: "INPUT_INVALID",
+      message: "An Initiative's file may not name project_id.",
+      details: {
+        issues: [
+          {
+            path: "$.project_id",
+            message:
+              "Remove project_id: an Initiative is filed in the domain's home and owns no branch.",
+          },
+        ],
+      },
+    });
+  });
+
+  it.each([
+    [["ticket", "create", "--help"]],
+    [["epic", "create", "--help"]],
+    [["domain", "epics", "--help"]],
+  ])("%j says Initiative, never Domain Epic, and keeps its flags", async (argv) => {
+    const ctx = await testContext();
+    expect(await runCli(argv, ctx)).toBe(ExitCode.Ok);
+    const help = ctx.out.join("").replace(/\s+/g, " ");
+    expect(help).toContain("Initiative");
+    expect(help).not.toMatch(/Domain Epic|Account Epic/);
+    expect(help).toContain(argv[0] === "domain" ? "--no-subdomains" : "--domain <domain>");
+  });
+
+  it("the ticket noun's summaries say Initiative", async () => {
+    const ctx = await testContext();
+    expect(await runCli(["ticket", "--help"], ctx)).toBe(ExitCode.Ok);
+    const help = ctx.out.join("").replace(/\s+/g, " ");
+    expect(help).toContain("--domain an Initiative");
+    expect(help).not.toMatch(/Domain Epic|Account Epic/);
+  });
 });

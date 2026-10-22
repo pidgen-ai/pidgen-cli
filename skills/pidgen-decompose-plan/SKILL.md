@@ -1,6 +1,6 @@
 ---
 name: pidgen-decompose-plan
-description: Turn already-specified work into merge-safe parent/child delivery cohorts in the running Pidgen app — decide whether related tickets are independent roots or must share one parent workspace because later work consumes unmerged changes or edits the same files, cluster a program-sized batch of slices into cohorts ordered root to root, slice the children vertically (tracer bullets, or expand–contract for a wide refactor), then file each cohort — its root, children with their starting briefs, and the edges among them — as one ticket manifest, previewed and committed only on the person's confirmation. Use when asked to decompose, split, or break work into child tickets, to file more than a handful of related tickets (a program or multi-slice plan, especially into an auto-merge project or epic), to hand-author a cohort, to regroup already-filed roots whose PRs conflict, or to repair or replace an existing child plan. For work that spans projects, files one cohort per project under one Domain Epic and links each cohort's root to the contract it implements or builds against.
+description: Turn already-specified work into merge-safe parent/child delivery cohorts in the running Pidgen app — decide whether related tickets are independent roots or must share one parent workspace because later work consumes unmerged changes or edits the same files, cluster a program-sized batch of slices into cohorts ordered root to root, slice the children vertically (tracer bullets, or expand–contract for a wide refactor), then file each cohort — its root, children with their starting briefs, and the edges among them — as one ticket manifest, previewed and committed only on the person's confirmation. Use when asked to decompose, split, or break work into child tickets, to file more than a handful of related tickets (a program or multi-slice plan, especially into an auto-merge project or epic), to hand-author a cohort, to regroup already-filed roots whose PRs conflict, or to repair or replace an existing child plan. For work that spans projects, files one cohort per project under one Initiative and links each cohort's root to the contract it implements or builds against.
 ---
 
 Use `--format json` for structured CLI responses, including when stdout is a terminal.
@@ -102,15 +102,17 @@ Split the work along the interface the consumer needs:
    file a separate integration-test ticket or make that check a child, a root completion gate or
    a hidden prerequisite in ticket prose. Preserve explicit approval and release policies.
 
-#### One cohort per project, under one Domain Epic
+#### One cohort per project, under one Initiative
 
-Track the projects' work together under a Domain Epic, an Epic filed in a domain that covers
-every project the work touches (`pidgen-manage-epics`, "File a Domain Epic for work across projects").
+Track the projects' work together under an Initiative in a domain that covers every project the
+work touches (`pidgen-manage-epics`, "File an Initiative for work across projects"). An Initiative
+is an Epic filed in a domain rather than a project; the API and the command names call it a domain
+epic (as in `--domain`).
 Find one with `pidgen domain epics EXAMPLE --format json`, or file it first. Then file one cohort per project,
 each as its own manifest (see "File each cohort as one manifest"), each manifest's `epic_id`
-naming the same Domain Epic, for example `epic_id: EXAMPLE-12`; it becomes each root's
+naming the same Initiative, for example `epic_id: EXAMPLE-12`; it becomes each root's
 `parent_ticket_id`. A project outside the domain's coverage is refused with
-`PARENT_OUTSIDE_DOMAIN`. The Domain Epic orders nothing, and edges between the cohorts' roots
+`PARENT_OUTSIDE_DOMAIN`. The Initiative orders nothing, and edges between the cohorts' roots
 cannot cross projects.
 
 #### Link each cohort's root to the contract

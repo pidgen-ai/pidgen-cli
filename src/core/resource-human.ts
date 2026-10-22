@@ -1,3 +1,5 @@
+import { FAILURE_ACTORS, readFailure, ticketFailure, type FailureProjection } from "./failure.js";
+
 /** Read presentations operate on views only; response data remains untouched for JSON. */
 interface ReadPresentation {
   title: string;
@@ -10,7 +12,7 @@ export const READ_PRESENTATIONS: Readonly<Record<string, ReadPresentation>> = {
   "project show": { title: "Project" },
   "domain list": { title: "Domains", compact: true },
   "domain show": { title: "Domain" },
-  "domain epics": { title: "Domain Epics" },
+  "domain epics": { title: "Initiatives" },
   "contract list": { title: "Contracts" },
   "contract show": { title: "Contract" },
   "ticket list": { title: "Tickets", compact: true },
@@ -62,6 +64,10 @@ export function renderResourceRead(
     body = contractCollections(data, width);
   } else if (command === "domain epics" && isRecord(data)) {
     body = domainBoard(data, width);
+  } else if (command === "ticket show" && isRecord(data) && ticketFailure(data) !== undefined) {
+    body = ticketWithFailure(data, width);
+  } else if (command === "ticket actions" && isRecord(data) && readFailure(data["failure"])) {
+    body = actionsWithFailure(data, width);
   } else {
     body = detail(data, width, 0);
   }
@@ -290,7 +296,7 @@ function domainBoard(data: Row, width: number): string {
     .map(([key, value]) => {
       if (key === "epics" && Array.isArray(value)) {
         return collection(
-          "Epics",
+          "Initiatives",
           value.map((entry) =>
             isRecord(entry)
               ? {
@@ -308,4 +314,77 @@ function domainBoard(data: Row, width: number): string {
         : field(key, value, width, 0);
     })
     .join("\n");
+}
+
+/**
+ * A failed step in a person's words, from the App Service's failure projection: what happened,
+ * what fixes it and who can do it, then the operation, exit status and masked git excerpt under
+ * "Technical details".
+ */
+function failureSection(failure: FailureProjection, width: number): string {
+  const parts = [field("failed_step", failure.title, width, 0)];
+  if (typeof failure.explanation === "string" && failure.explanation !== "")
+    parts.push(field("what_happened", failure.explanation, width, 0));
+  if (typeof failure.fix === "string" && failure.fix !== "")
+    parts.push(field("fix", failure.fix, width, 0));
+  if (typeof failure.actor === "string" && failure.actor !== "")
+    parts.push(field("who_can_fix_it", FAILURE_ACTORS[failure.actor] ?? failure.actor, width, 0));
+  const technical = failure.technical;
+  if (isRecord(technical)) {
+    const shown = (["operation", "exit_status", "excerpt"] as const).filter(
+      (key) => technical[key] !== undefined && technical[key] !== null,
+    );
+    if (shown.length) {
+      parts.push("Technical details", ...shown.map((key) => field(key, technical[key], width, 2)));
+    }
+  }
+  return parts.join("\n");
+}
+
+/** `record` without the `failure` the lead section already shows, so it is not printed twice. */
+function withoutFailure(record: unknown, failure: Row): unknown {
+  if (!isRecord(record) || record["failure"] !== failure) return record;
+  return Object.fromEntries(Object.entries(record).filter(([key]) => key !== "failure"));
+}
+
+/** A ticket whose step failed: the failure first, then every field as the generic detail shows it. */
+function ticketWithFailure(data: Row, width: number): string {
+  const failure = ticketFailure(data) as Row;
+  const view: Row = { ...data };
+  if ("workflow_attention" in view) {
+    view["workflow_attention"] = withoutFailure(view["workflow_attention"], failure);
+  }
+  if (Array.isArray(view["failed_nodes"])) {
+    view["failed_nodes"] = view["failed_nodes"].map((node: unknown) =>
+      withoutFailure(node, failure),
+    );
+  }
+  return `${failureSection(failure as unknown as FailureProjection, width)}\n${detail(view, width, 0)}`;
+}
+
+/**
+ * The actions of a ticket whose step failed: the action the projection recommends named first,
+ * then the failure, then the decisions with the recommended one leading.
+ */
+function actionsWithFailure(data: Row, width: number): string {
+  const failure = readFailure(data["failure"]) as FailureProjection;
+  const kind = failure.recommended_action;
+  const view: Row = Object.fromEntries(Object.entries(data).filter(([key]) => key !== "failure"));
+  const parts: string[] = [];
+  if (typeof kind === "string" && kind !== "") {
+    const actions = Array.isArray(data["actions"]) ? data["actions"] : [];
+    const recommended = (item: unknown) => isRecord(item) && item["action"] === kind;
+    const offered = actions.find(recommended);
+    const name =
+      isRecord(offered) && typeof offered["label"] === "string" && offered["label"] !== ""
+        ? `${offered["label"]} (${kind})`
+        : kind;
+    parts.push(field("recommended_action", name, width, 0));
+    view["actions"] = [
+      ...actions.filter(recommended),
+      ...actions.filter((item) => !recommended(item)),
+    ];
+  }
+  parts.push(failureSection(failure, width), detail(view, width, 0));
+  return parts.join("\n");
 }

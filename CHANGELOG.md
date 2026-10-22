@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.5
+
+The fifth alpha, published to npm under `alpha` and `latest`. `pidgen ticket show` and
+`pidgen ticket actions` explain a failed step with the App Service's failure projection, the
+worker setup skill and install guide describe model restrictions, and everything the CLI prints
+about an Epic in a domain says Initiative.
+
+### pidgen says Initiative for a Domain Epic
+
+- Everything the CLI prints for a person about an Epic in a domain says **Initiative**:
+  `pidgen domain epics` heads its output `Initiatives`, `pidgen ticket create --domain` and
+  `pidgen epic create --domain` confirm `Initiative <key> created.`, their help says Initiative, and
+  the CLI's own refusals of an Initiative's file say so. A terminal shows a sentence about the
+  Initiative after the server's message for `PARENT_OUTSIDE_DOMAIN`, `DOMAIN_HAS_NO_PROJECTS`,
+  `DOMAIN_PROJECT_CONFLICT`, `DOMAIN_HAS_OPEN_EPICS` and `DOMAIN_COVERAGE_IN_USE`.
+- The `pidgen-manage-epics` and `pidgen-decompose-plan` skills say Initiative, defined as an Epic
+  filed in a domain rather than a project.
+- Command names, flags, error codes, exit codes and JSON output are unchanged.
+
+### The worker setup skill and install guide describe model restrictions
+
+- `pidgen-setup-worker` and [Install and connect a worker](docs/install-worker.md#restrict-the-models-this-machine-runs)
+  document the worker policy's `harnesses.<name>.models` `allow` and `deny` lists (empty by
+  default, `deny` wins, `*` globs, Pi entries as `provider/model-id`) as a worker's only model
+  setting. Which models exist and accept images is the Account's model list, chosen in the App
+  Service's setup flow; the skill no longer mentions a vision table or a worker-side fallback model.
+
+### `pidgen ticket show` and `ticket actions` explain a failed step
+
+- When a ticket's step failed and the App Service sends its failure projection,
+  `pidgen ticket show` prints what happened, what fixes it and who can do it, with git's masked
+  excerpt under "Technical details", and `pidgen ticket actions` names the recommended action
+  first. `--format json` carries the projection unchanged (`data.failure` for `ticket actions`).
+  A ticket without one, as from an older App Service, prints as before.
+
 ## 0.1.0-alpha.4
 
 The fourth alpha, published to npm under `alpha` and `latest`. Its focus is getting a repository

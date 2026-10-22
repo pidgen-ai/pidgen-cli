@@ -26,7 +26,7 @@ command's `--help` before relying on unfamiliar flags. Help and version output a
 | Diagnose setup or connection | [CLI troubleshooting](https://docs.pidgen.ai/cli/troubleshooting/), [install a worker](https://docs.pidgen.ai/cli/install-worker/) | Diagnose before changing anything |
 | Add model or coding-agent support | [New model guide](https://docs.pidgen.ai/cli/worker-models/), [coding agents](https://docs.pidgen.ai/worker/coding-agents/), [worker lifecycle](https://docs.pidgen.ai/cli/workers/) | New models and coding agents |
 | Change capacity | [Configure the worker](https://docs.pidgen.ai/worker/configure/) | Resize the pools; change a session cap |
-| Customize harness options | [Worker policy reference](https://docs.pidgen.ai/cli/worker-policy/), [worker configuration](https://docs.pidgen.ai/worker/configure/#the-worker-policy), [agent environment](https://docs.pidgen.ai/worker/coding-agents/#the-agents-environment) | Customize harness options |
+| Customize harness options or restrict models | [Worker policy reference](https://docs.pidgen.ai/cli/worker-policy/), [worker configuration](https://docs.pidgen.ai/worker/configure/#the-worker-policy), [restrict models](https://docs.pidgen.ai/cli/install-worker/#restrict-the-models-this-machine-runs), [agent environment](https://docs.pidgen.ai/worker/coding-agents/#the-agents-environment) | Customize harness options; Restrict the models this machine runs |
 | Use multiple subscriptions | [Subscriptions](https://docs.pidgen.ai/worker/coding-agents/#subscriptions), [remote primary selection](https://docs.pidgen.ai/cli/commands/#worker-subscriptions) | Add a fallback provider login |
 | Worker starts but work waits or fails | [Worker troubleshooting](https://docs.pidgen.ai/worker/troubleshooting/), [logs and diagnostics](https://docs.pidgen.ai/worker/logs-and-diagnostics/) | Diagnose before changing anything |
 | Survive a reboot | [Run as a service](https://docs.pidgen.ai/worker/run-as-a-service/) | Day-to-day operation |
@@ -413,13 +413,16 @@ or missing option. Keep three checks separate:
    command. A ticket's `team_member_id` is an Account Agent ID, not a model name. Do not add model
    keys to `node.yaml`, invent a model command, or call unpublished routes to make a model appear.
 
-The new model guide covers local readiness, executable selection and input capabilities. In the
-public worker 2.11.1 policy, `harnesses.claude.cli_path` selects an absolute executable path in
-place of the SDK-bundled Claude CLI: updating the shell's Claude alone does not select it for
-worker turns. Claude and Codex `vision.model_modalities` can declare a new model's verified input
-capabilities. These settings belong under the harness in worker policy, not in `node.yaml`, and
-neither registers nor selects a model in the application. Codex has no `cli_path` policy key.
-Read the versioned guide before editing; do not assume older releases support these keys.
+The new model guide covers local readiness and executable selection. In the public worker
+2.11.1 policy, `harnesses.claude.cli_path` selects an absolute executable path in place of the
+SDK-bundled Claude CLI: updating the shell's Claude alone does not select it for worker turns.
+This setting belongs under the harness in worker policy, not in `node.yaml`, and it neither
+registers nor selects a model in the application. Codex has no `cli_path` policy key. Read the
+versioned guide before editing; do not assume older releases support these keys. Which models
+exist and which accept images is the App Service's model list, chosen in the setup flow, not on
+the worker: never declare a model's input capabilities in the worker's policy. The only model
+setting on a worker restricts which of those models it runs; see Restrict the models this
+machine runs.
 
 If no published procedure covers the request, state which layer is
 verified and which is unsupported or unknown, and prepare a support question with the model,
@@ -432,8 +435,10 @@ and result; do not create a ticket or consume provider quota merely as an unrequ
 Read the published worker policy and agent environment sections linked above. `node.yaml` owns
 capacity and subscriptions. `PIDGEN_WORKER_POLICY`, or `config/worker-policy.yaml` under the worker's
 home when no override is set, owns how a harness
-runs, including supported executable paths, sandbox/network settings and Claude's
-`environment_allowlist`. Changing the policy does not enable a harness whose cap is zero.
+runs, including supported executable paths, sandbox/network settings, Claude's
+`environment_allowlist` and the `harnesses.<name>.models` allow and deny lists that restrict which
+models a harness runs (next section). Changing the policy does not enable a harness whose cap is
+zero.
 
 Inspect the installed policy's relevant section and comments, and confirm the requested key,
 type, allowed values and reload behavior against the versioned policy reference and the schema
@@ -448,6 +453,41 @@ For additional Claude environment variables, add only the required variable name
 credential literals in the policy. An exported shell variable is not automatically inherited by a
 harness. Explain the effect of any requested sandbox or network change; do not disable protections
 as a general troubleshooting remedy.
+
+### Restrict the models this machine runs
+
+The worker policy's `harnesses.<name>.models` block is the only model setting on a worker, and it
+is documented: edit it when the person asks to keep a harness on this machine to some models or
+away from others. It holds two lists, `allow` and `deny`, both empty by default. The matching
+rules:
+
+- An empty `allow` lets every model run; a nonempty `allow` runs only the models matching one of
+  its entries.
+- A model matching any `deny` entry never runs on this machine, even when `allow` matches it:
+  `deny` wins.
+- An entry matches a model's identifier exactly, except that `*` matches any run of characters,
+  so `claude-opus-*` matches every Opus model.
+- Claude and Codex entries are model IDs. Pi entries are `provider/model-id`, such as
+  `anthropic/claude-*`.
+
+```yaml
+harnesses:
+  claude:
+    models:
+      allow: ["claude-sonnet-*", "claude-opus-*"]
+      deny: ["claude-opus-4-1*"]
+  pi:
+    models:
+      deny: ["openai/*"]
+```
+
+The shipped `worker-policy.yaml` restricts nothing: its lists are empty, so the harness runs
+every model Pidgen sends it. Which models exist and which accept images is decided in the App
+Service's setup flow, where the Account chooses its model list, not on the worker. Do not add a
+model to `allow` to make it available, and do not look for a worker key that declares a model or
+its image input. Make the same minimal, preserving edit as for any documented option, keep the
+exact keys above, and restart the worker through the method that already manages it so the
+change takes effect.
 
 Run `pidgen worker doctor --format json` after the edit. For harness-policy edits, restart using
 the existing launch method so new processes load the policy, and inspect readiness afterwards.

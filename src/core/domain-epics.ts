@@ -9,8 +9,9 @@ import { openSession } from "./session.js";
 import type { components } from "../generated/api.js";
 
 /**
- * Domain Epics as the published document (`contracts/openapi.json`) states them:
- * `POST /api/v1/tickets` with `domain_id` instead of `project_id` files a Domain Epic, and
+ * Initiatives (Domain Epics, as the API calls them) as the published document
+ * (`contracts/openapi.json`) states them: `POST /api/v1/tickets` with `domain_id` instead of
+ * `project_id` files an Initiative, and
  * `GET /api/v1/domains/{domain_id}/epics` reads a domain's Epics. The create body is validated
  * against the published `CreateTicketRequest`, which carries `domain_id`; the Epics read's `data`
  * against the published `DomainEpicBoard`.
@@ -21,7 +22,7 @@ export type DomainEpicBoard = components["schemas"]["DomainEpicBoard"];
 /** The domain Epics read, as the published document names it. */
 export const DOMAIN_EPICS_ROUTE = { method: "GET", path: "/domains/{domain_id}/epics" } as const;
 
-/** The fields a Domain Epic's file may not name: the domain stands in for the project and branch. */
+/** The fields an Initiative's file may not name: the domain stands in for the project and branch. */
 export const DOMAIN_EPIC_REFUSED_FIELDS = ["project_id", "branch_mode", "feature_branch"] as const;
 
 /**
@@ -50,7 +51,7 @@ export async function readDomainEpics(
   if (issues.length > 0) {
     throw new CliError(
       "UNEXPECTED_RESPONSE",
-      `The server's domain Epics do not match the contract (${issues.length} issue${issues.length === 1 ? "" : "s"}).`,
+      `The server's Initiatives do not match the contract (${issues.length} issue${issues.length === 1 ? "" : "s"}).`,
       ExitCode.Unexpected,
       { route: `${DOMAIN_EPICS_ROUTE.method} /api/v1${DOMAIN_EPICS_ROUTE.path}`, issues },
     );

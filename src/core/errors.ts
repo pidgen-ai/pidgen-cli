@@ -48,7 +48,7 @@ const REFUSAL_CODES = new Set([
   "DOMAIN_IS_ACCOUNT_ROOT",
   "DOMAIN_COVERAGE_IN_USE",
   "DOMAIN_HAS_OPEN_EPICS",
-  // A domain that contains no project has no home for a Domain Epic: its state, not the request.
+  // A domain that contains no project has no home for an Initiative: its state, not the request.
   "DOMAIN_HAS_NO_PROJECTS",
   // A contract link the server refuses writes nothing, whichever status it answers with.
   "CONTRACT_LINK_NOT_DELIVERY_ROOT",
@@ -71,6 +71,24 @@ const REFUSAL_CODES = new Set([
   // A worker name the Account already holds creates no enrollment, whichever status it comes with.
   "WORKER_NAME_TAKEN",
 ]);
+
+/**
+ * The CLI's own sentence for each refusal about an Initiative (an Epic filed in a domain, which the
+ * API and the codes call a Domain Epic). A terminal shows it after the server's message, which is
+ * relayed verbatim; the code, exit code and JSON envelope are unchanged.
+ */
+export const INITIATIVE_REFUSALS: Readonly<Record<string, string>> = {
+  PARENT_OUTSIDE_DOMAIN:
+    "The parent is an Initiative whose domain does not cover this ticket's project, or is not above the new Initiative's domain: name an Initiative whose domain covers the project.",
+  DOMAIN_HAS_NO_PROJECTS:
+    "The domain contains no project, so it has no home for an Initiative: add a project to it first (pidgen domain project add).",
+  DOMAIN_PROJECT_CONFLICT:
+    "An Initiative is filed in a domain instead of a project: name the domain or the project, not both.",
+  DOMAIN_HAS_OPEN_EPICS:
+    "The domain's home holds an open Initiative, so the domain cannot be archived: finish the Initiatives listed below first.",
+  DOMAIN_COVERAGE_IN_USE:
+    "Open work under an Initiative in this domain, or in a domain above it, sits in a project the change takes out of its coverage: move that work first.",
+};
 
 /**
  * Server error codes that mean "no such thing, or none you may see" whatever the HTTP status: a

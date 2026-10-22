@@ -1,4 +1,6 @@
-import { expectMutationParity } from "../support/context.js";
+import { readFileSync } from "node:fs";
+import { expectMutationParity, type TestContext } from "../support/context.js";
+import { renderDetails } from "../../src/core/resource-human.js";
 import { runCli } from "../../src/cli.js";
 import { describe, expect, it } from "vitest";
 import contract from "../../contracts/openapi.json" with { type: "json" };
@@ -71,7 +73,10 @@ const actKey = (target: string, digest = "sha256:preview-1", acks: string[] = []
 
 describe("pidgen ticket actions", () => {
   it("prints each decision's label, allowed or blocked state with the refusal, and recommended reason", async () => {
-    const { ctx, calls } = await setup({ [LIST]: [ok(ACTIONS)] });
+    const { ctx, calls } = await setup({
+      [LIST]: [ok(ACTIONS)],
+      [SHOW]: [ok(detailWith({ workflow_attention: null }))],
+    });
     const { code, body } = await cli(ctx, "ticket", "actions", REF);
     expect(code).toBe(ExitCode.Ok);
     expect(body.ok).toBe(true);
@@ -137,7 +142,9 @@ describe("pidgen ticket actions", () => {
       message: "Replay the producer node implement instead.",
       instead: "replay_from_node",
     });
-    expect(calls.map(routeOf)).toEqual([LIST]);
+    // The ticket is read for its failure projection; it carries none, so the actions stand alone.
+    expect(calls.map(routeOf)).toEqual([LIST, SHOW]);
+    expect(body.data).not.toHaveProperty("failure");
     expect(calls[0]?.query).toEqual({});
     expect(calls[0]?.headers["x-pidgen-account"]).toBe("ACC-EXAMPLE");
   });
@@ -2365,7 +2372,10 @@ describe("usage errors of the plan, start, approve and override flags", () => {
 });
 
 it.each([40, 80, 120])("resource presentation: decisions at %s columns", async (columns) => {
-  const { ctx, calls } = await setup({ [LIST]: [ok(ACTIONS)] });
+  const { ctx, calls } = await setup({
+    [LIST]: [ok(ACTIONS)],
+    [SHOW]: [ok(detailWith({ workflow_attention: null }))],
+  });
   ctx.io.stdoutColumns = columns;
   expect(await runCli(["ticket", "actions", REF, "--format", "table"], ctx)).toBe(ExitCode.Ok);
   const output = ctx.out.join("");
@@ -2379,9 +2389,33 @@ it.each([40, 80, 120])("resource presentation: decisions at %s columns", async (
     "run-2",
   ])
     expect(output).toContain(value);
-  expect(calls.map(routeOf)).toEqual([LIST]);
+  expect(calls.map(routeOf)).toEqual([LIST, SHOW]);
   expect(ctx.err).toEqual([]);
 });
+
+// c1-actions: the failure and its recommended action survive any terminal width.
+it.each([40, 80, 120])(
+  "resource presentation: a failed step's actions at %s columns",
+  async (columns) => {
+    const { ctx } = await setup({
+      [LIST]: [ok(ACTIONS)],
+      [SHOW]: [ok(detailWith({ workflow_attention: FAILED_ATTENTION }))],
+    });
+    const output = await actionsTable(ctx, columns);
+    expect(output.split("\n")[1]).toMatch(/^Recommended action:/);
+    for (const value of [
+      "Retry the run",
+      "Failed step:",
+      "Fix:",
+      "Who can fix it:",
+      "Technical details",
+      "GH006:",
+      "Actions (4 displayed)",
+    ])
+      expect(output).toContain(value);
+    expect(ctx.err).toEqual([]);
+  },
+);
 
 it.each([40, 80, 120])(
   "action preview preserves effects without execution at %s columns",
@@ -2401,3 +2435,114 @@ it.each([40, 80, 120])(
     expect(calls.map(routeOf)).toEqual([LIST, PREVIEW]);
   },
 );
+
+/** The App Service's failure projection on a failed step (ADR-169 Decision 4), as a fixture. */
+const FAILED_ATTENTION = JSON.parse(
+  readFileSync(
+    new URL(
+      "../fixtures/failure-projection/workflow-attention-push-protected.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+) as Record<string, unknown> & {
+  failure: { title: string; fix: string } & Record<string, unknown>;
+};
+const SHOW = `GET /api/v1/tickets/${REF}`;
+const detailWith = (extra: Record<string, unknown>) => ({
+  id: TICKET_ID,
+  ticket_key: REF,
+  stage: "in_execution",
+  title: "Deliver the change",
+  ...extra,
+});
+/** The projection recommending the second listed decision, so naming it first reorders the list. */
+const REPLAY_FAILURE = { ...FAILED_ATTENTION.failure, recommended_action: "replay_from_node" };
+
+async function actionsTable(ctx: TestContext, columns = 200): Promise<string> {
+  ctx.out.length = 0;
+  ctx.io.stdoutColumns = columns;
+  expect(await runCli(["ticket", "actions", REF, "--format", "table"], ctx)).toBe(ExitCode.Ok);
+  return ctx.out.join("");
+}
+
+describe("pidgen ticket actions explains a failed step", () => {
+  // c1-actions
+  it("names the projection's recommended action first, then the failure, then the decisions with it leading", async () => {
+    const detail = detailWith({
+      workflow_attention: { ...FAILED_ATTENTION, failure: REPLAY_FAILURE },
+    });
+    const { ctx, calls } = await setup({ [LIST]: [ok(ACTIONS)], [SHOW]: [ok(detail)] });
+    const output = await actionsTable(ctx);
+    const lines = output.split("\n");
+    expect(lines[0]).toBe("Ticket actions");
+    expect(lines[1]).toBe("Recommended action: Replay from this node (replay_from_node)");
+    expect(output).toContain(`Failed step: ${String(REPLAY_FAILURE.title)}`);
+    expect(output).toContain(`Fix: ${String(REPLAY_FAILURE.fix)}`);
+    expect(output).toContain("Who can fix it: A repository administrator");
+    expect(output).toContain("Technical details");
+    const listed = output.slice(output.indexOf("Actions (4 displayed)"));
+    expect(listed.indexOf("Replay from this node")).toBeGreaterThan(-1);
+    expect(listed.indexOf("Replay from this node")).toBeLessThan(listed.indexOf("Retry the run"));
+    expect(calls.map(routeOf)).toEqual([LIST, SHOW]);
+    expect(ctx.err).toEqual([]);
+  });
+
+  // c1-actions
+  it("names a recommended action the list does not offer by its kind", async () => {
+    const failure = { ...FAILED_ATTENTION.failure, recommended_action: "reopen_for_delivery" };
+    const detail = detailWith({ workflow_attention: { ...FAILED_ATTENTION, failure } });
+    const { ctx } = await setup({ [LIST]: [ok(ACTIONS)], [SHOW]: [ok(detail)] });
+    const output = await actionsTable(ctx);
+    expect(output.split("\n")[1]).toBe("Recommended action: reopen_for_delivery");
+  });
+
+  // c1-actions
+  it("a projection with no recommended action explains the failure and keeps the server's order", async () => {
+    const failure = { ...FAILED_ATTENTION.failure, recommended_action: null };
+    const detail = detailWith({ workflow_attention: { ...FAILED_ATTENTION, failure } });
+    const { ctx } = await setup({ [LIST]: [ok(ACTIONS)], [SHOW]: [ok(detail)] });
+    const output = await actionsTable(ctx);
+    expect(output).not.toContain("Recommended action:");
+    expect(output.split("\n")[1]).toBe(`Failed step: ${String(failure.title)}`);
+    const listed = output.slice(output.indexOf("Actions (4 displayed)"));
+    expect(listed.indexOf("Retry the run")).toBeLessThan(listed.indexOf("Replay from this node"));
+  });
+
+  // c1-json
+  it("--format json carries the projection unchanged beside the server's decisions", async () => {
+    const detail = detailWith({
+      workflow_attention: { ...FAILED_ATTENTION, failure: REPLAY_FAILURE },
+    });
+    const { ctx } = await setup({ [LIST]: [ok(ACTIONS)], [SHOW]: [ok(detail)] });
+    const { code, body } = await cli(ctx, "ticket", "actions", REF);
+    expect(code).toBe(ExitCode.Ok);
+    expect(body.data?.["failure"]).toEqual(REPLAY_FAILURE);
+    // The decisions keep the server's order in JSON; only the human view leads with the recommendation.
+    expect((body.data?.["actions"] as { action: string }[]).map((item) => item.action)).toEqual(
+      ACTIONS.actions.map((item) => item.action),
+    );
+  });
+
+  // c1-absent
+  it.each([
+    ["no workflow attention", ok(detailWith({ workflow_attention: null }))],
+    [
+      "an attention without a failure (an older App Service)",
+      ok(detailWith({ workflow_attention: { ...FAILED_ATTENTION, failure: undefined } })),
+    ],
+    ["a ticket read the caller is refused", refusal(403, "FORBIDDEN", "You may not read it.")],
+  ])("with %s, the actions render exactly as before", async (_, answer) => {
+    const { ctx } = await setup({
+      [LIST]: [ok(ACTIONS), ok(ACTIONS)],
+      [SHOW]: [answer, answer.clone()],
+    });
+    const { code, body } = await cli(ctx, "ticket", "actions", REF);
+    expect(code).toBe(ExitCode.Ok);
+    expect(body.data).not.toHaveProperty("failure");
+    expect(Object.keys(body.data ?? {})).toEqual(["ticket_id", "actions"]);
+    const output = await actionsTable(ctx);
+    expect(output).toBe(`Ticket actions\n${renderDetails(body.data, 200)}\n`);
+    expect(ctx.err).toEqual([]);
+  });
+});

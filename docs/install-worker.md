@@ -532,6 +532,40 @@ checks that the process stays alive for two seconds; it does not wait for the se
 Check status again until the server reports it connected. See [Worker reference](workers.md)
 for enrollment failures, lifecycle behavior, and automation details.
 
+## Restrict the models this machine runs
+
+Which models exist and which accept images is decided in the App Service's setup flow, where your
+Account chooses its model list, not on the worker. The shipped `worker-policy.yaml` restricts
+nothing, so a harness runs every model Pidgen sends it. To keep a coding agent on this machine to
+some models, or away from others, edit its `harnesses.<name>.models` block in the
+[worker policy](worker-policy.md#location-and-structure). It is the only model setting on a worker.
+
+The block holds two lists, `allow` and `deny`, both empty by default:
+
+- An empty `allow` lets every model run; a nonempty `allow` runs only the models matching one of
+  its entries.
+- A model matching any `deny` entry never runs on this machine, even when `allow` matches it:
+  `deny` wins.
+- An entry matches a model's identifier exactly, except that `*` matches any run of characters,
+  so `claude-opus-*` matches every Opus model.
+- Claude and Codex entries are model IDs. Pi entries are `provider/model-id`, such as
+  `anthropic/claude-*`.
+
+```yaml
+harnesses:
+  claude:
+    models:
+      allow: ["claude-sonnet-*", "claude-opus-*"]
+      deny: ["claude-opus-4-1*"]
+  pi:
+    models:
+      deny: ["openai/*"]
+```
+
+Keep the rest of the file as it is, then restart the worker (`pidgen worker restart`) so the change
+takes effect. Adding a model to `allow` does not make it available: a model your Account's list
+does not offer still never reaches this machine.
+
 ## Operate your worker
 
 | Task | Command |

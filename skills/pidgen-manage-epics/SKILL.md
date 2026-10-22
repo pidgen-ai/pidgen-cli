@@ -1,6 +1,6 @@
 ---
 name: pidgen-manage-epics
-description: Create and populate a Pidgen Epic — an epic-kind ticket — set its branch and merge policy, place tickets in it by their parent_ticket_id, and wire dependency edges between tickets and Epics, using the CLI's ticket commands. Also files a Domain Epic, an Epic in a domain that tracks work across the domain's projects. Use when asked to create or organize an epic, file an epic that spans projects, set its merge policy, move tickets into or out of one, or make one ticket or Epic wait for another. An Epic is not a shared workspace — tickets that consume each other's changes or edit the same files need a shared parent (pidgen-decompose-plan), and cohorts are ordered by edges between their roots.
+description: Create and populate a Pidgen Epic — an epic-kind ticket — set its branch and merge policy, place tickets in it by their parent_ticket_id, and wire dependency edges between tickets and Epics, using the CLI's ticket commands. Also files an Initiative, an Epic in a domain that tracks work across the domain's projects. Use when asked to create or organize an epic, file an epic that spans projects, set its merge policy, move tickets into or out of one, or make one ticket or Epic wait for another. An Epic is not a shared workspace — tickets that consume each other's changes or edit the same files need a shared parent (pidgen-decompose-plan), and cohorts are ordered by edges between their roots.
 ---
 
 Use `--format json` for structured CLI responses, including when stdout is a terminal.
@@ -24,7 +24,7 @@ behaviour:
 - **Merge policy (optional).** `auto` lets Pidgen merge its members' verified pull requests
   itself; `manual` leaves the merge to a person; `null` inherits the project's.
 
-Work that spans projects goes under a **Domain Epic** instead, filed in a domain rather than a
+Work that spans projects goes under an **Initiative** instead, filed in a domain rather than a
 project (§6).
 
 Creating an Epic starts no work and spends nothing. The commitment comes when tickets are filed
@@ -156,7 +156,7 @@ change). An unknown ticket is `DEPENDENCY_ENDPOINT_NOT_FOUND` (exit 4).
 
 For work that spans Projects, use `pidgen-decompose-plan`, "Work that spans Projects": give the provider
 change its own ticket and build the consumer against the agreed contract, and track the projects'
-work together under a Domain Epic (§6). An Epic cannot enforce cross-Project ordering. Record live integration and its release prerequisites in the external QA
+work together under an Initiative (§6). An Epic cannot enforce cross-Project ordering. Record live integration and its release prerequisites in the external QA
 plan, outside ticket completion.
 
 A failed or abandoned prerequisite blocks forever: `blocks` clears only on `completed`. Remove the
@@ -184,17 +184,19 @@ waits for it as `nodes` and `edges`, and its members as `pieces` with the `piece
 them. A member's `parent_ticket_id` names the Epic, and its `prerequisites` in
 `pidgen ticket show --format json` say whether it is `ready` and which prerequisites hold it.
 
-## 6. File a Domain Epic for work across projects
+## 6. File an Initiative for work across projects
 
 A **domain** groups projects, and domains nest; every Account has an Account domain that covers
-every project. A **Domain Epic** is an Epic filed in a domain rather than in one project. It holds
-Project Epics, Stories and Tasks from the projects its domain covers, and may sit under a Domain
-Epic of a parent domain. It is numbered from the domain's key (`EXAMPLE-12` style keys), and it
+every project. An Initiative is an Epic filed in a domain rather than a project; the API and the
+command names call it a domain epic (as in `--domain`). It holds Project Epics,
+Stories and Tasks from the projects its domain covers, and may sit under an Initiative of a parent
+domain. It is numbered from the domain's key (`EXAMPLE-12` style keys), and it
 owns no branch: it is a tracking parent, not a workspace, and each project's work under it still
 gets its own workspace and pull request in its own project. Keep work in one project in a Project
 Epic (§1 to §5).
 
-Find the domain that covers every project the work touches, and check its Epics for a duplicate:
+Find the domain that covers every project the work touches, and check its Initiatives for a
+duplicate:
 
 ```console
 pidgen domain list --format json
@@ -203,10 +205,10 @@ pidgen domain epics EXAMPLE --format json
 
 `pidgen domain list --format json` gives each domain's `key`, `name`, `archived` flag and the `projects` and
 `domains` it contains, the Account domain first. `pidgen domain epics --format json` gives the domain's open
-Epics, its subdomains' included (`--state finished` for finished ones): each entry's `epic`, its
+Initiatives, its subdomains' included (`--state finished` for finished ones): each entry's `epic`, its
 work grouped by project in `projects`, and `hidden`, how many of its tickets you cannot see.
 
-File the Domain Epic with a file that names no project and no branch:
+File the Initiative with a file that names no project and no branch:
 
 ```yaml
 title: Checkout across payments and cards
@@ -221,11 +223,11 @@ pidgen ticket create --kind epic --domain EXAMPLE -f domain-epic.yaml --format j
 Never give `branch_mode` or `feature_branch` (nor `project_id`): the domain stands in for the
 project, and the CLI refuses such a file with `INPUT_INVALID` (exit 2) and sends nothing.
 `pidgen epic create --domain EXAMPLE -f domain-epic.yaml --format json` is the same command under its older
-name. `data` carries the Domain Epic's `ticket_key` and `id`; cite the key from here on. To put it
-under a Domain Epic of a parent domain, name that Epic as its `parent_ticket_id` in the file.
+name. `data` carries the Initiative's `ticket_key` and `id`; cite the key from here on. To put it
+under an Initiative of a parent domain, name that Initiative as its `parent_ticket_id` in the file.
 
 Then place each project's work under it by `parent_ticket_id`, as for any Epic (§3): a ticket file
-names the Domain Epic as its `parent_ticket_id`, a ticket manifest names it as its `epic_id`, which
+names the Initiative as its `parent_ticket_id`, a ticket manifest names it as its `epic_id`, which
 becomes the root's `parent_ticket_id`, and an existing ticket moves in with
 `pidgen ticket move EXAMPLE-31 --epic EXAMPLE-12 --format json`. File one cohort per project with
 `pidgen-decompose-plan`, "Work that spans Projects"; dependency edges still cannot cross projects.
@@ -256,5 +258,5 @@ The server's refusals keep their codes:
 | An edge was added, the ticket still dispatches | its type is not `blocks`, or the prerequisite already completed |
 | Roots' pull requests keep coming back for rework | the Epic is `auto` and parallel roots edit the same files — regroup the unstarted ones (`pidgen-decompose-plan`) |
 | A ticket never becomes ready | a prerequisite has not completed, or failed or was abandoned |
-| `PARENT_OUTSIDE_DOMAIN` placing work under a Domain Epic | the ticket's project is not in the domain's coverage (§6) |
-| `DOMAIN_HAS_NO_PROJECTS` (exit 5) filing a Domain Epic | the domain contains no project |
+| `PARENT_OUTSIDE_DOMAIN` placing work under an Initiative | the ticket's project is not in the domain's coverage (§6) |
+| `DOMAIN_HAS_NO_PROJECTS` (exit 5) filing an Initiative | the domain contains no project |

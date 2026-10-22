@@ -455,7 +455,7 @@ a Maintainer is also a member. The routes are in the published document
 | `pidgen domain member rm <domain> <user-id>` | Remove the person from the domain | `DELETE /domains/{domain_id}/people/{user_id}` |
 | `pidgen domain maintainer add <domain> <user-id>` | Make the person a Maintainer | `PUT /domains/{domain_id}/people/{user_id}` `{role: maintainer}` |
 | `pidgen domain maintainer rm <domain> <user-id>` | The person stops maintaining and stays a member | `PUT /domains/{domain_id}/people/{user_id}` `{role: member}` |
-| `pidgen domain epics <domain> [--state open\|finished] [--page <n>] [--per-page <n>] [--no-subdomains]` | The domain's Epics, their work by project, and what you cannot see | `GET /domains/{domain_id}/epics` |
+| `pidgen domain epics <domain> [--state open\|finished] [--page <n>] [--per-page <n>] [--no-subdomains]` | The domain's Initiatives, their work by project, and what you cannot see | `GET /domains/{domain_id}/epics` |
 
 `<domain>` and `<parent-domain>` are a domain's key, such as `PAY`, or its id;
 `<project>` is a project's id or ticket-key prefix; `<user-id>` is the person's user id (a UUID),
@@ -512,6 +512,11 @@ in the domain's home project, so its key is the domain's key and a number (`COM-
 `branch_mode` is `project_base`, and it takes the Account's Unassigned Agent and the
 `epic-delivery` workflow type. A Domain Epic may name a Domain Epic of an ancestor domain as its
 `parent_ticket_id`.
+
+A person reads a Domain Epic as an **Initiative**: the CLI's human output, help and its own error
+sentences call it that (`pidgen domain epics` prints `Initiatives`, and `--domain` confirms
+`Initiative COM-12 created.`), as do the skills. Command names, flags, error codes, exit codes and
+JSON output are unchanged.
 
 - File one with `pidgen ticket create --kind epic --domain <domain> -f <file>` or
   `pidgen epic create --domain <domain> -f <file>` (see [ticket](#ticket)).
@@ -764,8 +769,14 @@ The server's refusals keep their codes and `error.details`:
   `outcome_pause` (`state` `pausing` or `paused`, `requested_by`, `requested_at`, or `null`) and
   its `cancellation` (`cancellation_id`, `disposition`, `superseded_by`, `reason`, `requested_by`,
   `requested_at`, `state`, `pull_request_close` and what it is `awaiting`: `execution_stop`,
-  `pull_request_close`, or `null`), printed as the server sends them. `meta` is the ticket's
-  response. An unknown ticket, or another
+  `pull_request_close`, or `null`), printed as the server sends them. When a step failed, an App
+  Service that reports failures adds a `failure` projection to `workflow_attention` (or
+  to a failed node): `code`, `reason`, `title`, `explanation`, `fix`, `actor`, `retry_class`,
+  `recommended_action`, `docs_anchor` and `technical` (`operation`, `exit_status`, `reason`, and
+  git's masked `excerpt`, or null). `--format json` passes it through unchanged; the terminal view
+  prints the failed step's title, what happened, the fix and who can fix it first, then the
+  operation, exit status and excerpt under "Technical details". Without it the ticket prints as
+  before. `meta` is the ticket's response. An unknown ticket, or another
   Account's, exits 4 with the server's `TICKET_NOT_FOUND`, and the prerequisites are not requested.
   `--kind <kind>` (e.g. `--kind epic`) refuses a ticket of another kind with `TICKET_KIND_MISMATCH`
   (exit code 4, with the `ticket`, its `kind` and the `expected_kind` in `error.details`), and the
@@ -1063,9 +1074,13 @@ Some actions, and when each is the one to take:
   `{ticket_id, actions}`; each
   action is the server's decision unchanged plus `state` (`allowed`, or `blocked` when either gate
   refuses), `blocked_by` (`admissible` or `authorized`, else null), `refusal` (the blocking gate's
-  `code`, `message` and `instead`, else null) and `recommended_reason`. It changes nothing. An
-  unknown ticket exits 4 with the server's `TICKET_NOT_FOUND`; a caller without `ticket.read` exits
-  3.
+  `code`, `message` and `instead`, else null) and `recommended_reason`. It also reads the ticket
+  (`GET /tickets/{ref}`): when its step failed and the ticket carries a failure projection (see
+  `pidgen ticket show`), `data.failure` is that projection unchanged, and the terminal view names
+  its `recommended_action` first, then the failure and its technical details, then the decisions
+  with the recommended one leading. Without a projection, or when the ticket cannot be read,
+  `data` and the terminal view are as before. It changes nothing. An unknown ticket exits 4 with
+  the server's `TICKET_NOT_FOUND`; a caller without `ticket.read` exits 3.
 - `pidgen ticket act <ref> <action>` (the action may be written `retry-run`) reads the decisions,
   narrowed by `--family`, `--run`, `--node`, `--fan-out-key`, `--prerequisite`, `--criterion`
   (passed as the `criterion_index` filter and matched against each target's `criterion_index`) and

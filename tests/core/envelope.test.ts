@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { emptyMeta, failure, render, renderTable, success } from "../../src/core/envelope.js";
-import { CliError } from "../../src/core/errors.js";
+import { CliError, exitCodeForResponse, INITIATIVE_REFUSALS } from "../../src/core/errors.js";
 import { ExitCode } from "../../src/core/exit-codes.js";
 
 describe("envelope", () => {
@@ -270,7 +270,7 @@ describe("resource reads", () => {
       "Findings",
     ],
     ["plan cohorts", "Cohort plan", { cohorts: [], edges: [], warnings: [] }, "Cohorts"],
-    ["domain epics", "Domain Epics", { epics: [], tickets: [], running: 0 }, "Epics"],
+    ["domain epics", "Initiatives", { epics: [], tickets: [], running: 0 }, "Initiatives"],
     ["contract list", "Contracts", { provides: [], builds_against: [] }, "Provides"],
   ])("%s identifies its sections and their empty states", (command, title, data, section) => {
     const output = humanRead(command as string, data);
@@ -1115,3 +1115,76 @@ it.each([40, 80, 120])(
     }
   },
 );
+
+// A Domain Epic is an Initiative wherever a person reads it: the CLI's own sentence for each
+// Initiative refusal says so, beside the server's message, which it relays verbatim. Codes, exit
+// codes and the JSON envelope are unchanged.
+describe("Initiative refusals", () => {
+  const SENTENCES: Record<string, string> = {
+    PARENT_OUTSIDE_DOMAIN:
+      "The parent is an Initiative whose domain does not cover this ticket's project, or is not above the new Initiative's domain: name an Initiative whose domain covers the project.",
+    DOMAIN_HAS_NO_PROJECTS:
+      "The domain contains no project, so it has no home for an Initiative: add a project to it first (pidgen domain project add).",
+    DOMAIN_PROJECT_CONFLICT:
+      "An Initiative is filed in a domain instead of a project: name the domain or the project, not both.",
+    DOMAIN_HAS_OPEN_EPICS:
+      "The domain's home holds an open Initiative, so the domain cannot be archived: finish the Initiatives listed below first.",
+    DOMAIN_COVERAGE_IN_USE:
+      "Open work under an Initiative in this domain, or in a domain above it, sits in a project the change takes out of its coverage: move that work first.",
+  };
+
+  it("names a sentence for every Initiative refusal, each saying Initiative", () => {
+    expect(INITIATIVE_REFUSALS).toEqual(SENTENCES);
+    for (const sentence of Object.values(INITIATIVE_REFUSALS)) {
+      expect(sentence).toContain("Initiative");
+      expect(sentence).not.toMatch(/Domain Epic|Account Epic/);
+    }
+  });
+
+  it.each([
+    ["PARENT_OUTSIDE_DOMAIN", 422, ExitCode.Usage],
+    ["DOMAIN_HAS_NO_PROJECTS", 422, ExitCode.Refused],
+    ["DOMAIN_PROJECT_CONFLICT", 422, ExitCode.Usage],
+    ["DOMAIN_HAS_OPEN_EPICS", 409, ExitCode.Refused],
+    ["DOMAIN_COVERAGE_IN_USE", 422, ExitCode.Refused],
+  ] as const)("%s keeps its code and exit code", (code, status, exitCode) => {
+    expect(exitCodeForResponse(status, code)).toBe(exitCode);
+  });
+
+  it.each([
+    ["PARENT_OUTSIDE_DOMAIN", "ticket create", { parent_ticket_id: "PAY-12", project_id: "ALPHA" }],
+    ["DOMAIN_HAS_NO_PROJECTS", "epic create", { domain_id: "dom-example-cards" }],
+    ["DOMAIN_PROJECT_CONFLICT", "ticket create", {}],
+    ["DOMAIN_HAS_OPEN_EPICS", "domain archive", { ticket_keys: ["PAY-12"] }],
+    ["DOMAIN_COVERAGE_IN_USE", "domain project rm", { ticket_keys: ["ALPHA-3"] }],
+    ["PARENT_OUTSIDE_DOMAIN", "ticket show", { parent_ticket_id: "PAY-12" }],
+  ] as const)(
+    "%s from %s prints the sentence after the server's message",
+    (code, command, details) => {
+      const message = `The server refuses: ${code}.`;
+      const envelope = failure(new CliError(code, message, ExitCode.Refused, details), emptyMeta());
+      const before = render(envelope, "json");
+      const output = render(envelope, "table", {
+        command: command.split(" "),
+        terminal: { isTTY: true, columns: 200 },
+      });
+      const lines = output.split("\n");
+      expect(lines[0]).toBe(`error ${code}: ${message}`);
+      expect(lines[1]).toBe(SENTENCES[code]);
+      for (const value of Object.values(details).flat()) expect(output).toContain(String(value));
+      expect(output).not.toMatch(/Domain Epic|Account Epic/);
+      expect(JSON.parse(before)).toMatchObject({ error: { code, message, details } });
+      expect(render(envelope, "json")).toBe(before);
+    },
+  );
+
+  it("adds no sentence to another refusal", () => {
+    const envelope = failure(
+      new CliError("DOMAIN_CYCLE", "The server refuses.", ExitCode.Refused),
+      emptyMeta(),
+    );
+    expect(render(envelope, "table", { command: ["domain", "parent", "add"] })).toBe(
+      "error DOMAIN_CYCLE: The server refuses.\n",
+    );
+  });
+});

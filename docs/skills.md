@@ -15,8 +15,8 @@ shared skills directory such as `~/.claude/skills`.
 | Skill | Use it to |
 |---|---|
 | `pidgen-file-ticket` | Submit a prose intent and answer its clarification questions, or file one structured ticket as a manifest with no children; or file a request instead when someone outside the team asked, the work is not yet judged worth doing, or its target is unclear |
-| `pidgen-manage-epics` | Create an Epic (an epic-kind ticket), set its branch and merge policy, place tickets in it by `parent_ticket_id`, and wire dependency edges; file a Domain Epic in a domain for work across projects and place each project's work under it |
-| `pidgen-decompose-plan` | Turn related work into parent/child delivery cohorts and file each new cohort as one ticket manifest; for work across projects, file one cohort per project under one Domain Epic and link each root to the contract it implements or builds against |
+| `pidgen-manage-epics` | Create an Epic (an epic-kind ticket), set its branch and merge policy, place tickets in it by `parent_ticket_id`, and wire dependency edges; file an Initiative (an Epic in a domain) for work across projects and place each project's work under it |
+| `pidgen-decompose-plan` | Turn related work into parent/child delivery cohorts and file each new cohort as one ticket manifest; for work across projects, file one cohort per project under one Initiative and link each root to the contract it implements or builds against |
 | `pidgen-manage-contracts` | Put an interface between projects into Pidgen as files: choose publish, propose, attach or link; publish a spec file with `pidgen contract publish` after `--check`, stopping for a breaking change; propose a fragment file with `pidgen contract propose`; set up CI (publish on the default branch, `--check` on pull requests, the token a secret); read landed and pending operations; never write a schema into a command, a body or a ticket |
 | `pidgen-triage-requests` | Work the request queue: list new requests, read each with its timeline, acknowledge it or ask the requester, accept it (with a bug's details or the missing ones unknown), close it with a reason, or promote it to a ticket in a Project |
 | `pidgen-query-tickets` | Find and read tickets, Epics, runs, and their state |
@@ -125,7 +125,7 @@ use the same routes), and cover choosing `restart_refinement` (the refinement re
 ticket at `research_needed`, `specification` or `planning`) versus `replay_from_node`, and
 `resolve_target_conflict`.
 
-`pidgen-manage-epics` and `pidgen-decompose-plan` file work that spans projects under a **Domain Epic**, an Epic
+`pidgen-manage-epics` and `pidgen-decompose-plan` file work that spans projects under an **Initiative**, an Epic
 filed in a domain with `pidgen ticket create --kind epic --domain` that owns no branch, and place
 each project's work under it by `parent_ticket_id` (a manifest's `epic_id`). `pidgen-decompose-plan` files
 one cohort per project, finds the interface with `pidgen contract list` and `pidgen contract show`,

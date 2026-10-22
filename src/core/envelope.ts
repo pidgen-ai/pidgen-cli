@@ -1,7 +1,7 @@
 import { renderHuman, type PresentationContext } from "./human.js";
-import { renderDetails } from "./resource-human.js";
+import { renderDetails, wrap } from "./resource-human.js";
 import { renderMutationFailure } from "./mutation-human.js";
-import type { CliError } from "./errors.js";
+import { INITIATIVE_REFUSALS, type CliError } from "./errors.js";
 import { CLI_VERSION } from "./version.js";
 
 /** The single JSON document every command prints. See docs/output-and-exit-codes.md. */
@@ -59,11 +59,15 @@ export function render(
       context.terminal?.columns,
     );
     if (mutation !== undefined) return mutation;
+    const sentence = INITIATIVE_REFUSALS[envelope.error.code];
+    const columns = context.terminal?.columns;
+    const width = columns !== undefined && columns > 0 ? Math.floor(columns) : 80;
+    const said = sentence === undefined ? "" : `${wrap(sentence, width)}\n`;
     const details =
       Object.keys(envelope.error.details).length > 0
         ? `Details:\n${renderDetails(envelope.error.details, context.terminal?.columns)}\n`
         : "";
-    return `error ${envelope.error.code}: ${envelope.error.message}\n${details}`;
+    return `error ${envelope.error.code}: ${envelope.error.message}\n${said}${details}`;
   }
   return renderHuman(envelope.data, context);
 }

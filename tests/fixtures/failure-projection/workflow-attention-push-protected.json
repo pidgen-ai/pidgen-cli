@@ -1,0 +1,31 @@
+{
+  "status": "active",
+  "resolution_class": "environment_fix_required",
+  "code": "DELIVERY_NO_TRANSPORT",
+  "summary": "The delivery push was refused by the forge.",
+  "source_node_id": "deliver",
+  "producer_node_id": null,
+  "violations": [],
+  "violation_overflow_count": 0,
+  "remediation": null,
+  "workflow_run_id": "run-2",
+  "logical_attempt": 1,
+  "asks": [],
+  "failure": {
+    "code": "DELIVERY_NO_TRANSPORT",
+    "reason": "push_protected",
+    "title": "The forge's branch protection refused the push",
+    "explanation": "A protected branch rule or pre-receive hook on the forge declined Pidgen's push to main.",
+    "fix": "Let Pidgen's forge account push to the branch, or deliver to an unprotected branch, then retry the run.",
+    "actor": "repository_admin",
+    "retry_class": "needs_fix",
+    "recommended_action": "retry_run",
+    "docs_anchor": "git-and-forge-requirements#push_protected",
+    "technical": {
+      "operation": "push",
+      "exit_status": 1,
+      "reason": "push_protected",
+      "excerpt": "remote: error: GH006: Protected branch update failed for refs/heads/main. | remote: error: Changes must be made through a pull request."
+    }
+  }
+}

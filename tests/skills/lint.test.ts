@@ -383,14 +383,15 @@ describe("Epics are epic-kind tickets in the skills and docs", () => {
 
 /**
  * Work that spans projects (docs/commands.md, "Domain Epics", "contract" and "ticket contract"):
- * pidgen-manage-epics files a Domain Epic in a domain and places each project's work under it by
- * `parent_ticket_id`; pidgen-decompose-plan files one cohort per project under one Domain Epic and, after
+ * pidgen-manage-epics files an Initiative (an Epic in a domain; the API calls it a Domain Epic) and places
+ * each project's work under it by `parent_ticket_id`; pidgen-decompose-plan files one cohort per project
+ * under one Initiative and, after
  * each commit, links the provider's root to the contract it implements and each consumer's root to
  * the contract it builds against. Neither skill creates a contract or asks a person to approve one:
  * refinement defines the contract, and linked work waits only when the Account's Contract approval
  * setting asks for a person.
  */
-describe("the filing skills file cross-project work under a Domain Epic and link it to contracts", () => {
+describe("the filing skills file cross-project work under an Initiative and link it to contracts", () => {
   const root = new URL("../../", import.meta.url).pathname;
   const read = (name: string) => {
     const file = join(REPO_SKILLS_DIR, name, "SKILL.md");
@@ -411,7 +412,7 @@ describe("the filing skills file cross-project work under a Domain Epic and link
 
   describe("pidgen-manage-epics", () => {
     const raw = read("pidgen-manage-epics");
-    const domain = section(raw, /Domain Epic/);
+    const domain = section(raw, /Initiative/);
     const text = prose(domain);
 
     it("finds the domain with pidgen domain list and checks its Epics with pidgen domain epics", () => {
@@ -460,9 +461,9 @@ describe("the filing skills file cross-project work under a Domain Epic and link
     const spans = section(raw, /Work that spans Projects/);
     const text = prose(spans);
 
-    it("files one cohort per project, each manifest's epic_id naming the same Domain Epic", () => {
+    it("files one cohort per project, each manifest's epic_id naming the same Initiative", () => {
       expect(text).toMatch(/one cohort per project/i);
-      expect(text).toMatch(/`epic_id`[^.]*same Domain Epic/);
+      expect(text).toMatch(/`epic_id`[^.]*same Initiative/);
       expect(spans).toMatch(/\bpidgen domain epics \S+/);
     });
 
@@ -508,6 +509,23 @@ describe("the filing skills file cross-project work under a Domain Epic and link
     });
   });
 
+  // A Domain Epic is called an Initiative wherever a person reads it; the commands keep their names.
+  describe.each(["pidgen-manage-epics", "pidgen-decompose-plan"])("%s says Initiative", (name) => {
+    const raw = read(name);
+    const description = /^description: (.*)$/m.exec(raw)?.[1] ?? "";
+
+    it("never says Domain Epic or Account Epic, its description included", () => {
+      expect(raw).not.toMatch(/Domain Epics?|Account Epics?/);
+      expect(description).toContain("Initiative");
+    });
+
+    it("defines an Initiative once, as an Epic filed in a domain, and keeps pidgen domain epics", () => {
+      const definitions = prose(raw).match(/an Initiative is an Epic filed in a domain rather than (?:in )?a project/gi);
+      expect(definitions).toHaveLength(1);
+      expect(raw).toMatch(/\bpidgen domain epics \S+/);
+    });
+  });
+
   describe("pidgen-manage-epics", () => {
     it("names no contract create command", () => {
       expect(read("pidgen-manage-epics")).not.toMatch(/\bcontract create\b/);
@@ -542,8 +560,8 @@ describe("the filing skills file cross-project work under a Domain Epic and link
         .map((line) => line.replaceAll("\\|", "|"));
     const [epicUse, epicCommands] = row("pidgen-manage-epics");
     const [decomposeUse, decomposeCommands] = row("pidgen-decompose-plan");
-    expect(epicUse).toMatch(/Domain Epic/);
-    expect(decomposeUse).toMatch(/Domain Epic/);
+    expect(epicUse).toMatch(/Initiative/);
+    expect(decomposeUse).toMatch(/Initiative/);
     expect(decomposeUse).toMatch(/contract/);
     expect(epicCommands).toContain("`domain list|epics|project add`");
     expect(epicCommands).toMatch(/ticket create[^`]*--domain/);
@@ -1157,5 +1175,76 @@ describe("skill pidgen-project-readiness", () => {
     const worker = readFileSync(join(REPO_SKILLS_DIR, "pidgen-setup-worker", "SKILL.md"), "utf8");
     expect(worker).toContain("pidgen-project-readiness");
     expect(worker).toMatch(/pidgen project rehearse [A-Z]+ --format json/);
+  });
+});
+
+/**
+ * A worker's only model setting is worker-policy.yaml's `harnesses.<name>.models` allow and deny
+ * lists. Which models exist and accept images is the App Service's model list, chosen in the setup
+ * flow; the worker keeps no vision table, model_modalities or fallback model.
+ */
+describe("pidgen-setup-worker and docs/install-worker.md describe model restrictions", () => {
+  const root = new URL("../../", import.meta.url).pathname;
+  const skill = readFileSync(join(REPO_SKILLS_DIR, "pidgen-setup-worker", "SKILL.md"), "utf8");
+  const install = readFileSync(join(root, "docs", "install-worker.md"), "utf8");
+  const flat = (text: string): string => text.replace(/\s+/g, " ");
+  const section = (raw: string, heading: RegExp): string => {
+    const parts: string[] = [];
+    let fenced = false;
+    for (const line of raw.split("\n")) {
+      if (/^\s*```/.test(line)) fenced = !fenced;
+      if (!fenced && /^#{2,4} /.test(line)) parts.push("");
+      if (parts.length > 0) parts[parts.length - 1] += `${line}\n`;
+    }
+    return parts.find((part) => heading.test(part.split("\n")[0]!)) ?? "";
+  };
+  const skillSection = section(skill, /^### Restrict the models this machine runs/);
+  const installSection = section(install, /^## Restrict the models this machine runs/);
+
+  // AC-9fd6d2364af2
+  it("the skill names no vision table, model_modalities or fallback_model", () => {
+    expect(skill).not.toMatch(/\bvision\b|model_modalities|fallback_model|fallback model/i);
+  });
+
+  // AC-9fd6d2364af2, AC-3e7e32030d0f
+  it.each([
+    ["skills/pidgen-setup-worker/SKILL.md", skillSection],
+    ["docs/install-worker.md", installSection],
+  ])("%s documents models.allow and models.deny with the matching rules", (_, text) => {
+    expect(text, "missing section").not.toBe("");
+    const prose = flat(text);
+    expect(prose).toContain("harnesses.<name>.models");
+    expect(prose).toMatch(/`allow`/);
+    expect(prose).toMatch(/`deny`/);
+    expect(prose).toMatch(/empty by default/i);
+    expect(prose).toMatch(/empty `allow`[^.]*every model/i);
+    expect(prose).toMatch(/`deny` wins/i);
+    expect(prose).toMatch(/`\*`[^.]*any run of characters/i);
+    expect(prose).toMatch(/Pi[^.]*`provider\/model-id`/);
+    expect(prose).toMatch(/only model setting/i);
+  });
+
+  // AC-c5db6e7ed106
+  it.each([
+    ["skills/pidgen-setup-worker/SKILL.md", skillSection],
+    ["docs/install-worker.md", installSection],
+  ])("%s says the shipped policy restricts nothing and the App Service's setup flow decides models", (_, text) => {
+    const prose = flat(text);
+    expect(prose).toMatch(/shipped `worker-policy\.yaml` restricts nothing/i);
+    expect(prose).toMatch(/which models exist and (?:which )?accept images[^.]*App Service[^.]*setup flow[^.]*not on the worker/i);
+  });
+
+  // AC-9fd6d2364af2: the "Customize harness options" row and the worker-policy paragraph.
+  it("the skill's harness options row and worker-policy paragraph name restricting models", () => {
+    const row = skill.split("\n").find((line) => line.startsWith("| Customize harness options"));
+    expect(row).toMatch(/restrict models/i);
+    expect(row).toContain("#restrict-the-models-this-machine-runs");
+    const policy = section(skill, /^### Customize harness options/);
+    expect(flat(policy)).toMatch(/`harnesses\.<name>\.models`/);
+  });
+
+  // AC-3e7e32030d0f: the install guide matches the skill and mentions no vision table either.
+  it("docs/install-worker.md names no vision table, model_modalities or fallback_model", () => {
+    expect(install).not.toMatch(/\bvision\b|model_modalities|fallback_model/i);
   });
 });
