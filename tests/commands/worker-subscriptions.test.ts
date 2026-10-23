@@ -11,7 +11,8 @@ type WorkerSubscriptions = components["schemas"]["WorkerSubscriptionsResource"];
 
 const SERVER = "https://pidgen.example.com";
 const PAT = "pidgen_pat_fake_token_for_tests";
-const WORKER = "worker-host.example.com";
+/** A worker's id as the App Service mints it: read with no lookup by name. */
+const WORKER = "wkr_vyemfavnwd4fa7v3uzpr4hq6ia";
 const NOW = Date.parse("2026-10-09T10:00:00Z");
 
 const CONFIG: Config = {
@@ -190,6 +191,27 @@ async function run(ctx: TestContext, args: string[]) {
 }
 
 const READ_PATH = `/api/v1/workers/${WORKER}/subscriptions`;
+const WORKERS_PATH = "/api/v1/workers";
+
+/** A worker as `GET /workers` lists it, with what the name lookup reads. */
+function listed(
+  hostId: string,
+  displayName: string | null,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    host_id: hostId,
+    display_name: displayName,
+    revoked_at: null,
+    created_at: "2026-10-01T00:00:00Z",
+    connected: true,
+    ...overrides,
+  };
+}
+
+function workerList(workers: unknown[]) {
+  return { service_protocol: "1.0", accepted_protocols: ["1.0"], workers };
+}
 const PUT_PATH = `/api/v1/workers/${WORKER}/subscriptions/claude/primary`;
 
 describe("pidgen worker subscriptions <worker>", () => {
@@ -217,9 +239,118 @@ describe("pidgen worker subscriptions <worker>", () => {
   });
 
   it("encodes the worker as one path segment", async () => {
-    const { ctx, calls } = await setup(() => ok(subscriptions()));
+    const { ctx, calls } = await setup((call) =>
+      call.url.pathname === WORKERS_PATH
+        ? ok(workerList([listed("host/with space", null)]))
+        : ok(subscriptions()),
+    );
     await run(ctx, ["worker", "subscriptions", "host/with space"]);
-    expect(calls[0]?.url.pathname).toBe("/api/v1/workers/host%2Fwith%20space/subscriptions");
+    expect(calls.at(-1)?.url.pathname).toBe("/api/v1/workers/host%2Fwith%20space/subscriptions");
+  });
+
+  // AC-7107494b616c: <worker> is a worker's name or id.
+  describe("a worker's name or id", () => {
+    const MAD_MAX = "wkr_examplexxxxxxxxxxxxxxxxxx";
+    const answer = (workers: unknown[]) => (call: Call) =>
+      call.url.pathname === WORKERS_PATH ? ok(workerList(workers)) : ok(subscriptions());
+
+    it("resolves a name through GET /workers to its host_id, case-insensitively", async () => {
+      const { ctx, calls } = await setup(
+        answer([
+          listed(MAD_MAX, "Mad-Max", { revoked_at: null }),
+          listed("wkr_removedxxxxxxxxxxxxxxxxxx", "Other", {}),
+        ]),
+      );
+      const { code, body } = await run(ctx, ["worker", "subscriptions", "mad-max"]);
+      expect(code).toBe(ExitCode.Ok);
+      expect(body.ok).toBe(true);
+      expect(calls.map((call) => `${call.method} ${call.url.pathname}`)).toEqual([
+        `GET ${WORKERS_PATH}`,
+        `GET /api/v1/workers/${MAD_MAX}/subscriptions`,
+      ]);
+    });
+
+    it("takes a listed id as it is", async () => {
+      const { ctx, calls } = await setup(answer([listed("dev-laptop", null)]));
+      const { code } = await run(ctx, ["worker", "subscriptions", "dev-laptop"]);
+      expect(code).toBe(ExitCode.Ok);
+      expect(calls.map((call) => call.url.pathname)).toEqual([
+        WORKERS_PATH,
+        "/api/v1/workers/dev-laptop/subscriptions",
+      ]);
+    });
+
+    it("takes a minted id with no lookup", async () => {
+      const { ctx, calls } = await setup(answer([]));
+      const { code } = await run(ctx, ["worker", "subscriptions", WORKER]);
+      expect(code).toBe(ExitCode.Ok);
+      expect(calls.map((call) => call.url.pathname)).toEqual([READ_PATH]);
+    });
+
+    it("an unknown name exits 4 WORKER_NOT_FOUND, and asks for no subscriptions", async () => {
+      const removed = listed("wkr_removedxxxxxxxxxxxxxxxxxx", "Ghost", {
+        revoked_at: "2026-10-01T00:00:00Z",
+      });
+      const { ctx, calls } = await setup(answer([listed(MAD_MAX, "Mad-Max"), removed]));
+      const { code, body } = await run(ctx, ["worker", "subscriptions", "ghost"]);
+      expect(code).toBe(ExitCode.NotFound);
+      expect(body.ok).toBe(false);
+      expect(body.error?.code).toBe("WORKER_NOT_FOUND");
+      expect(body.error?.details).toMatchObject({ worker: "ghost" });
+      expect(calls.map((call) => call.url.pathname)).toEqual([WORKERS_PATH]);
+    });
+
+    it("a name more than one unrevoked worker answers to exits 2 CLI_USAGE listing their ids", async () => {
+      const { ctx, calls } = await setup(
+        answer([listed("build-box", null), listed(MAD_MAX, "Build-Box")]),
+      );
+      const { code, body } = await run(ctx, ["worker", "subscriptions", "BUILD-BOX"]);
+      expect(code).toBe(ExitCode.Usage);
+      expect(body.error?.code).toBe("CLI_USAGE");
+      expect(body.error?.message).toContain("build-box");
+      expect(body.error?.message).toContain(MAD_MAX);
+      expect(body.error?.details).toMatchObject({ host_ids: ["build-box", MAD_MAX] });
+      expect(calls.map((call) => call.url.pathname)).toEqual([WORKERS_PATH]);
+    });
+
+    it("use resolves the name too, and puts the primary under the id", async () => {
+      const { ctx, calls } = await setup((call) =>
+        call.url.pathname === WORKERS_PATH
+          ? ok(workerList([listed(MAD_MAX, "Mad-Max")]))
+          : call.method === "PUT"
+            ? ok(applied())
+            : ok(subscriptions()),
+      );
+      const { code } = await run(ctx, [
+        "worker",
+        "subscriptions",
+        "use",
+        "Mad-Max",
+        "claude",
+        "claude-fallback-1",
+      ]);
+      expect(code).toBe(ExitCode.Ok);
+      expect(calls.map((call) => `${call.method} ${call.url.pathname}`)).toEqual([
+        `GET ${WORKERS_PATH}`,
+        `GET /api/v1/workers/${MAD_MAX}/subscriptions`,
+        `PUT /api/v1/workers/${MAD_MAX}/subscriptions/claude/primary`,
+      ]);
+    });
+
+    it("use with an unknown name exits 4 and sends nothing else", async () => {
+      const { ctx, calls } = await setup(answer([]));
+      const { code, body } = await run(ctx, [
+        "worker",
+        "subscriptions",
+        "use",
+        "nobody",
+        "claude",
+        "claude-fallback-1",
+      ]);
+      expect(code).toBe(ExitCode.NotFound);
+      expect(body.error?.code).toBe("WORKER_NOT_FOUND");
+      expect(calls.map((call) => call.url.pathname)).toEqual([WORKERS_PATH]);
+    });
   });
 
   // AC-e9b2af44165c: retain connection, login errors and quota observations in human mode.
@@ -334,7 +465,7 @@ describe("pidgen worker subscriptions <worker>", () => {
 
   it("keeps a server refusal of the read: an unknown worker exits 4 with its code", async () => {
     const { ctx } = await setup(() => refusal(404, "WORKER_NOT_FOUND", "No such worker."));
-    const { code, body } = await run(ctx, ["worker", "subscriptions", "missing-host"]);
+    const { code, body } = await run(ctx, ["worker", "subscriptions", WORKER]);
     expect(code).toBe(ExitCode.NotFound);
     expect(body.ok).toBe(false);
     expect(body.error?.code).toBe("WORKER_NOT_FOUND");

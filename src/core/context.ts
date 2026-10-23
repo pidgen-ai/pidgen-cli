@@ -73,8 +73,8 @@ export interface RunContext {
    */
   prompter: (() => Promise<Prompter>) | null;
   /**
-   * This machine's host name. `pidgen worker status` looks for the worker with this host id in the
-   * App Service's list unless `--host` names another.
+   * This machine's host name: setup's suggested worker name, and the host id `pidgen worker status`
+   * looks for last, for a worker enrolled before the App Service minted ids.
    */
   hostName: string;
 }

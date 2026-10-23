@@ -103,17 +103,78 @@ export type DeviceCodeShown = Pick<
   "user_code" | "verification_uri" | "verification_uri_complete"
 >;
 
+/** What became of one poll of `POST /auth/device/token`. */
+export type PollOutcome =
+  "pending" | "slow_down" | "approved" | "denied" | "expired" | "invalid" | "network";
+
 /**
- * The device-code login. `present` shows the verification address and user code; without it they
- * are printed to standard error as `pidgen auth login` prints them. `pidgen setup` draws them in its
- * own frame.
+ * One poll, as the caller hears of it. It never holds the device code, the user code or the token.
+ */
+export interface PollReport {
+  /** When the poll started (`ctx.now()`); for `expired` without a poll, when the code ran out. */
+  at: number;
+  outcome: PollOutcome;
+  /** The interval in seconds after this poll (grown by `slow_down`). */
+  interval: number;
+  /**
+   * Seconds since the previous poll started, when that is more than twice the interval: the poll
+   * was held up. `null` otherwise, and for the first poll.
+   */
+  delayed: number | null;
+  /** Why a `network` poll failed. */
+  error?: string;
+}
+
+export interface PollOptions {
+  /** Stops polling: the poll rejects with an `AbortError`. */
+  signal?: AbortSignal;
+  /** Hears of each poll as it ends. */
+  onPoll?: (report: PollReport) => void;
+}
+
+/** A CLI token a device-code login was approved with: only `loginWithDeviceCode` reads it. */
+export type DeviceToken = CliToken;
+
+/**
+ * One device code waiting to be approved: what the person is shown, and the polling. The device
+ * code itself stays inside.
+ */
+export interface PendingDeviceLogin {
+  shown: DeviceCodeShown;
+  /** The server's polling interval, in seconds. */
+  interval: number;
+  /** Seconds until the code expires, as the server issued it. */
+  expiresIn: number;
+  /**
+   * Polls until the login is approved (the token), denied, expired or lost (a `CliError` with
+   * that code, exit code 3). A network failure is "not yet".
+   */
+  poll(options?: PollOptions): Promise<DeviceToken>;
+  /**
+   * Asks the poll to check at once instead of waiting out the interval, but never sooner than the
+   * interval after the previous poll started.
+   */
+  checkNow(): void;
+}
+
+/**
+ * How a device code is waited on. `start` issues a new code (`POST /auth/device`); the waiter
+ * shows it, polls, and may start another. `pidgen auth login` prints the code and polls once;
+ * `pidgen setup` draws it in its frame and answers keys.
+ */
+export type DeviceCodeWaiter = (start: () => Promise<PendingDeviceLogin>) => Promise<DeviceToken>;
+
+/**
+ * The device-code login. `waiter` shows each code and waits for the approval; without it the
+ * address and code are printed to standard error and polled until the approval, as `pidgen auth
+ * login` does. `pidgen setup` draws them in its own frame.
  */
 export async function loginWithDeviceCode(
   ctx: RunContext,
   url: string,
   global: GlobalOptions,
   deviceLabel: string | undefined,
-  present?: (shown: DeviceCodeShown) => void,
+  waiter?: DeviceCodeWaiter,
 ): Promise<CommandResult> {
   const config = await loadConfig(ctx);
   const profileName = selectProfile(ctx, config, global);
@@ -122,31 +183,19 @@ export async function loginWithDeviceCode(
   const client = anonymousClient(ctx, url, global);
   const identity = await checkServer(client);
 
-  const request: DeviceAuthorizationRequest =
-    deviceLabel !== undefined ? { device_label: deviceLabel } : {};
-  const started = await client.request<unknown>({
-    method: "POST",
-    path: "/auth/device",
-    body: request,
-  });
-  const authorization = parseResponse(deviceAuthorizationSchema, started.data, "/auth/device");
-
-  // The user code is for the person, so it is shown even when standard error is not a terminal.
-  // It never appears on standard output, and the device code is never shown.
-  if (present !== undefined) {
-    present({
-      user_code: authorization.user_code,
-      verification_uri: authorization.verification_uri,
-      verification_uri_complete: authorization.verification_uri_complete,
+  const start = async (): Promise<PendingDeviceLogin> => {
+    const request: DeviceAuthorizationRequest =
+      deviceLabel !== undefined ? { device_label: deviceLabel } : {};
+    const started = await client.request<unknown>({
+      method: "POST",
+      path: "/auth/device",
+      body: request,
     });
-  } else {
-    ctx.io.stderr(
-      `Open ${authorization.verification_uri} and enter the code  ${authorization.user_code}\n`,
-    );
-    if (ctx.io.interactive) ctx.io.stderr("Waiting for approval…\n");
-  }
+    const authorization = parseResponse(deviceAuthorizationSchema, started.data, "/auth/device");
+    return new DevicePoll(ctx, client, authorization);
+  };
 
-  const token = await pollForToken(ctx, client, authorization);
+  const token = await (waiter ?? printedWait(ctx))(start);
 
   // Never store a token the server does not accept: it must answer `GET /me` with 200.
   await verifyCliToken(ctx, url, global, token);
@@ -179,54 +228,170 @@ export async function loginWithDeviceCode(
 }
 
 /**
+ * `pidgen auth login`'s wait: one code, printed to standard error, polled until it is approved.
+ * The user code is for the person, so it is shown even when standard error is not a terminal. It
+ * never appears on standard output, and the device code is never shown.
+ */
+function printedWait(ctx: RunContext): DeviceCodeWaiter {
+  return async (start) => {
+    const pending = await start();
+    ctx.io.stderr(
+      `Open ${pending.shown.verification_uri} and enter the code  ${pending.shown.user_code}\n`,
+    );
+    if (ctx.io.interactive) ctx.io.stderr("Waiting for approval…\n");
+    return pending.poll();
+  };
+}
+
+/** The device-code login codes that end a poll: the login can no longer be approved. */
+const ENDING_CODES: Readonly<Record<string, PollOutcome>> = {
+  access_denied: "denied",
+  expired_token: "expired",
+  invalid_grant: "invalid",
+};
+
+/**
  * Polls `POST /auth/device/token` at the server's interval until the login is approved, denied or
  * expired. `slow_down` grows the interval; `access_denied`, `expired_token` and `invalid_grant`
- * fail with that code and exit code 3.
+ * fail with that code and exit code 3. A poll that fails on the network is not retried inside the
+ * HTTP client (it may have reached the server and redeemed the code); it counts as "not yet", and
+ * the next poll comes at the interval. An `invalid_grant` after such a failure says the approval's
+ * answer was lost.
  */
-async function pollForToken(
-  ctx: RunContext,
-  client: ApiClient,
-  authorization: DeviceAuthorization,
-): Promise<CliToken> {
-  const deadline = ctx.now() + authorization.expires_in * 1000;
-  let intervalSeconds = Math.max(1, authorization.interval);
-  const body: DeviceTokenRequest = {
-    device_code: authorization.device_code,
-    grant_type: DEVICE_GRANT_TYPE,
-  };
-  for (;;) {
-    await ctx.sleep(intervalSeconds * 1000);
-    if (ctx.now() >= deadline) throw loginFailed("expired_token", {});
-    try {
-      // Polling is safe to repeat, so a network failure is retried like a GET.
-      const { data } = await client.request<unknown>({
-        method: "POST",
-        path: "/auth/device/token",
-        body,
-        idempotent: true,
+class DevicePoll implements PendingDeviceLogin {
+  readonly shown: DeviceCodeShown;
+  readonly interval: number;
+  readonly expiresIn: number;
+  private wake: (() => void) | null = null;
+  private wanted = false;
+
+  constructor(
+    private readonly ctx: RunContext,
+    private readonly client: ApiClient,
+    private readonly authorization: DeviceAuthorization,
+  ) {
+    this.shown = {
+      user_code: authorization.user_code,
+      verification_uri: authorization.verification_uri,
+      verification_uri_complete: authorization.verification_uri_complete,
+    };
+    this.interval = Math.max(1, authorization.interval);
+    this.expiresIn = authorization.expires_in;
+  }
+
+  checkNow(): void {
+    this.wanted = true;
+    this.wake?.();
+  }
+
+  async poll(options: PollOptions = {}): Promise<DeviceToken> {
+    const { ctx, client, authorization } = this;
+    const { signal, onPoll } = options;
+    const issued = ctx.now();
+    const deadline = issued + authorization.expires_in * 1000;
+    let intervalSeconds = this.interval;
+    let previous: number | null = null;
+    // Whether the last poll failed on the network, so its answer may have been lost.
+    let unanswered = false;
+    const body: DeviceTokenRequest = {
+      device_code: authorization.device_code,
+      grant_type: DEVICE_GRANT_TYPE,
+    };
+    const report = (at: number, outcome: PollOutcome, error?: string) => {
+      const gap = previous === null ? 0 : (at - previous) / 1000;
+      onPoll?.({
+        at,
+        outcome,
+        interval: intervalSeconds,
+        delayed: previous !== null && gap > 2 * intervalSeconds ? Math.round(gap) : null,
+        ...(error !== undefined ? { error } : {}),
       });
-      return parseResponse(cliTokenSchema, data, "/auth/device/token");
-    } catch (error) {
-      if (!(error instanceof CliError)) throw error;
-      switch (error.code.toLowerCase()) {
-        case "authorization_pending":
+    };
+    for (;;) {
+      await this.pause(intervalSeconds * 1000, previous ?? issued, signal);
+      const at = ctx.now();
+      if (at >= deadline) {
+        report(at, "expired");
+        throw loginFailed("expired_token", {});
+      }
+      try {
+        // Not marked idempotent: a poll that reached the server may have redeemed the code, and
+        // repeating it blindly would then be refused with invalid_grant.
+        const { data } = await client.request<unknown>({
+          method: "POST",
+          path: "/auth/device/token",
+          body,
+        });
+        signal?.throwIfAborted();
+        const token = parseResponse(cliTokenSchema, data, "/auth/device/token");
+        report(at, "approved");
+        return token;
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (!(error instanceof CliError)) throw error;
+        const code = error.code.toLowerCase();
+        if (error.exitCode === ExitCode.Network) {
+          report(at, "network", error.message);
+          previous = at;
+          unanswered = true;
           continue;
-        case "slow_down": {
+        }
+        if (code === "authorization_pending") {
+          report(at, "pending");
+        } else if (code === "slow_down") {
           const suggested = error.details["interval"];
           intervalSeconds =
             typeof suggested === "number" && suggested > intervalSeconds
               ? suggested
               : intervalSeconds + SLOW_DOWN_STEP_SECONDS;
-          continue;
-        }
-        case "access_denied":
-        case "expired_token":
-        case "invalid_grant":
-          throw loginFailed(error.code, error.details);
-        default:
+          report(at, "slow_down");
+        } else if (ENDING_CODES[code] !== undefined) {
+          report(at, ENDING_CODES[code]);
+          const lost = code === "invalid_grant" && unanswered;
+          throw loginFailed(
+            error.code,
+            lost ? { ...error.details, answer_lost: true } : error.details,
+          );
+        } else {
           throw error;
+        }
+        previous = at;
+        unanswered = false;
       }
     }
+  }
+
+  /**
+   * Waits `ms` before the next poll, or less when `checkNow` asks, but never less than `ms` after
+   * `previous` (when the previous poll started, or the code was issued). Rejects when `signal`
+   * aborts.
+   */
+  private async pause(ms: number, previous: number, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    const woken = new Promise<void>((resolveWake) => {
+      this.wake = resolveWake;
+      if (this.wanted) resolveWake();
+    });
+    let onAbort: (() => void) | null = null;
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(signal?.reason as Error);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+    aborted.catch(() => undefined);
+    try {
+      await Promise.race([this.ctx.sleep(ms), woken, aborted]);
+      if (this.wanted) {
+        // Asked to check at once: still never sooner than the interval after the previous poll.
+        const left = previous + ms - this.ctx.now();
+        if (left > 0) await Promise.race([this.ctx.sleep(left), aborted]);
+      }
+    } finally {
+      // One listener per pause, removed with it: a long wait never piles them up on the signal.
+      if (onAbort !== null) signal?.removeEventListener("abort", onAbort);
+      this.wake = null;
+      this.wanted = false;
+    }
+    signal?.throwIfAborted();
   }
 }
 
@@ -238,8 +403,15 @@ const FAILURE_MESSAGES: Record<string, string> = {
     "The server no longer recognises this login. Nothing was stored; run `pidgen auth login <url>` again.",
 };
 
+/** `invalid_grant` after a poll that failed on the network: that poll redeemed the code. */
+const ANSWER_LOST =
+  "The approval's answer was lost: a check reached the server and used the code, but its answer never arrived. Nothing was stored; run `pidgen auth login <url>` again for a new code.";
+
 function loginFailed(code: string, details: Record<string, unknown>): CliError {
-  const message = FAILURE_MESSAGES[code.toLowerCase()] ?? "The login failed. Nothing was stored.";
+  const message =
+    details["answer_lost"] === true
+      ? ANSWER_LOST
+      : (FAILURE_MESSAGES[code.toLowerCase()] ?? "The login failed. Nothing was stored.");
   return new CliError(code, message, ExitCode.Auth, details);
 }
 

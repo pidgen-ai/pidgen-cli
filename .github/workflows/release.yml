@@ -33,6 +33,9 @@ permissions:
 jobs:
   publish:
     name: Publish to npm
+    # Only from GitHub: a copy of this repository on another forge runs these workflows too, and
+    # npm provenance names this GitHub repository.
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     permissions:
       contents: write # attach the docs bundle to the GitHub release

@@ -2,6 +2,64 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.6
+
+The sixth alpha, published to npm under `alpha` and `latest`. A fresh `pidgen setup` finds the
+worker it enrolled by the id the App Service minted, so it no longer fails with
+`WORKER_NOT_CONNECTED` after the worker connects, and `pidgen worker status` finds this machine's
+worker the same way. Setup's sign-in wait never freezes while the terminal stops reading, offers a
+new code when one expires, and stops with `SETUP_CANCELLED` on Ctrl-C or SIGTERM.
+
+### Setup's sign-in wait never freezes, and can be retried or backed out of
+
+- `pidgen setup` no longer stops polling for the sign-in while the terminal isn't reading its
+  output (as some terminals do while text is selected): its standard error is non-blocking for the
+  whole run, and spinner frames and the wait's live line are skipped, not queued, while output is
+  backed up. An approval is picked up within one polling interval. Before it exits, setup waits up
+  to two seconds for its last lines to reach the terminal.
+- The sign-in wait shows how long it has waited and when it last checked, and answers keys:
+  Enter opens the link in the browser (`open`, `xdg-open` or `wslview`), or checks at once where
+  there is no opener; n gets a new code; Esc asks `Sign-in isn't finished. What next?` (wait again
+  with a new code, sign in with a token instead, or quit setup).
+- An expired code, a denied sign-in or a lost one no longer stops setup: it says what happened and
+  offers a new code.
+- Ctrl-C during a spinner or the sign-in wait now stops setup with `SETUP_CANCELLED` and exits 2,
+  with the cancel lines and `answer: cancelled (Ctrl-C)` in the setup log; it used to exit 0 with
+  no message. SIGTERM now stops setup the same way (`terminated (SIGTERM)` in the log); it used to
+  be ignored. Setup draws its own spinners: `@clack/prompts` is no longer a dependency.
+- The setup log records each poll with its time and outcome (never a code or the token), and
+  `poll delayed <n>s` when one was held up.
+- A poll of `POST /auth/device/token` that fails on the network is no longer retried at once inside
+  the HTTP client, where a retry of a poll that had already used the code was refused with
+  `invalid_grant`. `pidgen auth login` and setup count it as "not yet" and poll again at the
+  interval; an `invalid_grant` after it says the approval's answer was lost.
+
+### Setup and `worker status` find this machine's worker by its minted id
+
+- **Fixed:** since the App Service mints every new worker's id (`wkr_` and 26 characters) and keeps
+  the chosen name as its `display_name`, a fresh `pidgen setup` waited for a worker whose `host_id`
+  was the chosen name and failed with `WORKER_NOT_CONNECTED` although the worker had connected, and
+  `pidgen worker status` looked for this machine's host name and reported the worker not enrolled.
+  Setup now waits for the id the worker saved in `worker.env` (`PIDGEN_LOCALITY_DOMAIN`), or, when
+  it names none, the unrevoked worker with the chosen name.
+- `pidgen worker status` finds this machine's worker, in order, by `--host` (a worker's id, or its
+  name without regard to case), the id in the worker home's `worker.env` when it holds a credential
+  for the configured server, this install's newest worker by `install_id`, and, for a worker
+  enrolled before minted ids, this machine's host name. A new `server.selected_by` field says which
+  (`option`, `worker_home`, `install_id` or `host_name`), and `server.display_name` is the worker's
+  name.
+- Setup's name checks (a taken name, the "already has a worker named …" notice, the next free name)
+  compare with each worker's `display_name`, without regard to case, and with its `host_id` only
+  for a worker enrolled before names.
+- `pidgen worker subscriptions <worker>` and `subscriptions use <worker> …` take a worker's name or
+  id. A name is looked up in `GET /workers`; an unknown one exits 4 with `WORKER_NOT_FOUND`, and one
+  more than one unrevoked worker has exits 2 with `CLI_USAGE`, listing their ids.
+- Human output shows a worker as its name with its id, `Worker: Mad-Max (wkr_…)` in
+  `worker status` (the `Host id` label is gone), and in setup's enroll and connect lines and
+  `WORKER_NOT_CONNECTED`'s message. JSON keeps `host_id` and adds `display_name`: setup's `enroll`
+  step and `WORKER_NOT_CONNECTED`'s `error.details` carry both.
+- The `pidgen-setup-worker` skill names a worker for `worker subscriptions` by its name or id.
+
 ## 0.1.0-alpha.5
 
 The fifth alpha, published to npm under `alpha` and `latest`. `pidgen ticket show` and

@@ -14,6 +14,8 @@ import {
   plain,
   PromptCancelled,
   type ConfirmQuestion,
+  type InterruptReason,
+  type WaitKey,
   type MultiselectQuestion,
   type PromptOption,
   type Prompter,
@@ -48,6 +50,31 @@ export interface ScriptedPrompter {
   asked: AskedPrompt[];
   /** Each message a spinner showed while it ran (start, then each change), in order. */
   spinners: string[];
+  /** Each wait, in the order they started. */
+  waits: ScriptedWait[];
+  /** Ctrl-C during a spinner or a wait, or SIGTERM: what the real prompter reports. */
+  interrupt(reason: InterruptReason): void;
+}
+
+/** A wait as the scripted prompter ran it: what it showed, and a way to press its keys. */
+export interface ScriptedWait {
+  message: string;
+  keys: string;
+  /** Each live line it showed (the first is `message`), in order. */
+  lines: string[];
+  /** The line it ended in, `null` when it ended without one, `undefined` while it runs. */
+  ended: string | null | undefined;
+  /** Presses Enter, n or Esc. */
+  press(key: WaitKey): void;
+}
+
+export interface ScriptedHooks {
+  /** Called as each question opens, before it takes its answer. */
+  onAsk?: (asked: AskedPrompt) => void;
+  /** Called as each spinner starts, with its message. */
+  onSpinner?: (message: string) => void;
+  /** Called as each wait starts. */
+  onWait?: (wait: ScriptedWait) => void;
 }
 
 /**
@@ -58,10 +85,17 @@ export interface ScriptedPrompter {
 export function scriptedPrompter(
   write: (text: string) => void,
   answers: Answer[],
-  onAsk: (asked: AskedPrompt) => void = () => undefined,
+  hooks: ScriptedHooks | ((asked: AskedPrompt) => void) = {},
 ): ScriptedPrompter {
+  const {
+    onAsk = () => undefined,
+    onSpinner,
+    onWait,
+  } = typeof hooks === "function" ? { onAsk: hooks } : hooks;
   const asked: AskedPrompt[] = [];
   const spinners: string[] = [];
+  const waits: ScriptedWait[] = [];
+  const listeners: Array<(reason: InterruptReason) => void> = [];
 
   async function take(
     entry: Omit<AskedPrompt, "screen" | "options">,
@@ -188,7 +222,10 @@ export function scriptedPrompter(
     // A spinner leaves only its result line; what it showed while running is recorded.
     spinner() {
       return {
-        start: (message) => void spinners.push(message),
+        start: (message) => {
+          spinners.push(message);
+          onSpinner?.(message);
+        },
         message: (message) => void spinners.push(message),
         stop: (message) => write(`${drawCollapsed(message)}\n`),
         error: (message) => write(`${drawFailed(message)}\n`),
@@ -204,8 +241,65 @@ export function scriptedPrompter(
         error: (message) => write(`${drawFailed(message)}\n`),
       };
     },
+
+    // A wait, like a spinner, leaves only its result line; its live lines are recorded, and the
+    // test presses its keys.
+    wait(question) {
+      const pressed: WaitKey[] = [];
+      let waiting: ((key: WaitKey) => void) | null = null;
+      const wait: ScriptedWait = {
+        message: question.message,
+        keys: question.keys,
+        lines: [question.message],
+        ended: undefined,
+        press(key) {
+          if (wait.ended !== undefined) throw new Error(`pressed ${key} after the wait ended`);
+          if (waiting === null) {
+            pressed.push(key);
+            return;
+          }
+          const answer = waiting;
+          waiting = null;
+          answer(key);
+        },
+      };
+      waits.push(wait);
+      let next: Promise<WaitKey> | null = null;
+      const end = (line: string | null) => {
+        if (wait.ended !== undefined) return;
+        wait.ended = line;
+        if (line !== null) write(`${drawCollapsed(line)}\n`);
+      };
+      const running = {
+        update: (message: string) => void wait.lines.push(message),
+        key() {
+          const first = pressed.shift();
+          if (first !== undefined) return Promise.resolve(first);
+          next ??= new Promise<WaitKey>((resolveKey) => {
+            waiting = (key) => {
+              next = null;
+              resolveKey(key);
+            };
+          });
+          return next;
+        },
+        stop: (line: string) => end(line),
+        clear: () => end(null),
+      };
+      onWait?.(wait);
+      return running;
+    },
+
+    onInterrupt(listener) {
+      listeners.push(listener);
+    },
+
+    close: () => Promise.resolve(),
   };
-  return { prompter, asked, spinners };
+  const interrupt = (reason: InterruptReason) => {
+    for (const listener of listeners) listener(reason);
+  };
+  return { prompter, asked, spinners, waits, interrupt };
 }
 
 function drawCancelledBar(): string {

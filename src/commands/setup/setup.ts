@@ -32,10 +32,12 @@ import {
   drawTaskLine,
   PromptCancelled,
   SYMBOL,
+  type InterruptReason,
   type Prompter,
   type PromptOption,
   type Spinner,
   type TaskLog,
+  type Wait,
 } from "../../core/prompter.js";
 import { CliError, usageError } from "../../core/errors.js";
 import { ExitCode } from "../../core/exit-codes.js";
@@ -77,8 +79,23 @@ import {
 } from "../../core/worker-install.js";
 import { ensureInstallId, invalidInstallIdNote } from "../../core/install-id.js";
 import type { WorkerList, WorkerResource } from "../../core/worker-enrollments.js";
+import {
+  liveWorkersNamed,
+  newestOfInstall,
+  sameName,
+  sameServer,
+  workerLabel,
+  workerName,
+} from "../../core/worker-identity.js";
 import { accountUse } from "../account/use.js";
-import { loginWithDeviceCode, parseServerUrl, type DeviceCodeShown } from "../auth/login.js";
+import {
+  loginWithDeviceCode,
+  parseServerUrl,
+  type DeviceCodeShown,
+  type DeviceToken,
+  type PendingDeviceLogin,
+  type PollReport,
+} from "../auth/login.js";
 import { doctorChecks } from "../doctor/doctor.js";
 import { workerDoctor } from "../worker/doctor.js";
 import { enrollWorker, NAME_TAKEN, workerEnroll } from "../worker/enroll.js";
@@ -98,8 +115,47 @@ const CONNECT_POLL_MS = 2_000;
 const LABEL_MAX = 100;
 /** The most sessions at a time `--sessions` and the Custom answer take (the worker's own limit). */
 const SESSIONS_MAX = 64;
-/** What setup says when the person presses Ctrl-C at a prompt. */
+/** What setup says when the person presses Ctrl-C at a prompt, or during a task. */
 const CANCELLED = "Setup cancelled. Everything before this is kept.";
+
+/** The sign-in wait's live line, before its elapsed time. */
+const WAITING = "Waiting for you to approve in the browser…";
+/** The sign-in wait's key line. */
+const WAIT_KEYS = "Enter open in browser · n new code · Esc other options";
+/** What setup asks when the sign-in wait stops without an approval. */
+const NOT_FINISHED = "Sign-in isn't finished. What next?";
+
+/** What the sign-in wait's question offers. */
+type NotFinished = "retry" | "token" | "quit";
+
+/** How a sign-in that can no longer be approved is said, by the poll's code. */
+const SIGN_IN_ENDED: Readonly<Record<string, string>> = {
+  expired_token: "The code expired before the sign-in was approved.",
+  access_denied: "The sign-in was denied in the browser.",
+  invalid_grant: "Pidgen no longer recognises this sign-in.",
+};
+/** `invalid_grant` after a poll that failed on the network: that poll used the code. */
+const ANSWER_LOST =
+  "The approval's answer was lost on the way back, so this code can't be used again.";
+
+/** A length of time as the wait shows it: `12s`, `1m 12s`. */
+function shortDuration(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return minutes > 0 ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
+}
+
+/** One poll as the setup log records it: its outcome, never a code or the token. */
+function pollLine(report: PollReport): string {
+  switch (report.outcome) {
+    case "slow_down":
+      return `poll: slow_down; interval now ${report.interval}s`;
+    case "network":
+      return `poll: network error (${report.error ?? "no answer"})`;
+    default:
+      return `poll: ${report.outcome}`;
+  }
+}
 
 /**
  * Doctor checks a later step fixes, so they do not stop setup: sign-in, the coding agents (one
@@ -345,6 +401,8 @@ export const setup: CommandSpec = {
       return await new SetupRun(ctx, prompter, global, answers, commands, log).run(started);
     } finally {
       log.close();
+      // Its last lines reach the terminal before setup returns (up to two seconds).
+      await prompter.close();
     }
   },
 };
@@ -545,14 +603,6 @@ async function configuredUrl(ctx: RunContext, global: GlobalOptions): Promise<st
   }
 }
 
-function sameServer(a: string, b: string): boolean {
-  try {
-    return new URL(a).origin === new URL(b).origin;
-  } catch {
-    return false;
-  }
-}
-
 /** The `pidgen` commands setup runs, as a person would type them, with the global flags given. */
 class Commands {
   constructor(
@@ -575,6 +625,9 @@ class Commands {
     this.pidgen(["auth", "login", this.answers.url, "--with-token", "--account", account], {
       account: false,
     });
+  /** The token sign-in with the Account left for the person to fill in. */
+  tokenLoginForAnyAccount = () =>
+    `${this.pidgen(["auth", "login", this.answers.url, "--with-token", "--account"], { account: false })} <ACC-…>`;
   accountUse = (account: string) => this.pidgen(["account", "use", account], { account: false });
   install = (form: WorkerForm | undefined) =>
     this.pidgen([
@@ -691,30 +744,31 @@ function shortDate(iso: string): string {
   return `${date.getUTCDate()} ${MONTHS[date.getUTCMonth()]}`;
 }
 
-/** Whether the Account lists an unrevoked worker under `name`, compared case-insensitively. */
+/**
+ * Whether the Account lists an unrevoked worker named `name`: its `display_name`, compared
+ * case-insensitively, or its `host_id` for a worker enrolled before names.
+ */
 function nameTaken(list: WorkerList, name: string): boolean {
   return liveWorker(list, name) !== undefined;
 }
 
-/** The Account's unrevoked worker under `name`, compared case-insensitively. */
+/** The Account's unrevoked worker named `name` (see `nameTaken`). */
 function liveWorker(list: WorkerList, name: string): WorkerList["workers"][number] | undefined {
-  const wanted = name.toLowerCase();
-  return list.workers.find(
-    (worker) => worker.host_id.toLowerCase() === wanted && worker.revoked_at === null,
-  );
+  return liveWorkersNamed(list, name)[0];
 }
 
 /**
- * The first of `<base>-2`, `<base>-3`, … the Account lists no worker under (revoked ones included)
- * and the server did not refuse in this run (`refused`, lower case), within the label limit. Names
- * are compared case-insensitively.
+ * The first of `<base>-2`, `<base>-3`, … no worker the Account lists is named (revoked ones
+ * included; a worker's `display_name`, or its `host_id` for one enrolled before names) and the
+ * server did not refuse in this run (`refused`, lower case), within the label limit. Names are
+ * compared case-insensitively.
  */
 function nextFreeName(
   list: WorkerList | null,
   base: string,
   refused: ReadonlySet<string> = new Set(),
 ): string {
-  const listed = new Set(list?.workers.map((worker) => worker.host_id.toLowerCase()) ?? []);
+  const listed = new Set(list?.workers.map((worker) => workerName(worker).toLowerCase()) ?? []);
   for (let number = 2; ; number++) {
     const suffix = `-${number}`;
     const name = `${base.slice(0, LABEL_MAX - suffix.length)}${suffix}`;
@@ -729,12 +783,6 @@ interface Preferred {
   why: string;
   /** Suggest it only while the Account lists a removed worker under it. */
   listedRemoved: boolean;
-}
-
-/** This install's newest worker in `list`: the newest whose `install_id` is `installId`. */
-function newestOfInstall(list: WorkerList, installId: string): WorkerResource | null {
-  const ours = list.workers.filter((worker) => worker.install_id === installId);
-  return [...ours].sort((a, b) => b.created_at.localeCompare(a.created_at))[0] ?? null;
 }
 
 /** What a re-run of setup does after a failure. */
@@ -752,8 +800,17 @@ interface ActiveTask {
   failure: string;
   spinner: Spinner | null;
   taskLog: TaskLog | null;
+  /** The sign-in wait, which answers keys while it polls. */
+  wait: Wait | null;
   tail: string[];
 }
+
+/** How one device code's wait ended. */
+type WatchOutcome =
+  | { kind: "approved"; token: DeviceToken }
+  | { kind: "new" }
+  | { kind: "escape" }
+  | { kind: "ended"; line: string; code: string };
 
 class SetupRun {
   private readonly steps: SetupStep[] = [];
@@ -782,6 +839,13 @@ class SetupRun {
   private setUp = false;
   /** Whether setup used a uv that `PATH` does not reach yet. */
   private uvOffPath = false;
+  /** Ctrl-C during a task, or SIGTERM: what stopped setup, once it has. */
+  private interruption: PromptCancelled | null = null;
+  /** Rejects with the interruption: each step races its body against it. */
+  private readonly interrupted: Promise<never>;
+  private stop: (cancelled: PromptCancelled) => void = () => undefined;
+  /** Aborted by an interruption: stops the sign-in wait's polling. */
+  private readonly stopping = new AbortController();
 
   constructor(
     /** Replaced once, when the check step installs uv where `PATH` does not reach yet. */
@@ -792,7 +856,25 @@ class SetupRun {
     private readonly commands: Commands,
     private readonly log: SetupLog,
   ) {
-    this.prompter = loggedPrompter(prompter, log);
+    this.prompter = loggedPrompter(prompter, log, () => this.interruption);
+    this.interrupted = new Promise<never>((_, reject) => {
+      this.stop = reject;
+    });
+    this.interrupted.catch(() => undefined);
+    prompter.onInterrupt((reason) => this.interrupt(reason));
+  }
+
+  /**
+   * Ctrl-C during a spinner or the sign-in wait, or SIGTERM at any time: the step running now
+   * stops as a cancelled prompt stops it (`SETUP_CANCELLED`, exit 2), and the sign-in wait stops
+   * polling. The first one counts.
+   */
+  private interrupt(reason: InterruptReason): void {
+    if (this.interruption !== null) return;
+    this.interruption = new PromptCancelled(reason);
+    this.log.event(reason === "sigterm" ? "terminated (SIGTERM)" : "answer: cancelled (Ctrl-C)");
+    this.stopping.abort(this.interruption);
+    this.stop(this.interruption);
   }
 
   /**
@@ -849,7 +931,13 @@ class SetupRun {
     const c = this.commands;
     const record = await readInstallRecord(this.ctx);
     const enroll = this.steps.find((entry) => entry.id === "enroll");
-    const host = typeof enroll?.["host_id"] === "string" ? enroll["host_id"] : this.answers.label;
+    const host =
+      typeof enroll?.["host_id"] === "string" || typeof enroll?.["display_name"] === "string"
+        ? workerLabel(
+            typeof enroll["host_id"] === "string" ? enroll["host_id"] : null,
+            typeof enroll["display_name"] === "string" ? enroll["display_name"] : null,
+          )
+        : this.answers.label;
     const current = this.caps === null ? await this.currentCaps() : {};
     const cap = (kind: AgentKind) => this.caps?.get(kind) ?? current[kind];
     const email = this.signedIn?.me.user.email;
@@ -908,7 +996,11 @@ class SetupRun {
   ): Promise<void> {
     this.log.event(`${id} started`);
     try {
-      const result = await body();
+      if (this.interruption !== null) throw this.interruption;
+      const running = body();
+      // A body an interruption overtook goes on until its next task or question, which refuse.
+      running.catch(() => undefined);
+      const result = await Promise.race([running, this.interrupted]);
       const { status, summary, ...details } = result;
       this.steps.push({ id, status, command, summary, ...details });
       this.log.event(`${id} ${status}: ${summary}`);
@@ -920,7 +1012,10 @@ class SetupRun {
           : error instanceof CliError
             ? new StepFailure(error, command, "Fix the error.")
             : null;
-      if (failure === null || error instanceof PromptCancelled) {
+      if (error instanceof PromptCancelled) {
+        this.cancelTask();
+        this.logError(id, error);
+      } else if (failure === null) {
         this.failTask();
         this.logError(id, error);
       }
@@ -1000,7 +1095,13 @@ class SetupRun {
   /** Records a step's error in full: its code, message, details, and the stack of a defect. */
   private logError(id: SetupStepId, error: unknown): void {
     if (error instanceof PromptCancelled) {
-      this.log.event(`${id} cancelled at a prompt`);
+      this.log.event(
+        error !== this.interruption
+          ? `${id} cancelled at a prompt`
+          : error.reason === "sigterm"
+            ? `${id} terminated (SIGTERM)`
+            : `${id} cancelled (Ctrl-C)`,
+      );
       return;
     }
     const failure = error instanceof StepFailure ? error.error : error;
@@ -1048,11 +1149,11 @@ class SetupRun {
   // -------------------------------------------------------------------------------------------
   // The screen, the log and tasks
 
-  /** Text for the person: on the screen, and in the log. */
+  /** Text for the person: on the screen, and in the log. After an interruption, only the log. */
   private screen(text: string): void {
     this.flush();
     this.log.write(text);
-    this.ctx.io.stderr(text);
+    if (this.interruption === null) this.ctx.io.stderr(text);
   }
 
   /** One line for the person. */
@@ -1119,10 +1220,11 @@ class SetupRun {
    * one line. `failure` is the line it ends in if it fails.
    */
   private begin(title: string, failure: string): void {
+    if (this.interruption !== null) throw this.interruption;
     if (this.active !== null) this.done(this.active.title);
     this.flush();
     this.log.event(`task: ${title}`);
-    const task: ActiveTask = { title, failure, spinner: null, taskLog: null, tail: [] };
+    const task: ActiveTask = { title, failure, spinner: null, taskLog: null, wait: null, tail: [] };
     if (this.answers.verbose) {
       task.taskLog = this.prompter.taskLog(title);
     } else {
@@ -1153,6 +1255,19 @@ class SetupRun {
     this.active = null;
     this.log.event(`task ended: ${task.title}`);
     task.spinner?.clear();
+    task.wait?.clear();
+  }
+
+  /** Ends the open task without a line: setup was cancelled while it ran. */
+  private cancelTask(): void {
+    const task = this.active;
+    if (task === null) return;
+    this.flush();
+    this.active = null;
+    this.log.event(`task cancelled: ${task.title}`);
+    task.spinner?.clear();
+    task.wait?.clear();
+    task.taskLog?.error(CANCELLED);
   }
 
   /** Ends the open task in its one line. */
@@ -1163,6 +1278,7 @@ class SetupRun {
     this.active = null;
     this.log.event(`task done: ${line}`);
     task.spinner?.stop(line);
+    task.wait?.stop(line);
     task.taskLog?.success(line);
   }
 
@@ -1177,6 +1293,10 @@ class SetupRun {
     this.flush();
     this.active = null;
     this.log.event(`task failed: ${task.failure}`);
+    if (task.wait !== null) {
+      task.wait.clear();
+      this.ctx.io.stderr(`${drawFailed(task.failure)}\n`);
+    }
     if (task.spinner !== null) {
       task.spinner.error(task.failure);
       for (const line of task.tail) this.ctx.io.stderr(`${drawTaskLine(line)}\n`);
@@ -1417,8 +1537,8 @@ class SetupRun {
 
   /**
    * Device-code login; the Account is chosen when the login is approved. Returns that Account. The
-   * sign-in block leads with the link that carries the code, then the address and the code; a
-   * spinner waits for the approval, and the caller ends it.
+   * sign-in block leads with the link that carries the code, then the address and the code; the
+   * sign-in wait polls for the approval and answers keys (`awaitApproval`), and the caller ends it.
    */
   private async login(): Promise<string> {
     // A device-code login chooses its Account when it is approved, so --account is not passed.
@@ -1432,8 +1552,8 @@ class SetupRun {
       path: ["auth", "login"],
       summary: "Sign in with a device code",
       run: (ctx, input) =>
-        loginWithDeviceCode(ctx, url, input.global, undefined, (shown) =>
-          this.showDeviceCode(shown),
+        loginWithDeviceCode(ctx, url, input.global, undefined, (start) =>
+          this.awaitApproval(start),
         ),
     };
     const data = (await this.runCommand(
@@ -1445,8 +1565,63 @@ class SetupRun {
     return data.account;
   }
 
-  /** The sign-in block, then a spinner until the person approves. */
-  private showDeviceCode(shown: DeviceCodeShown): void {
+  /**
+   * The sign-in wait: each device code's block, then a live line and the keys until the person
+   * approves. Enter opens the link in the browser, n gets a new code, and Esc (or a code that
+   * expired, was denied or was lost) asks what next: wait again with a new code (the default),
+   * sign in with a token instead (which stops setup with that command as the fix), or quit.
+   */
+  private async awaitApproval(start: () => Promise<PendingDeviceLogin>): Promise<DeviceToken> {
+    for (;;) {
+      const pending = await start();
+      if (this.interruption !== null) throw this.interruption;
+      const wait = this.showDeviceCode(pending.shown);
+      const outcome = await this.watch(pending, wait);
+      if (outcome.kind === "approved") return outcome.token;
+      this.dropTask();
+      if (outcome.kind === "new") {
+        this.log.event("new code asked for (n)");
+        continue;
+      }
+      if (outcome.kind === "ended") {
+        this.log.event(`sign-in not finished: ${outcome.code}`);
+        this.warn(outcome.line);
+      } else {
+        this.log.event("sign-in wait stopped (Esc)");
+      }
+      const next = await this.prompter.select<NotFinished>({
+        message: NOT_FINISHED,
+        options: [
+          { value: "retry", label: "Wait again with a new code" },
+          { value: "token", label: "Sign in with a token instead" },
+          { value: "quit", label: "Quit setup" },
+        ],
+        initialValue: "retry",
+      });
+      if (next === "retry") continue;
+      if (next === "quit") throw new PromptCancelled();
+      const command = this.commands.tokenLoginForAnyAccount();
+      throw new StepFailure(
+        new CliError(
+          "SIGN_IN_NOT_FINISHED",
+          "Sign-in wasn't finished: you chose to sign in with a Personal API Token instead.",
+          ExitCode.Auth,
+          { token_command: command },
+        ),
+        null,
+        `Sign in with a Personal API Token for the Account: \`${command}\`.`,
+        {
+          headline: "Sign-in wasn't finished: sign in with a token instead.",
+          lines: ["Sign in with a Personal API Token for the Account:", `  ${command}`],
+        },
+      );
+    }
+  }
+
+  /** The sign-in block, then the sign-in wait, open as the task until the person approves. */
+  private showDeviceCode(shown: DeviceCodeShown): Wait {
+    // The code is for the person: the log never holds it.
+    this.log.code(shown.user_code);
     const lines = [SYMBOL.bar, `${SYMBOL.active}  Sign in to Pidgen`];
     if (shown.verification_uri_complete.trim() !== "") {
       lines.push(
@@ -1458,7 +1633,133 @@ class SetupRun {
       lines.push(drawTaskLine(`Go to ${shown.verification_uri} and enter  ${shown.user_code}`));
     }
     this.say(lines.join("\n"));
-    this.begin("Waiting for you to approve in the browser…", "The sign-in wasn't approved");
+    if (this.active !== null) this.done(this.active.title);
+    this.flush();
+    this.log.event(`task: ${WAITING}`);
+    const wait = this.prompter.wait({ message: WAITING, keys: WAIT_KEYS });
+    this.active = {
+      title: WAITING,
+      failure: "The sign-in wasn't approved",
+      spinner: null,
+      taskLog: null,
+      wait,
+      tail: [],
+    };
+    return wait;
+  }
+
+  /**
+   * Polls one device code in the background while the wait answers keys. Each poll is logged with
+   * its time and outcome (and "poll delayed <n>s" when it started more than twice the interval
+   * after the one before), and the live line says how long setup has waited and when it last
+   * checked, or that the server can't be reached.
+   */
+  private async watch(pending: PendingDeviceLogin, wait: Wait): Promise<WatchOutcome> {
+    const controller = new AbortController();
+    const signal = AbortSignal.any([controller.signal, this.stopping.signal]);
+    const shownAt = this.ctx.now();
+    let checked: number | null = null;
+    let unreachable = false;
+    const line = () => {
+      const now = this.ctx.now();
+      const elapsed = shortDuration(now - shownAt);
+      if (unreachable) return `Can't reach ${this.answers.url}; still trying · ${elapsed}`;
+      return `${WAITING} ${elapsed}${checked !== null ? ` · checked ${shortDuration(now - checked)} ago` : ""}`;
+    };
+    const onPoll = (report: PollReport) => {
+      if (report.delayed !== null) this.log.event(`poll delayed ${report.delayed}s`);
+      this.log.event(pollLine(report));
+      unreachable = report.outcome === "network";
+      checked = report.at;
+      wait.update(line());
+    };
+    const ticker = setInterval(() => wait.update(line()), 1000);
+    ticker.unref();
+    const polling = pending.poll({ signal, onPoll }).then(
+      (token) => ({ kind: "approved", token }) as const,
+      (error: unknown) => ({ kind: "failed", error }) as const,
+    );
+    try {
+      for (;;) {
+        const next = await Promise.race([
+          polling,
+          wait.key().then((key) => ({ kind: "key", key }) as const),
+        ]);
+        if (next.kind === "approved") return next;
+        if (next.kind === "failed") {
+          if (this.interruption !== null) throw this.interruption;
+          const error = next.error;
+          const said =
+            error instanceof CliError ? SIGN_IN_ENDED[error.code.toLowerCase()] : undefined;
+          if (error instanceof CliError && said !== undefined) {
+            const lost = error.details["answer_lost"] === true;
+            return { kind: "ended", line: lost ? ANSWER_LOST : said, code: error.code };
+          }
+          throw error;
+        }
+        if (next.key === "enter") {
+          await this.openLink(pending, wait);
+          continue;
+        }
+        return { kind: next.key === "new" ? "new" : "escape" };
+      }
+    } finally {
+      clearInterval(ticker);
+      controller.abort();
+    }
+  }
+
+  /**
+   * Enter at the sign-in wait: opens the link that carries the code with the platform's opener
+   * (`open` on macOS; `xdg-open`, or `wslview` under WSL, on Linux), so nobody has to select it in
+   * the terminal. Without one, checks for approval at once (never sooner than the server's
+   * interval after the previous check).
+   */
+  private async openLink(pending: PendingDeviceLogin, wait: Wait): Promise<void> {
+    const link = pending.shown.verification_uri_complete.trim() || pending.shown.verification_uri;
+    const opener = await this.findOpener();
+    if (opener !== null) {
+      try {
+        const child = this.ctx.workerRuntime.spawn(opener.path, [link], {
+          cwd: this.ctx.cwd,
+          env: this.ctx.env,
+          stdio: "ignore",
+          detached: true,
+        });
+        child.on("error", () => undefined);
+        child.unref();
+        this.log.event(`opened the sign-in link with ${opener.name}`);
+        return;
+      } catch (error) {
+        this.log.event(
+          `couldn't open the sign-in link with ${opener.name}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    } else {
+      this.log.event("no browser opener on this machine; checking for approval now");
+    }
+    wait.update("No browser opener here: open the link yourself · checking now");
+    pending.checkNow();
+  }
+
+  /** The platform's way to open a link in the browser, when it is on `PATH`. */
+  private async findOpener(): Promise<{ name: string; path: string } | null> {
+    const platform = this.ctx.workerRuntime.platform;
+    const wsl =
+      this.ctx.env["WSL_DISTRO_NAME"] !== undefined || this.ctx.env["WSL_INTEROP"] !== undefined;
+    const names =
+      platform === "darwin"
+        ? ["open"]
+        : platform === "linux"
+          ? wsl
+            ? ["wslview", "xdg-open"]
+            : ["xdg-open"]
+          : [];
+    for (const name of names) {
+      const path = await findOnPath(this.ctx, name, this.ctx.workerRuntime);
+      if (path !== null) return { name, path };
+    }
+    return null;
   }
 
   private async requireSignIn(approved: string): Promise<SignedIn> {
@@ -1609,7 +1910,7 @@ class SetupRun {
     let enrolled: string | null = null;
     try {
       const state = await this.enrollmentState();
-      if (state.enrolled) enrolled = state.hostId;
+      if (state.enrolled) enrolled = workerLabel(state.hostId, state.name);
     } catch (error) {
       if (!(error instanceof CliError)) throw error;
       this.note(`Could not tell whether this machine's worker is enrolled: ${error.message}`);
@@ -2387,23 +2688,30 @@ class SetupRun {
   /**
    * Enrolls this install's worker unless it is enrolled, applies the caps, and starts it. It is
    * enrolled only when this install's worker home holds a credential (`worker.env` with
-   * `PIDGEN_NODE_TOKEN`) for the configured server, and `GET /workers` lists its host id
-   * unrevoked; a worker listed under this host's name that is not this install's is never adopted.
-   * A worker whose home holds no credential is never started.
+   * `PIDGEN_NODE_TOKEN`) for the configured server, and `GET /workers` lists the id it names
+   * (`PIDGEN_LOCALITY_DOMAIN`) unrevoked; a worker listed under this host's name that is not this
+   * install's is never adopted. A worker whose home holds no credential is never started.
+   *
+   * A worker has an id the App Service mints (`host_id`, `wkr_…`) and the name the person chose
+   * (`display_name`). After enrolling, the new worker's id is the one `worker.env` saved; setup
+   * waits for that id to be connected.
    */
   private async enrollAndStart(): Promise<StepResult> {
     const c = this.commands;
     const ctx = this.quiet;
 
-    const { read, enrolled, revoked, foreign, mine, hostId: found } = await this.enrollmentState();
+    const state = await this.enrollmentState();
+    const { read, enrolled, revoked, foreign, mine } = state;
     const local = await localWorkerStatus(ctx, ctx.workerRuntime);
-    let hostId = found;
-    let enroll = c.enroll(hostId);
+    let id = state.hostId;
+    let name = state.name;
+    let enroll = c.enroll(name);
     let ran = false;
 
     if (enrolled) {
-      this.note(`${hostId} is enrolled; skipping the enrollment.`);
-      if (!this.reported.enroll) this.answered(`${hostId} is enrolled in ${this.accountName()}`);
+      const shown = workerLabel(id, name);
+      this.note(`${shown} is enrolled; skipping the enrollment.`);
+      if (!this.reported.enroll) this.answered(`${shown} is enrolled in ${this.accountName()}`);
     } else {
       const permission = this.signedIn?.permission;
       if (permission !== undefined && !permission.allowed) {
@@ -2427,24 +2735,25 @@ class SetupRun {
       // created; when it is listed removed, its name is the suggestion.
       let list = read.list;
       let preferred: Preferred | null = revoked
-        ? { name: hostId, why: "this machine's removed worker's name", listedRemoved: true }
+        ? { name, why: "this machine's removed worker's name", listedRemoved: true }
         : null;
       let kept: string | null = null;
       if (mine !== null && !this.answers.labelGiven) {
+        const mineName = workerName(mine);
         if (mine.revoked_at !== null) {
           preferred = {
-            name: mine.host_id,
+            name: mineName,
             why: "this install's removed worker's name",
             listedRemoved: true,
           };
         } else {
-          const replaced = await this.replaceListed(mine.host_id);
+          const replaced = await this.replaceListed(mineName);
           if (replaced === null) {
-            kept = mine.host_id;
+            kept = mineName;
           } else {
             list = replaced;
             preferred = {
-              name: mine.host_id,
+              name: mineName,
               why: "this install's worker, removed to be replaced",
               listedRemoved: false,
             };
@@ -2452,16 +2761,21 @@ class SetupRun {
         }
       }
       // The name is asked before anything is created, with a suggestion filled in.
-      hostId = await this.chooseName(list, preferred, kept);
-      this.begin(`Enrolling as ${hostId}…`, `Couldn't enroll ${hostId}`);
+      name = await this.chooseName(list, preferred, kept);
+      this.begin(`Enrolling as ${name}…`, `Couldn't enroll ${name}`);
       // A removed worker's credential is moved aside, so the worker redeems the new enrollment.
-      const result = await this.enrollUnderFreeName(ctx, list, hostId, revoked);
-      hostId = result.hostId;
-      enroll = c.enroll(hostId, revoked);
+      const result = await this.enrollUnderFreeName(ctx, list, name, revoked);
+      name = result.name;
+      enroll = c.enroll(name, revoked);
       if (result.replaced !== null) {
         this.note(`Moved the removed worker's credential aside to ${result.replaced}.`);
       }
-      this.done(`Enrolled as ${hostId} in ${this.accountName()}`);
+      // The worker saved the id the App Service gave it, and authenticates as it.
+      id = (await readWorkerCredential(ctx)).hostId;
+      if (id === null) {
+        this.note(`worker.env names no id for ${name}; setup looks for it by its name.`);
+      }
+      this.done(`Enrolled as ${workerLabel(id, name)} in ${this.accountName()}`);
       ran = true;
     }
 
@@ -2491,21 +2805,25 @@ class SetupRun {
       ran = true;
     }
 
-    const connected = await this.waitConnected(read, ctx, hostId);
+    const wait = await this.waitConnected(read, ctx, { id, name });
+    const connected = wait.connected;
+    id = wait.id;
+    const shown = workerLabel(id, name);
     this.done(
       connected === true
-        ? "Worker running and connected to Pidgen"
+        ? `Worker running and connected to Pidgen as ${shown}`
         : "Worker running · this credential can't confirm it connected",
     );
     return {
       status: ran ? "done" : "skipped",
       summary:
         connected === true
-          ? `${hostId} is enrolled, running, and connected to the App Service.`
-          : `${hostId} is enrolled and running. This credential cannot read GET /workers (${read.refused?.code ?? "refused"}), so setup cannot confirm it connected: run \`${c.status()}\` signed in as an Account Owner or Administrator.`,
+          ? `${shown} is enrolled, running, and connected to the App Service.`
+          : `${shown} is enrolled and running. This credential cannot read GET /workers (${read.refused?.code ?? "refused"}), so setup cannot confirm it connected: run \`${c.status()}\` signed in as an Account Owner or Administrator.`,
       // The enroll command names the worker's name, which is known only now.
       command: `${enroll} && ${c.start()}`,
-      host_id: hostId,
+      host_id: id,
+      display_name: name,
       connected,
       ...(capacity !== null ? { capacity } : {}),
     };
@@ -2521,6 +2839,10 @@ class SetupRun {
    * `mine` is this install's newest worker the list names: the newest whose `install_id` is the
    * one the worker home's `install-id` holds (made now when there is none). It is how setup knows
    * this install's worker when `worker.env` is gone.
+   *
+   * `hostId` is the id `worker.env` names when it holds a credential for this server, else `null`;
+   * `name` is that worker's name as listed (`display_name`, or its id for a worker enrolled before
+   * names), else `--label` or this host's name.
    */
   private async enrollmentState(): Promise<{
     read: WorkersRead;
@@ -2528,7 +2850,8 @@ class SetupRun {
     revoked: boolean;
     foreign: WorkerCredential | null;
     mine: WorkerResource | null;
-    hostId: string;
+    hostId: string | null;
+    name: string;
   }> {
     const home = await readWorkerCredential(this.quiet);
     const ours =
@@ -2538,14 +2861,16 @@ class SetupRun {
     if (install.created) this.note(`Made this install's id in ${install.path}.`);
     if (install.invalid) this.note(invalidInstallIdNote(install.path));
     const read = await this.readWorkers();
-    const hostId = ours && home.hostId !== null ? home.hostId : this.answers.label;
+    const hostId = ours && home.hostId !== null ? home.hostId : null;
     if (read.list === null) {
-      return { read, enrolled: ours, revoked: false, foreign, mine: null, hostId };
+      const name = hostId ?? this.answers.label;
+      return { read, enrolled: ours, revoked: false, foreign, mine: null, hostId, name };
     }
-    const view = ours && home.hostId !== null ? serverView(read.list, home.hostId) : null;
+    const view = hostId !== null ? serverView(read.list, hostId) : null;
     const enrolled = view?.enrolled === true;
+    const name = view?.worker ? workerName(view.worker) : (hostId ?? this.answers.label);
     const mine = install.id === null ? null : newestOfInstall(read.list, install.id);
-    return { read, enrolled, revoked: ours && !enrolled, foreign, mine, hostId };
+    return { read, enrolled, revoked: ours && !enrolled, foreign, mine, hostId, name };
   }
 
   /**
@@ -2651,7 +2976,7 @@ class SetupRun {
   }
 
   /**
-   * The worker's name, which is also its host id: `--label` (never asked; one the Account lists
+   * The worker's name, its `display_name` on the App Service: `--label` (never asked; one the Account lists
    * unrevoked stops setup with `WORKER_NAME_TAKEN`), else the answer to the name question, asked
    * before anything is created. Its suggestion is `preferred` when no live worker holds it (and,
    * when `listedRemoved`, the Account lists it as removed): this install's newest worker's name by
@@ -2666,14 +2991,17 @@ class SetupRun {
   ): Promise<string> {
     if (this.answers.labelGiven) {
       const name = this.answers.label;
-      if (list !== null && nameTaken(list, name)) {
+      const holder = list === null ? undefined : liveWorker(list, name);
+      if (holder !== undefined) {
         const suggested = nextFreeName(list, name);
-        this.note(`${name} is taken: ${this.accountName()} lists a live worker by that name.`);
+        this.note(
+          `${name} is taken: ${this.accountName()} lists a live worker by that name, ${workerLabel(holder.host_id, workerName(holder))}.`,
+        );
         throw this.labelNameTaken(
           name,
           suggested,
-          `${this.accountName()} already has a worker named ${name}, so this worker was not enrolled and nothing was started.`,
-          { display_name: name, suggested_name: suggested, host_id: name },
+          `${this.accountName()} already has a worker named ${workerName(holder)}, so this worker was not enrolled and nothing was started.`,
+          { display_name: name, suggested_name: suggested, host_id: holder.host_id },
           false,
         );
       }
@@ -2681,14 +3009,13 @@ class SetupRun {
     }
 
     const host = this.ctx.hostName;
-    const wanted = preferred?.name.toLowerCase();
     const reclaim =
       preferred !== null &&
       list !== null &&
       !nameTaken(list, preferred.name) &&
       (!preferred.listedRemoved ||
         list.workers.some(
-          (worker) => worker.host_id.toLowerCase() === wanted && worker.revoked_at !== null,
+          (worker) => sameName(workerName(worker), preferred.name) && worker.revoked_at !== null,
         ));
     if (reclaim) {
       // A removed worker is offered its own name: the App Service lets its Account reclaim it.
@@ -2710,13 +3037,13 @@ class SetupRun {
     const account = this.accountName();
     this.say(
       [
-        `│\n▲  ${account} already has a worker named ${other.host_id} (${other.connected ? "connected" : "not connected"}; enrolled ${shortDate(other.created_at)}).`,
+        `│\n▲  ${account} already has a worker named ${workerName(other)} (${other.connected ? "connected" : "not connected"}; enrolled ${shortDate(other.created_at)}).`,
         "   It isn't this install: it keeps its settings in another folder on this machine.",
       ].join("\n"),
     );
     const suggested = nextFreeName(list, host);
     this.note(
-      `Suggested worker name ${suggested}: ${account} lists a live worker named ${other.host_id}.`,
+      `Suggested worker name ${suggested}: ${account} lists a live worker named ${workerName(other)}.`,
     );
     return this.askName(list, suggested);
   }
@@ -2742,7 +3069,7 @@ class SetupRun {
     list: WorkerList | null,
     first: string,
     revoked: boolean,
-  ): Promise<{ hostId: string; replaced: string | null }> {
+  ): Promise<{ name: string; replaced: string | null }> {
     const c = this.commands;
     // Names refused in this run, in lower case: the name question refuses them too.
     const refused = new Set<string>();
@@ -2845,7 +3172,7 @@ class SetupRun {
       }
     }
     return {
-      hostId: name,
+      name,
       replaced: typeof result?.replaced === "string" ? result.replaced : null,
     };
   }
@@ -2985,23 +3312,27 @@ class SetupRun {
   }
 
   /**
-   * Reads `GET /workers` until it reports the worker named `host` connected, for up to the global
-   * `--timeout`. `null` when the credential cannot read the list; a timeout fails with
-   * `WORKER_NOT_CONNECTED`.
+   * Reads `GET /workers` until it reports this worker connected, for up to the global `--timeout`:
+   * the worker with `worker.id`, the id the worker saved in `worker.env` and authenticates as, or,
+   * with none, the newest unrevoked worker named `worker.name` (compared case-insensitively).
+   * `connected` is `null` when the credential cannot read the list; a timeout fails with
+   * `WORKER_NOT_CONNECTED`. `id` is the worker's id as found.
    */
   private async waitConnected(
     first: WorkersRead,
     ctx: RunContext,
-    host: string,
-  ): Promise<true | null> {
-    if (first.refused !== null) return null;
+    worker: { id: string | null; name: string },
+  ): Promise<{ connected: true | null; id: string | null }> {
+    let id = worker.id;
+    if (first.refused !== null) return { connected: null, id };
+    const shown = () => workerLabel(id, worker.name);
     const seconds = this.global.timeoutSeconds;
     this.progress(
       "Waiting for Pidgen to report the worker connected…",
-      `Pidgen didn't report ${host} connected`,
+      `Pidgen didn't report ${shown()} connected`,
     );
     this.note(
-      `Waiting for the App Service to report ${host} connected (up to ${seconds} seconds)…`,
+      `Waiting for the App Service to report ${shown()} connected (up to ${seconds} seconds)…`,
     );
     const deadline = this.ctx.now() + seconds * 1000;
     let last: ServerView | null = null;
@@ -3010,11 +3341,20 @@ class SetupRun {
       let failed: CliError | null = null;
       try {
         const read = await this.readWorkers();
-        if (read.refused !== null) return null;
-        last = serverView(read.list, host);
-        if (last.worker?.connected === true && last.worker.revoked_at === null) {
-          this.note(`${host} is connected.`);
-          return true;
+        if (read.refused !== null) return { connected: null, id };
+        if (id === null) {
+          const named = liveWorkersNamed(read.list, worker.name).sort((a, b) =>
+            b.created_at.localeCompare(a.created_at),
+          );
+          if (named[0] !== undefined) {
+            id = named[0].host_id;
+            this.note(`${worker.name} is listed as ${id}.`);
+          }
+        }
+        last = id === null ? null : serverView(read.list, id);
+        if (last?.worker?.connected === true && last.worker.revoked_at === null) {
+          this.note(`${shown()} is connected.`);
+          return { connected: true, id };
         }
       } catch (error) {
         if (!(error instanceof CliError)) throw error;
@@ -3031,10 +3371,11 @@ class SetupRun {
     throw new StepFailure(
       new CliError(
         "WORKER_NOT_CONNECTED",
-        `The App Service did not report ${host} connected within ${seconds} seconds.`,
+        `The App Service did not report ${shown()} connected within ${seconds} seconds.`,
         ExitCode.Network,
         {
-          host_id: host,
+          host_id: id,
+          display_name: worker.name,
           worker: last?.worker ?? null,
           running: local.running,
           log,
@@ -3094,14 +3435,25 @@ class SetupRun {
 
 /**
  * The prompter, with each question and its answer also written to the setup log. A question
- * never opens while a task's spinner runs: setup ends a task before it asks.
+ * never opens while a task's spinner runs: setup ends a task before it asks. Once Ctrl-C or
+ * SIGTERM has stopped setup (`stopped`), no question opens: it rejects with that cancellation.
  */
-function loggedPrompter(prompter: Prompter, log: SetupLog): Prompter {
-  const asked = async <T>(message: string, answer: Promise<T>, detail?: string): Promise<T> => {
+function loggedPrompter(
+  prompter: Prompter,
+  log: SetupLog,
+  stopped: () => PromptCancelled | null,
+): Prompter {
+  const asked = async <T>(
+    message: string,
+    answer: () => Promise<T>,
+    detail?: string,
+  ): Promise<T> => {
+    const cancelled = stopped();
+    if (cancelled !== null) throw cancelled;
     log.event(`question: ${message}`);
     for (const line of detail ? detail.split("\n") : []) log.line(`  ${line}`);
     try {
-      const value = await answer;
+      const value = await answer();
       log.event(`answer: ${JSON.stringify(value)}`);
       return value;
     } catch (error) {
@@ -3122,12 +3474,16 @@ function loggedPrompter(prompter: Prompter, log: SetupLog): Prompter {
       log.event(`${message} ${next}`);
       prompter.cancel(message, next);
     },
-    select: (question) => asked(question.message, prompter.select(question)),
-    multiselect: (question) => asked(question.message, prompter.multiselect(question)),
-    text: (question) => asked(question.message, prompter.text(question)),
-    confirm: (question) => asked(question.message, prompter.confirm(question), question.detail),
+    select: (question) => asked(question.message, () => prompter.select(question)),
+    multiselect: (question) => asked(question.message, () => prompter.multiselect(question)),
+    text: (question) => asked(question.message, () => prompter.text(question)),
+    confirm: (question) =>
+      asked(question.message, () => prompter.confirm(question), question.detail),
     spinner: () => prompter.spinner(),
     taskLog: (title) => prompter.taskLog(title),
+    wait: (question) => prompter.wait(question),
+    onInterrupt: (listener) => prompter.onInterrupt(listener),
+    close: () => prompter.close(),
   };
 }
 

@@ -1,5 +1,6 @@
 import type { components } from "../generated/api.js";
 import { renderDetails, wrap } from "./resource-human.js";
+import { workerLabel } from "./worker-identity.js";
 
 /** Lifecycle and diagnostic commands retain complete details rather than projecting status rows. */
 export const LIFECYCLE_PRESENTATIONS: Readonly<Record<string, string>> = {
@@ -78,6 +79,12 @@ export function renderLifecycle(
         );
       }
     }
+    if (isRecord(row["server"]) && typeof row["server"]["host_id"] === "string") {
+      const server = row["server"];
+      const name = typeof server["display_name"] === "string" ? server["display_name"] : null;
+      const shown = workerLabel(server["host_id"] as string, name);
+      notes.push(`Worker: ${shown}${server["enrolled"] === true ? "" : " (not enrolled)"}`);
+    }
     if (!("server" in row)) notes.push("Local status only; server not checked.");
     else if (row["server"] === null)
       notes.push("Server status unavailable; showing local status only.");
@@ -112,7 +119,9 @@ export function renderLifecycle(
   const body =
     command === "worker subscriptions" && now !== undefined && Array.isArray(row["harnesses"])
       ? { summary: subscriptionRows(data as WorkerSubscriptions, now), ...row }
-      : data;
+      : command === "worker status" && isRecord(row["server"])
+        ? { ...row, server: withoutWorkerNames(row["server"]) }
+        : data;
   const width =
     columns !== undefined && Number.isFinite(columns) && columns > 0 ? Math.floor(columns) : 80;
   return (
@@ -120,6 +129,19 @@ export function renderLifecycle(
       "\n",
     ) + "\n"
   );
+}
+
+/**
+ * The server's record without the worker's id and name, which the `Worker:` line shows: people
+ * read a worker by its name with its id, not by a host id.
+ */
+function withoutWorkerNames(server: Row): Row {
+  const without = (record: Row): Row =>
+    Object.fromEntries(
+      Object.entries(record).filter(([key]) => key !== "host_id" && key !== "display_name"),
+    );
+  const rest = without(server);
+  return isRecord(rest["worker"]) ? { ...rest, worker: without(rest["worker"]) } : rest;
 }
 
 /**

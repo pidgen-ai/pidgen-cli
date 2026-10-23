@@ -1,15 +1,19 @@
 import type { Readable, Writable } from "node:stream";
 import { styleText } from "node:util";
+import { DRAIN_TIMEOUT_MS, drained, exitAfterOutput } from "./terminal.js";
 
 /**
  * How `pidgen setup`, the CLI's one interactive command, asks its questions: a select, a
  * multiselect, a text prompt or a confirm, drawn in clack's frame, plus spinners (a task that
- * collapses to one line) and task logs (a task whose lines stay on screen, as `--verbose` shows).
- * Each answered question collapses to one `◇` line. The real prompter (`clackPrompter`) wraps
- * `@clack/prompts`, which only setup loads, with a dynamic import, so no other command starts
- * slower; tests drive setup through a scripted prompter that draws the same screens.
+ * collapses to one line), task logs (a task whose lines stay on screen, as `--verbose` shows) and
+ * waits (a task that runs in the background and answers keys, as setup's sign-in wait does). Each
+ * answered question collapses to one `◇` line. The real prompter (`clackPrompter`) wraps
+ * `@clack/core`'s prompts, which only setup loads, with a dynamic import, so no other command
+ * starts slower, and draws its own spinners and waits; tests drive setup through a scripted
+ * prompter that draws the same screens.
  *
- * Ctrl-C at a prompt rejects with `PromptCancelled`.
+ * Ctrl-C at a prompt rejects with `PromptCancelled`. Ctrl-C during a spinner or a wait, and SIGINT
+ * or SIGTERM at any time, are reported to `onInterrupt`'s listeners: nothing exits the process.
  */
 export interface Prompter {
   /** `┌  <title>`: the top of setup's frame. */
@@ -24,6 +28,43 @@ export interface Prompter {
   confirm(prompt: ConfirmQuestion): Promise<boolean>;
   spinner(): Spinner;
   taskLog(title: string): TaskLog;
+  /** A wait: a live line and a key line, drawn until it ends; see `Wait`. */
+  wait(question: WaitQuestion): Wait;
+  /** Hears Ctrl-C during a spinner or a wait, and SIGINT or SIGTERM at any time. */
+  onInterrupt(listener: (reason: InterruptReason) => void): void;
+  /**
+   * Ends the prompter: stops hearing signals and keys, and waits (up to two seconds) for what it
+   * wrote to reach the terminal.
+   */
+  close(): Promise<void>;
+}
+
+/** What stopped setup outside a prompt: Ctrl-C (or SIGINT), or SIGTERM. */
+export type InterruptReason = "ctrl-c" | "sigterm";
+
+export interface WaitQuestion {
+  /** The live line, such as "Waiting for you to approve in the browser…". */
+  message: string;
+  /** The key line under it, such as "Enter open in browser · n new code · Esc other options". */
+  keys: string;
+}
+
+/** A key a wait answers: Enter, n, or Esc. */
+export type WaitKey = "enter" | "new" | "escape";
+
+/**
+ * A wait in progress: its live line (redrawn as it changes, and skipped while the terminal is not
+ * reading) and the keys it answers. Ctrl-C is reported to `onInterrupt`'s listeners.
+ */
+export interface Wait {
+  /** Replaces the live line. */
+  update(message: string): void;
+  /** The next key pressed (one already pressed and not yet taken first). */
+  key(): Promise<WaitKey>;
+  /** Ends the wait in one `◇` line. */
+  stop(line: string): void;
+  /** Ends the wait without a line. */
+  clear(): void;
 }
 
 export interface PromptOption<T> {
@@ -96,10 +137,13 @@ export interface TaskLog {
   error(message: string): void;
 }
 
-/** Ctrl-C (or Escape) at a prompt. */
+/**
+ * Ctrl-C (or Escape) at a prompt; or, with `reason`, Ctrl-C or SIGTERM during a task, which stops
+ * setup the same way.
+ */
 export class PromptCancelled extends Error {
-  constructor() {
-    super("The prompt was cancelled.");
+  constructor(readonly reason: InterruptReason = "ctrl-c") {
+    super(reason === "sigterm" ? "Setup was terminated." : "The prompt was cancelled.");
     this.name = "PromptCancelled";
   }
 }
@@ -315,6 +359,19 @@ export function drawTaskLine(line: string, style: Style = plain): string {
   return `${style("gray", SYMBOL.bar)}  ${line}`;
 }
 
+/** A spinner's frames, as clack draws them. */
+export const SPINNER_FRAMES = ["◒", "◐", "◓", "◑"] as const;
+
+/** A running wait: its live line under a spinner frame, then its key line. */
+export function drawWait(
+  message: string,
+  keys: string,
+  frame: string = SPINNER_FRAMES[0],
+  style: Style = plain,
+): string {
+  return `${style("magenta", frame)}  ${message}\n${style("gray", SYMBOL.bar)}  ${style("dim", keys)}`;
+}
+
 export function drawIntro(title: string, style: Style = plain): string {
   return `${style("gray", SYMBOL.start)}  ${title}\n`;
 }
@@ -343,16 +400,51 @@ export function initialCursor<T>(
 // ---------------------------------------------------------------------------------------------
 // The real prompter
 
+/** How often a spinner's or a wait's frame turns, as clack's spinner turns. */
+const FRAME_MS = 80;
+/** Moves to the start of the line and erases from there down. */
+const ERASE = "\u001b[1G\u001b[J";
+/** Moves up one line. */
+const UP = "\u001b[1A";
+
+/** A terminal output whose queued bytes can be read, and whose handle can be made non-blocking. */
+type TerminalOutput = Writable & {
+  columns?: number;
+  _handle?: { setBlocking?: (blocking: boolean) => void };
+};
+
+/** A terminal input that can be put in raw mode. */
+type TerminalInput = Readable & { isTTY?: boolean; setRawMode?: (raw: boolean) => void };
+
 /**
- * The prompter on the terminal: clack's prompts (`@clack/core`, drawn with the screens above) and
- * its spinner and task log (`@clack/prompts`), both loaded here with a dynamic import so that only
- * setup loads them.
+ * The prompter on the terminal: clack's prompts (`@clack/core`, drawn with the screens above),
+ * loaded here with a dynamic import so that only setup loads them, and its own spinners and waits.
+ *
+ * Output never holds up the event loop. The terminal's handle is put in non-blocking mode for the
+ * whole run (Node writes to a terminal synchronously on Linux and macOS, so a terminal that stops
+ * reading would otherwise stop the process, polling and all), and every animated frame is skipped
+ * while earlier output is still queued, so a terminal that is not reading has at most one frame
+ * waiting for it. Lines that matter (results, errors, the cancel lines) are always written.
+ *
+ * A spinner or a wait holds standard input in raw mode: what is typed is not echoed, Ctrl-C (byte
+ * 0x03) is an interrupt, and a wait answers its keys. SIGINT and SIGTERM are interrupts too. An
+ * interrupt is reported to `onInterrupt`'s listeners and never exits the process itself; it asks
+ * for the process to exit once the command has returned and its output has drained.
  */
 export async function clackPrompter(io: { input: Readable; output: Writable }): Promise<Prompter> {
-  const [core, prompts] = await Promise.all([import("@clack/core"), import("@clack/prompts")]);
-  const { input, output } = io;
+  const core = await import("@clack/core");
+  const input = io.input as TerminalInput;
+  const output = io.output as TerminalOutput;
+  output._handle?.setBlocking?.(false);
   const style: Style = (format, text) => styleText(format, text);
   const write = (text: string) => void output.write(text);
+  /** Whether the terminal has taken everything written so far: animated frames wait for it. */
+  const caughtUp = () => output.writableLength === 0;
+  /** `text` cut to fit one line of the terminal, so redrawing it erases all of it. */
+  const fit = (text: string, room = 4) => {
+    const width = Math.max(20, (output.columns || 80) - room);
+    return text.length > width ? `${text.slice(0, width - 1)}…` : text;
+  };
   const state = (prompt: { state: string }): PromptView["state"] =>
     prompt.state === "submit" || prompt.state === "cancel" || prompt.state === "error"
       ? prompt.state
@@ -360,6 +452,51 @@ export async function clackPrompter(io: { input: Readable; output: Writable }): 
   const settle = <T>(answer: T | symbol | undefined): T => {
     if (core.isCancel(answer)) throw new PromptCancelled();
     return answer as T;
+  };
+
+  // Interrupts: Ctrl-C while a spinner or a wait holds the input, SIGINT, SIGTERM.
+  const listeners: Array<(reason: InterruptReason) => void> = [];
+  const interrupt = (reason: InterruptReason) => {
+    exitAfterOutput();
+    for (const listener of listeners) listener(reason);
+  };
+  const onSigint = () => interrupt("ctrl-c");
+  const onSigterm = () => interrupt("sigterm");
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
+
+  // The input, held in raw mode while a spinner or a wait runs.
+  let holders = 0;
+  let onKey: ((text: string) => void) | null = null;
+  const onData = (chunk: Buffer | string) => {
+    const text = chunk.toString();
+    if (text.includes("\u0003")) interrupt("ctrl-c");
+    else onKey?.(text);
+  };
+  const hold = () => {
+    if (holders++ > 0) return;
+    if (input.isTTY) input.setRawMode?.(true);
+    input.on("data", onData);
+    input.resume();
+  };
+  const release = () => {
+    if (holders === 0 || --holders > 0) return;
+    input.off("data", onData);
+    if (input.isTTY) input.setRawMode?.(false);
+    input.pause();
+  };
+
+  /** A frame that turns every `FRAME_MS` and draws `draw(frame)`, skipped while output is queued. */
+  const animate = (draw: (frame: string) => void) => {
+    let index = 0;
+    const turn = () => {
+      if (caughtUp()) draw(style("magenta", SPINNER_FRAMES[index]!));
+      index = (index + 1) % SPINNER_FRAMES.length;
+    };
+    turn();
+    const timer = setInterval(turn, FRAME_MS);
+    timer.unref();
+    return () => clearInterval(timer);
   };
 
   return {
@@ -450,15 +587,31 @@ export async function clackPrompter(io: { input: Readable; output: Writable }): 
       return settle<boolean>(await prompt.prompt());
     },
 
+    // `│`, then `◒  <message>` turning until it ends in its one line (or none).
     spinner() {
-      const spin = prompts.spinner({ output });
+      let message = "";
+      let stopAnimating: (() => void) | null = null;
+      const end = (line: string | null) => {
+        if (stopAnimating === null) return;
+        stopAnimating();
+        stopAnimating = null;
+        release();
+        write(`${ERASE}${line ?? ""}`);
+      };
       return {
-        start: (message) => spin.start(message),
-        message: (message) => spin.message(message),
-        stop: (message) => spin.stop(message),
-        // clack's cancel draws `■`, as a failed task is drawn.
-        error: (message) => spin.cancel(message),
-        clear: () => spin.clear(),
+        start(text) {
+          if (stopAnimating !== null) return;
+          message = fit(text);
+          hold();
+          write(`${style("gray", SYMBOL.bar)}\n`);
+          stopAnimating = animate((frame) => write(`${ERASE}${frame}  ${message}`));
+        },
+        // Drawn with the next frame.
+        message: (text) => void (message = fit(text)),
+        stop: (line) => end(`${style("green", SYMBOL.submit)}  ${line}\n`),
+        // A failed task is drawn `■`, as clack's cancelled spinner is.
+        error: (line) => end(`${style("red", SYMBOL.cancel)}  ${line}\n`),
+        clear: () => end(null),
       };
     },
 
@@ -471,6 +624,86 @@ export async function clackPrompter(io: { input: Readable; output: Writable }): 
         success: (message) => write(`${drawCollapsed(message, style)}\n`),
         error: (message) => write(`${drawFailed(message, style)}\n`),
       };
+    },
+
+    // `│`, then the live line under a turning frame and the key line, redrawn in place.
+    wait(question) {
+      let message = fit(question.message);
+      const keys = fit(question.keys);
+      let drawn = false;
+      let running = true;
+      let frame: string = style("magenta", SPINNER_FRAMES[0]);
+      const pressed: WaitKey[] = [];
+      let waiting: ((key: WaitKey) => void) | null = null;
+      const draw = () => {
+        if (!caughtUp()) return;
+        write(`${drawn ? `${UP}${ERASE}` : ""}${drawWait(message, keys, frame, style)}`);
+        drawn = true;
+      };
+      hold();
+      onKey = (text) => {
+        const key: WaitKey | null =
+          text === "\r" || text === "\n"
+            ? "enter"
+            : text === "n" || text === "N"
+              ? "new"
+              : text === "\u001b"
+                ? "escape"
+                : null;
+        if (key === null) return;
+        if (waiting !== null) {
+          const answer = waiting;
+          waiting = null;
+          answer(key);
+        } else {
+          pressed.push(key);
+        }
+      };
+      write(`${style("gray", SYMBOL.bar)}\n`);
+      const stopAnimating = animate((turned) => {
+        frame = turned;
+        draw();
+      });
+      let next: Promise<WaitKey> | null = null;
+      const end = (line: string | null) => {
+        if (!running) return;
+        running = false;
+        stopAnimating();
+        onKey = null;
+        release();
+        write(`${drawn ? `${UP}${ERASE}` : ERASE}${line ?? ""}`);
+      };
+      return {
+        update(text) {
+          message = fit(text);
+          draw();
+        },
+        key() {
+          const first = pressed.shift();
+          if (first !== undefined) return Promise.resolve(first);
+          next ??= new Promise<WaitKey>((resolveKey) => {
+            waiting = (key) => {
+              next = null;
+              resolveKey(key);
+            };
+          });
+          return next;
+        },
+        stop: (line) => end(`${style("green", SYMBOL.submit)}  ${line}\n`),
+        clear: () => end(null),
+      };
+    },
+
+    onInterrupt(listener) {
+      listeners.push(listener);
+    },
+
+    async close() {
+      process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
+      listeners.length = 0;
+      while (holders > 0) release();
+      await drained(output, DRAIN_TIMEOUT_MS);
     },
   };
 }

@@ -63,6 +63,16 @@ export async function ensureInstallId(
   return { id, path, created: true, invalid: false };
 }
 
+/**
+ * This install's id when the worker home holds one, never creating the file: `null` when there is
+ * none or it holds something else.
+ */
+export async function existingInstallId(
+  config: Pick<WorkerConfig, "env" | "homeDir">,
+): Promise<string | null> {
+  return (await readInstallId(installIdPath(config)))?.id ?? null;
+}
+
 /** The id in `path`, `invalid` when it holds something else, or `null` when there is no file. */
 async function readInstallId(path: string): Promise<InstallId | null> {
   let text: string;

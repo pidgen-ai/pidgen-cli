@@ -12,16 +12,15 @@ jobs:
   test:
     name: ${{ matrix.os }} / node ${{ matrix.node }}
     runs-on: ${{ matrix.os }}
-    # The oldest Node the CLI supports (package.json engines) and the current one on Linux, and the
-    # current one on macOS, the other platform workers run on.
+    # The oldest Node the CLI supports (package.json engines) and the current one on Linux; the
+    # macOS job below runs the current one on the other platform workers run on.
     strategy:
       fail-fast: false
       matrix:
         include:
           - { os: ubuntu-latest, node: 22 }
           - { os: ubuntu-latest, node: 24 }
-          - { os: macos-latest, node: 24 }
-    steps:
+    steps: &steps
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
@@ -45,3 +44,17 @@ jobs:
             echo "::error::src/generated/api.d.ts is stale: run npm run contract:generate and commit it"
             exit 1
           }
+
+  # The same steps on macOS, only on GitHub, whose hosted runners provide it: a copy of this
+  # repository on another forge runs these workflows with Linux runners only. It follows the Linux
+  # jobs because a forge decides a job's `if` itself only for a job that waits on others.
+  test-macos:
+    name: ${{ matrix.os }} / node ${{ matrix.node }}
+    needs: test
+    if: github.server_url == 'https://github.com'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - { os: macos-latest, node: 24 }
+    steps: *steps

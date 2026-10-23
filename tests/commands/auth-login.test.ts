@@ -1,6 +1,8 @@
+import { getEventListeners } from "node:events";
 import { readFile, stat } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { runCli } from "../../src/cli.js";
+import { loginWithDeviceCode, type PendingDeviceLogin } from "../../src/commands/auth/login.js";
 import { configPath, loadConfig, saveConfig } from "../../src/core/config.js";
 import { ExitCode } from "../../src/core/exit-codes.js";
 import { envelope, jsonResponse, testContext, type TestContext } from "../support/context.js";
@@ -492,7 +494,7 @@ function meOk(): Response {
  * `GET /me` for the verification.
  */
 async function deviceContext(
-  polls: Response[],
+  polls: Array<Response | Error>,
   issued: unknown = ISSUED,
   interactive = false,
   me: () => Response = meOk,
@@ -522,7 +524,8 @@ async function deviceContext(
       if (url.endsWith("/api/v1/auth/device/token")) {
         const next = polls.shift();
         if (!next) return Promise.reject(new Error("no more poll answers"));
-        return Promise.resolve(next);
+        // An Error is a poll that never got an answer: the connection failed.
+        return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
       }
       if (url.endsWith("/api/v1/me")) return Promise.resolve(me());
       return Promise.reject(new Error(`unexpected call to ${url}`));
@@ -789,6 +792,55 @@ describe("pidgen auth login (device code)", () => {
     expect(await configExists(ctx)).toBe(false);
   });
 
+  // AC-72059b293463: a poll that fails on the network is not retried inside the HTTP client (it may
+  // have redeemed the code); the loop counts it as "not yet" and polls again at the interval.
+  it("a network failure on a poll is not retried at once: the next poll comes at the interval", async () => {
+    const { ctx, polled } = await deviceContext([
+      deviceError("authorization_pending"),
+      new TypeError("fetch failed"),
+      tokenOk(),
+    ]);
+    const { code, body } = await run(ctx, "auth", "login", URL_);
+    expect(code).toBe(ExitCode.Ok);
+    expect(body.data).toMatchObject({ verified: true, account: "ACC-EXAMPLE" });
+    expect(polled().map((call) => call.at)).toEqual([5000, 10000, 15000]);
+  });
+
+  it("network failures keep it polling at the interval until the code expires", async () => {
+    const failing = Array.from({ length: 10 }, () => new TypeError("fetch failed"));
+    const { ctx, polled } = await deviceContext(failing, { ...ISSUED, expires_in: 12 });
+    const { code, body } = await run(ctx, "auth", "login", URL_);
+    expect(code).toBe(ExitCode.Auth);
+    expect(body.error?.code).toBe("expired_token");
+    expect(polled().map((call) => call.at)).toEqual([5000, 10000]);
+    expect(await configExists(ctx)).toBe(false);
+  });
+
+  it("invalid_grant after a network failure says the approval's answer was lost", async () => {
+    const { ctx } = await deviceContext([
+      deviceError("authorization_pending"),
+      new TypeError("fetch failed"),
+      deviceError("invalid_grant"),
+    ]);
+    const { code, body } = await run(ctx, "auth", "login", URL_);
+    expect(code).toBe(ExitCode.Auth);
+    expect(body.error?.code).toBe("invalid_grant");
+    expect(body.error?.message).toContain("answer was lost");
+    expect(body.error?.message).toContain("Nothing was stored");
+    expect(await configExists(ctx)).toBe(false);
+  });
+
+  it("invalid_grant with no network failure before it keeps its own message", async () => {
+    const { ctx } = await deviceContext([
+      new TypeError("fetch failed"),
+      deviceError("authorization_pending"),
+      deviceError("invalid_grant"),
+    ]);
+    const { body } = await run(ctx, "auth", "login", URL_);
+    expect(body.error?.code).toBe("invalid_grant");
+    expect(body.error?.message).not.toContain("answer was lost");
+  });
+
   it("refuses a server that is not Pidgen before requesting a device code", async () => {
     const { ctx, calls } = await loginContext({ status: "ok", data: { service: "other" } });
     const { code, body } = await run(ctx, "auth", "login", URL_);
@@ -822,5 +874,112 @@ describe("pidgen auth login (device code)", () => {
     expect((await run(ctx, "auth", "login", URL_, "--device-label", "  ")).code).toBe(2);
     expect((await run(ctx, "auth", "login", "ftp://pidgen.example.com")).code).toBe(2);
     expect(calls).toHaveLength(0);
+  });
+});
+
+// AC-a7746e57d065: Enter at setup's wait without an opener checks at once, but never sooner than the
+// server's interval after the previous poll started.
+describe("the device-code poll", () => {
+  it("checkNow checks at once, never sooner than the interval after the previous poll", async () => {
+    let clock = 0;
+    const sleeps: Array<{ until: number; resolve: () => void }> = [];
+    const polls: number[] = [];
+    const answers = [
+      deviceError("authorization_pending"),
+      deviceError("authorization_pending"),
+      tokenOk(),
+    ];
+    const ctx = await testContext({
+      now: () => clock,
+      sleep: (ms) => new Promise<void>((resolve) => sleeps.push({ until: clock + ms, resolve })),
+      fetch: (input) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/health")) {
+          return Promise.resolve(jsonResponse(200, { status: "ok", data: Pidgen }));
+        }
+        if (url.endsWith("/api/v1/auth/device")) {
+          return Promise.resolve(jsonResponse(200, { status: "ok", data: ISSUED }));
+        }
+        if (url.endsWith("/api/v1/auth/device/token")) {
+          polls.push(clock);
+          // A slow network: each answer arrives 4 s after the poll started.
+          clock += 4000;
+          return Promise.resolve(answers.shift()!);
+        }
+        if (url.endsWith("/api/v1/me")) return Promise.resolve(meOk());
+        return Promise.reject(new Error(`unexpected call to ${url}`));
+      },
+    });
+    const until = async (done: () => boolean) => {
+      for (let turn = 0; turn < 200 && !done(); turn++) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      expect(done()).toBe(true);
+    };
+    let pending: PendingDeviceLogin | undefined;
+    const login = loginWithDeviceCode(
+      ctx,
+      URL_,
+      { format: "json", timeoutSeconds: 30 },
+      undefined,
+      async (start) => {
+        pending = await start();
+        return pending.poll();
+      },
+    );
+
+    await until(() => sleeps.length === 1);
+    clock = sleeps[0]!.until;
+    sleeps.shift()!.resolve();
+    // The first poll started at 5 s and was answered at 9 s; the next is due at 14 s.
+    await until(() => sleeps.length === 1);
+    expect(polls).toEqual([5000]);
+    expect(sleeps[0]!.until).toBe(14000);
+
+    // Asked at 9.5 s to check now: it waits only until 10 s, the interval after the last poll.
+    clock = 9500;
+    pending!.checkNow();
+    await until(() => sleeps.length === 2);
+    expect(sleeps[1]!.until).toBe(10000);
+    clock = 10000;
+    sleeps[1]!.resolve();
+    await until(() => polls.length === 2);
+    expect(polls).toEqual([5000, 10000]);
+
+    // Then the interval again, from the answer.
+    await until(() => sleeps.length === 3);
+    expect(sleeps[2]!.until).toBe(19000);
+    clock = 19000;
+    sleeps[2]!.resolve();
+    const result = await login;
+    expect(polls).toEqual([5000, 10000, 19000]);
+    expect(result.data).toMatchObject({ verified: true });
+  });
+});
+
+describe("the device-code poll and its signal", () => {
+  it("adds no listener to the signal per poll: a long wait never warns of a leak", async () => {
+    const pending = Array.from({ length: 15 }, () => deviceError("authorization_pending"));
+    const { ctx, polled } = await deviceContext([...pending, tokenOk()]);
+    const warnings: string[] = [];
+    const onWarning = (warning: Error) => warnings.push(warning.name);
+    process.on("warning", onWarning);
+    const controller = new AbortController();
+    try {
+      const result = await loginWithDeviceCode(
+        ctx,
+        URL_,
+        { format: "json", timeoutSeconds: 30 },
+        undefined,
+        async (start) => (await start()).poll({ signal: controller.signal }),
+      );
+      expect(result.data).toMatchObject({ verified: true });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } finally {
+      process.off("warning", onWarning);
+    }
+    expect(polled()).toHaveLength(16);
+    expect(warnings).not.toContain("MaxListenersExceededWarning");
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
   });
 });

@@ -1,13 +1,15 @@
 import type { Command } from "commander";
-import { CliError } from "../../core/errors.js";
+import { CliError, usageError } from "../../core/errors.js";
 import { ExitCode } from "../../core/exit-codes.js";
 import type { ApiResponse } from "../../core/http.js";
 import { validateBody } from "../../core/input.js";
 import { pathSegment } from "../../core/read.js";
 import type { CommandSpec } from "../../core/registry.js";
 import { openSession, type Session } from "../../core/session.js";
+import { isMintedWorkerId, liveWorkersNamed } from "../../core/worker-identity.js";
 import type { components } from "../../generated/api.js";
 import { PUBLIC_API_DOCUMENT } from "../api/document.js";
+import { WORKERS_ROUTE } from "./status.js";
 
 export { subscriptionRows } from "../../core/lifecycle-human.js";
 
@@ -16,6 +18,7 @@ type WorkerSubscriptions = components["schemas"]["WorkerSubscriptionsResource"];
 type SetPrimaryRequest = components["schemas"]["MakePrimaryRequest"];
 /** The change's `data`: its `outcome` (`applied` or `unknown`), the primary and active now. */
 type CommandResult = components["schemas"]["PrimaryChangeResource"];
+type WorkerList = components["schemas"]["WorkerList"];
 
 /** The operations these commands call, as the public API document names them. */
 export const SUBSCRIPTIONS_ROUTE = {
@@ -45,6 +48,7 @@ const REFUSALS: Record<string, (target: Target) => string> = {
 };
 
 interface Target {
+  /** The worker as it was given: its name or its id. */
   worker: string;
   harness?: string;
   label?: string;
@@ -52,7 +56,8 @@ interface Target {
 
 /**
  * `pidgen worker subscriptions <worker>`: one worker's provider subscriptions
- * (`GET /workers/{host_id}/subscriptions`). `<worker>` is its host id. `data` is the server's
+ * (`GET /workers/{host_id}/subscriptions`). `<worker>` is its name or its id (`host_id`): see
+ * `workerId`. `data` is the server's
  * `data` unchanged: whether the worker is connected and has advertised its subscriptions, and per
  * harness its `primary` and `active` subscription and each subscription's label, whether it is
  * the primary and the active one, login, entitlement, last login error, quota windows (each with
@@ -64,12 +69,13 @@ export const workerSubscriptions: CommandSpec = {
   path: ["worker", "subscriptions"],
   summary: "Show a worker's provider subscriptions; `use` makes one primary",
   configure(command: Command) {
-    command.argument("<worker>", "the worker's host id, as pidgen worker status reports it");
+    command.argument("<worker>", "the worker's name or id, as pidgen worker status shows it");
   },
   async run(ctx, { args, global }) {
     const target: Target = { worker: requiredArgument("worker", args[0]) };
     const session = await openSession(ctx, global);
-    const response = await readSubscriptions(session, target);
+    const id = await workerId(session, target.worker);
+    const response = await readSubscriptions(session, target, id);
     return {
       data: response.data,
       meta: session.meta(response),
@@ -92,7 +98,7 @@ export const workerSubscriptionsUse: CommandSpec = {
   summary: "Make one of a worker's subscriptions primary for a harness",
   configure(command: Command) {
     command
-      .argument("<worker>", "the worker's host id")
+      .argument("<worker>", "the worker's name or id")
       .argument("<harness>", "the harness, e.g. claude or codex")
       .argument("<label>", "the subscription's label in the worker's node.yaml")
       .option(
@@ -111,7 +117,8 @@ export const workerSubscriptionsUse: CommandSpec = {
     requestBody(target, target.label, move);
 
     const session = await openSession(ctx, global);
-    const read = await readSubscriptions(session, target);
+    const id = await workerId(session, target.worker);
+    const read = await readSubscriptions(session, target, id);
     const harnesses = read.data.harnesses;
     const harness = harnesses.find((entry) => entry.harness === target.harness);
     if (harness === undefined) {
@@ -127,7 +134,7 @@ export const workerSubscriptionsUse: CommandSpec = {
     const response = await refusing(target, () =>
       session.client.request<CommandResult>({
         method: "PUT",
-        path: `${workerPath(target.worker)}/subscriptions/${encodeURIComponent(target.harness)}/primary`,
+        path: `${workerPath(id)}/subscriptions/${encodeURIComponent(target.harness)}/primary`,
         body,
       }),
     );
@@ -155,12 +162,55 @@ function requestBody(target: Target, expectedPrimary: string, move: boolean): Se
 async function readSubscriptions(
   session: Session,
   target: Target,
+  id: string,
 ): Promise<ApiResponse<WorkerSubscriptions>> {
   return refusing(target, () =>
     session.client.request<WorkerSubscriptions>({
       method: "GET",
-      path: `${workerPath(target.worker)}/subscriptions`,
+      path: `${workerPath(id)}/subscriptions`,
     }),
+  );
+}
+
+/**
+ * The id (`host_id`) of the worker `worker` names. An id the App Service mints (`wkr_…`) is taken
+ * as it is. Anything else is looked up in `GET /workers`: a listed `host_id` (a worker enrolled
+ * before minted ids) as it is, else the unrevoked worker with that name, compared
+ * case-insensitively (`display_name`, or `host_id` for a worker enrolled before names). No such
+ * worker exits 4 with `WORKER_NOT_FOUND`; a name more than one unrevoked worker answers to exits 2
+ * with `CLI_USAGE`, listing their ids.
+ */
+async function workerId(session: Session, worker: string): Promise<string> {
+  if (isMintedWorkerId(worker)) return worker;
+  const response = await session.client.request<WorkerList>({
+    method: "GET",
+    path: WORKERS_ROUTE.path,
+  });
+  const list = response.data as Partial<WorkerList> | null;
+  if (list === null || typeof list !== "object" || !Array.isArray(list.workers)) {
+    throw new CliError(
+      "UNEXPECTED_RESPONSE",
+      "The server's answer to GET /workers does not match the public API document.",
+      ExitCode.Unexpected,
+      { route: `GET ${WORKERS_ROUTE.path}` },
+    );
+  }
+  const workers = list as WorkerList;
+  if (workers.workers.some((entry) => entry.host_id === worker)) return worker;
+  const named = liveWorkersNamed(workers, worker);
+  if (named.length === 1) return named[0]!.host_id;
+  if (named.length === 0) {
+    throw new CliError(
+      "WORKER_NOT_FOUND",
+      `The Account has no worker named ${worker}: give a worker's name or id, as pidgen worker status shows it.`,
+      ExitCode.NotFound,
+      { worker },
+    );
+  }
+  const ids = named.map((entry) => entry.host_id);
+  throw usageError(
+    `More than one worker is named ${worker}: give one's id instead (${ids.join(", ")}).`,
+    { worker, host_ids: ids },
   );
 }
 

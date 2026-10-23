@@ -411,7 +411,7 @@ credential.
 | `pidgen worker start --detach [-- args]` | Starts `pidgen-worker` in its own session and writes its output to the worker-manager log |
 | `pidgen worker stop [--force]` | Stops the worker started with `--detach`; `--force` kills it if it does not stop before the global `--timeout` |
 | `pidgen worker restart [--force]` | Stops the worker started with `--detach` as `worker stop` does and starts it detached again with the arguments in its run record |
-| `pidgen worker status [--host <host_id>]` | Shows the detached worker record, whether that process is still the recorded `pidgen-worker`, and the App Service's record of this worker ([below](#the-app-services-view)) |
+| `pidgen worker status [--host <worker>]` | Shows the detached worker record, whether that process is still the recorded `pidgen-worker`, and the App Service's record of this worker, or of the worker `--host` names by its name or id ([below](#the-app-services-view)) |
 | `pidgen worker doctor [-- args]` | Runs `pidgen-worker doctor --json` and returns the report using the selected output format (an envelope in JSON mode); for this machine before a worker is installed, use [`pidgen doctor`](#check-this-machine) |
 
 The CLI runs the `pidgen-worker` at `PIDGEN_WORKER_BIN` when it is set; otherwise the one the
@@ -495,14 +495,31 @@ failing docker command exits 1 with `DOCKER_FAILED`, its status and its error ou
 ## The App Service's view
 
 When a credential is configured, `pidgen worker status` also reads the Account's workers
-(`GET /api/v1/workers`) and reports the one whose host id is this machine's host name, or the host
-id given with `--host`. That route needs the Account Owner or Administrator role; no Personal API
-Token scope reaches it.
+(`GET /api/v1/workers`) and reports this machine's worker. That route needs the Account Owner or
+Administrator role; no Personal API Token scope reaches it.
+
+A worker has an id and a name. The App Service mints the id when the worker enrolls (`wkr_`
+followed by 26 characters, whatever host id the worker asked for) and lists it as `host_id`; the
+name you chose at enrollment is its `display_name`. The worker saves its id in the worker home's
+`worker.env` (`PIDGEN_LOCALITY_DOMAIN`) and connects as it. A worker enrolled before minted ids
+keeps its old host id, often the machine's host name, and one enrolled before names has a
+`display_name` of `null`: its host id is its name.
+
+`worker status` takes the first of these as this machine's worker, and says which in
+`server.selected_by`:
+
+| `selected_by` | The worker |
+|---|---|
+| `option` | The one `--host` names: the worker whose `host_id` is exactly what was given, else the unrevoked worker with that name (compared without regard to case); with neither, what was given is looked for as an id |
+| `worker_home` | The id in the worker home's `worker.env` (`PIDGEN_LOCALITY_DOMAIN`), when that file holds a credential for the configured server: the worker this install authenticates as |
+| `install_id` | This install's newest worker: the newest whose `install_id` is the worker home's `install-id` |
+| `host_name` | For a worker enrolled before minted ids: the one whose `host_id` is this machine's host name |
 
 `data` then has `installed`, `record`, `running` and `update` as before, plus:
 
-- `server`: `host_id` (the host id looked for), `enrolled`, `worker`, and the service's
-  `service_protocol` and `accepted_protocols`. `worker` is the server's record of this worker —
+- `server`: `host_id` (the worker's id looked for), `display_name` (its name, or `null` when the
+  list has no such worker or it has no name), `selected_by` (the rule above that found it),
+  `enrolled`, `worker`, and the service's `service_protocol` and `accepted_protocols`. `worker` is the server's record of this worker —
   `last_seen_at`, `connected`, `protocol` and `protocol_state` (`current`, `outdated`,
   `unsupported` or `unknown`), `build_version`, `revoked_at`, and `git_credentials`: per Project
   remote it serves, whether its last report found a local git credential (`covered`, `missing` or
@@ -512,10 +529,13 @@ Token scope reaches it.
 | Situation | Result |
 |---|---|
 | No server or no credential configured | Local only: `data` is `{installed, record, running, update}` and no request is made |
-| The server lists a worker with this host id | `server.enrolled: true`, `server.worker` is its record; an unrevoked record is preferred over a revoked one |
-| No worker with this host id, or only a revoked one | `server.enrolled: false`, `server.worker` is `null` (or the revoked record); exit 0, not an error |
+| The server lists a worker with this id | `server.enrolled: true`, `server.worker` is its record; an unrevoked record is preferred over a revoked one |
+| No worker with this id, or only a revoked one | `server.enrolled: false`, `server.worker` is `null` (or the revoked record); exit 0, not an error |
 | The server cannot be reached, times out, or refuses | `server: null` and a warning carrying the error's code (`NETWORK`, `TIMEOUT`, `FORBIDDEN`, …); exit 0 |
 | The configuration cannot be read | `server: null` and a warning with its code (`CONFIG_INVALID`, `CONFIG_PERMISSIONS`); exit 0 |
+
+In a terminal the worker is shown as its name with its id, `Worker: Mad-Max (wkr_…)` (a worker
+with no name by its id alone), under the heading; the JSON keeps `host_id` and `display_name`.
 
 `worker status` always exits 0 once it has read the local record; only a usage error (an empty
 `--host`) or an unsupported platform fails it. An install record that cannot be read is a
@@ -569,7 +589,8 @@ A worker may hold several subscriptions per harness, in fallback order, and name
 its `node.yaml`. `pidgen worker subscriptions <worker>` shows them as the worker last advertised them,
 with each one's login, entitlement, quota and pause, and `pidgen worker subscriptions use <worker>
 <harness> <label>` asks the worker, through the App Service, to make one primary
-([Commands](commands.md#worker-subscriptions)). Switching from the App Service needs the Account's
+([Commands](commands.md#worker-subscriptions)). `<worker>` is the worker's name or its id
+(`wkr_…`), as `pidgen worker status` shows them. Switching from the App Service needs the Account's
 `multiple_subscriptions` entitlement; `pidgen-worker subscriptions use` on the worker itself is
 always allowed. Signing in to a harness and ordering subscriptions in `node.yaml` happen on the
 worker: see [Coding agents](https://docs.pidgen.ai/worker/coding-agents/).

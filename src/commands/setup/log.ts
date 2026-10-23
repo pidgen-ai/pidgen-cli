@@ -37,6 +37,8 @@ export function redactCredentials(text: string, secrets: Iterable<string> = []):
  */
 export class SetupLog {
   private readonly secrets = new Set<string>();
+  /** Short secrets, such as a device login's user code: replaced whatever their length. */
+  private readonly codes = new Set<string>();
   private fd: number | null;
 
   private constructor(
@@ -75,15 +77,22 @@ export class SetupLog {
     if (value) this.secrets.add(value);
   }
 
+  /** Remembers a code the person is shown (a user code), so the log never contains it either. */
+  code(value: string | null | undefined): void {
+    if (value) this.codes.add(value);
+  }
+
   /** `text` with every credential replaced, as the log would hold it. */
   redact(text: string): string {
-    return redactCredentials(text, this.secrets);
+    let shown = text;
+    for (const code of this.codes) shown = shown.split(code).join(REDACTED);
+    return redactCredentials(shown, this.secrets);
   }
 
   /** Appends `text` as it is, credentials replaced. */
   write(text: string): void {
     if (this.fd === null || text === "") return;
-    writeSync(this.fd, redactCredentials(text, this.secrets));
+    writeSync(this.fd, this.redact(text));
   }
 
   /** Appends one line. */

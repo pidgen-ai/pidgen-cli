@@ -4,7 +4,14 @@ import { CliError, usageError } from "../../core/errors.js";
 import type { ApiResponse } from "../../core/http.js";
 import type { CommandSpec } from "../../core/registry.js";
 import { openSession, type Session } from "../../core/session.js";
-import { assertSupportedPlatform } from "../../core/worker.js";
+import { existingInstallId } from "../../core/install-id.js";
+import { assertSupportedPlatform, readWorkerCredential } from "../../core/worker.js";
+import {
+  sameServer,
+  selectWorker,
+  type WorkerSelectedBy,
+  type WorkerSelection,
+} from "../../core/worker-identity.js";
 import { adapterFor, readInstallRecord, type InstallRecord } from "../../core/worker-install.js";
 import { readWorkerReleases, updateSignal } from "../../core/worker-releases.js";
 import type { components } from "../../generated/api.js";
@@ -24,9 +31,17 @@ export interface StatusWarning {
 
 /** The App Service's record of this machine's worker. */
 export interface ServerView {
-  /** The host id looked for: `--host`, or this machine's host name. */
+  /** The worker's id (its `host_id`) looked for, as `selected_by` found it. */
   host_id: string;
-  /** Whether the Account has a worker with that host id whose credential is not revoked. */
+  /** The worker's name (`display_name`), or `null` when none is listed or it has none. */
+  display_name: string | null;
+  /**
+   * Which rule found the id: `option` (`--host`), `worker_home` (the id `worker.env` holds a
+   * credential for), `install_id` (this install's newest worker) or `host_name` (a worker
+   * enrolled before minted ids under this machine's host name).
+   */
+  selected_by: WorkerSelectedBy;
+  /** Whether the Account has a worker with that id whose credential is not revoked. */
   enrolled: boolean;
   /** That worker as `GET /workers` lists it (never its credential), or `null` when none matches. */
   worker: WorkerResource | null;
@@ -35,7 +50,7 @@ export interface ServerView {
 }
 
 /**
- * `pidgen worker status [--host <host_id>]`: the detached worker's local record and liveness (or,
+ * `pidgen worker status [--host <worker>]`: the detached worker's local record and liveness (or,
  * for a container install, the container's), and, when
  * a credential is configured, the App Service's record of this worker from `GET /workers` — its
  * last-seen time, protocol state and git credential coverage.
@@ -59,12 +74,12 @@ export const workerStatus: CommandSpec = {
   summary: "Show the detached worker's local status and the App Service's record of it",
   configure(command: Command) {
     command.option(
-      "--host <host_id>",
-      "the worker's host id on the App Service (default: this machine's host name)",
+      "--host <worker>",
+      "a worker's name or id (default: this machine's worker: the one its worker home is enrolled as)",
     );
   },
   async run(ctx, { options, global }) {
-    const hostId = selectedHost(ctx, options["host"]);
+    const option = selectedHost(options["host"]);
     // Every path adds its warnings to this list; an unreadable install record is the first.
     const warnings: StatusWarning[] = [];
     const record = await installRecord(ctx, warnings);
@@ -135,7 +150,15 @@ export const workerStatus: CommandSpec = {
       };
     }
 
-    const server = serverView(list as WorkerList, hostId);
+    const server = serverView(
+      list as WorkerList,
+      selectWorker(list as WorkerList, {
+        ...(option !== undefined ? { option } : {}),
+        homeId: await homeId(ctx, session.target.url),
+        installId: await existingInstallId(ctx),
+        hostName: ctx.hostName,
+      }),
+    );
     const current = await currentRelease(ctx, global, warnings);
     return {
       data: {
@@ -188,25 +211,49 @@ async function currentRelease(
   }
 }
 
-function selectedHost(ctx: RunContext, option: unknown): string {
-  if (option === undefined) return ctx.hostName;
+function selectedHost(option: unknown): string | undefined {
+  if (option === undefined) return undefined;
   if (typeof option !== "string" || option.trim() === "") {
-    throw usageError("--host needs a non-empty host id.");
+    throw usageError("--host needs a worker's name or id.");
   }
-  return option;
+  return option.trim();
 }
 
 /**
- * Picks this worker from the Account's list: the unrevoked worker with the host id, else the most
- * recently enrolled revoked one, so a revoked credential is shown rather than hidden.
+ * The id the worker home's `worker.env` names (`PIDGEN_LOCALITY_DOMAIN`), when it holds a
+ * credential for `server`: the id the worker authenticates as. Otherwise `null`.
  */
-export function serverView(list: WorkerList, hostId: string): ServerView {
+async function homeId(ctx: RunContext, server: string): Promise<string | null> {
+  let home;
+  try {
+    home = await readWorkerCredential(ctx);
+  } catch {
+    // An unreadable worker home names no worker; the other rules still apply.
+    return null;
+  }
+  return home.credential && home.serviceUrl !== null && sameServer(home.serviceUrl, server)
+    ? home.hostId
+    : null;
+}
+
+/**
+ * Picks this worker from the Account's list by its id: the unrevoked worker with the id, else the
+ * most recently enrolled revoked one, so a revoked credential is shown rather than hidden.
+ * `selection` is the id and the rule that found it (`selectWorker`), or a bare id, `option`.
+ */
+export function serverView(list: WorkerList, selection: WorkerSelection | string): ServerView {
+  const { host_id: hostId, selected_by } =
+    typeof selection === "string"
+      ? { host_id: selection, selected_by: "option" as const }
+      : selection;
   const matches = list.workers.filter((worker) => worker.host_id === hostId);
   const active = matches.find((worker) => worker.revoked_at === null);
   const latest = [...matches].sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
   const worker = active ?? latest ?? null;
   return {
     host_id: hostId,
+    display_name: worker?.display_name ?? null,
+    selected_by,
     enrolled: active !== undefined,
     worker,
     service_protocol: list.service_protocol,

@@ -48,8 +48,8 @@ collapses to one line once answered, such as `◇  Claude Code · 2 sessions at 
 such as installing the worker, shows a spinner while it runs and then collapses to one line, such
 as `◇  pidgen-worker 2.11.0 installed and verified`. The commands setup runs and their output go to
 [the setup log](#the-setup-log), not the screen; `--verbose` shows them as they run. Ctrl-C at a
-question stops setup with `Setup cancelled. Everything before this is kept.`; run it again to
-continue.
+question, during a task or while setup waits for you to sign in, or SIGTERM, stops setup with
+`Setup cancelled. Everything before this is kept.` (exit 2); run it again to continue.
 
 A first run looks like this:
 
@@ -75,9 +75,9 @@ A first run looks like this:
 │
 ◇  pidgen-worker 2.11.0 installed and verified
 │
-◇  Enrolled as sams-laptop in Acme
+◇  Enrolled as sams-laptop (wkr_…) in Acme
 │
-◇  Worker running and connected to Pidgen
+◇  Worker running and connected to Pidgen as sams-laptop (wkr_…)
 │
 ◇  Worker checks passed
 │
@@ -101,13 +101,41 @@ A first run looks like this:
 | Step | What happens |
 |---|---|
 | 1. Check this machine | Runs `pidgen doctor` and shows one line, `This machine is ready · <system> · Node.js <version> · git <version>`. Checks a later step fixes (the sign-in, the coding agents, the install) and warnings that do not apply to what setup does (the container runtime's `cosign`) go only to the setup log. When `uv` is missing, setup asks `uv installs the worker and isn't on this machine. Install it?` and, when you say yes, runs uv's installer, `curl -LsSf https://astral.sh/uv/install.sh \| sh`. A missing `git`, or one older than 2.38, stops setup with the command that installs it on this system |
-| 2. Sign in to Pidgen | Signs you in with a device code: open the link it shows (it carries the code), or go to the address and enter the code. It asks which Account the worker serves when you belong to several, and shows `Signed in as <email> · <Account> · <Role>`. A credential that cannot enroll workers stops setup here, before anything is installed, naming the roles that can (an Owner or Administrator) and the Personal API Token sign-in, `pidgen auth login <url> --with-token --account <ACC-…>` |
+| 2. Sign in to Pidgen | Signs you in with a device code: open the link it shows (it carries the code), or go to the address and enter the code. While it waits it shows how long it has waited and when it last checked, and the keys `Enter open in browser · n new code · Esc other options` (see [The sign-in wait](#the-sign-in-wait)). It asks which Account the worker serves when you belong to several, and shows `Signed in as <email> · <Account> · <Role>`. A credential that cannot enroll workers stops setup here, before anything is installed, naming the roles that can (an Owner or Administrator) and the Personal API Token sign-in, `pidgen auth login <url> --with-token --account <ACC-…>` |
 | 3. Choose coding agents | Shows Claude Code and Codex as checkboxes, with the ones already on `PATH` ticked; a missing one is labelled `not installed · setup installs it with npm`. Ticking it installs it with `npm install -g @anthropic-ai/claude-code` or `npm install -g @openai/codex`, with no further question. Pi is shown, and can't be ticked, when it is on `PATH`: the worker runs it, and setup doesn't manage it. Choose at least one |
 | 4. Sign in to coding agents | Asks each chosen agent whether it is signed in, and for those that are not, runs `pidgen worker login <agent>` when you press Enter. The agent's own login runs in your terminal |
 | 5. Size coding agent sessions | Asks how many of each chosen agent's sessions run at once: a number, with the plans it suits as hints, or *Custom…* (see [Plans and session caps](#plans-and-session-caps)) |
 | 6. Install the worker | Asks once, `Install pidgen-worker <version> and accept its licence?`, naming the licence in one line and linking its full text, `Read it: https://pidgen.ai/legal/eula`, in the next (see [The install question](#the-install-question)); no stops setup, and the worker isn't installed. Then it installs the worker in its own environment under `~/.pidgen/worker` and verifies its signature. When uv already holds another `pidgen-worker`, setup leaves it alone and says so in one `▲` line |
 | 7. Enroll and start the worker | Asks `Worker name`, with a suggested name filled in that Enter accepts and you can edit (see [The name question](#the-name-question)), then enrolls this machine under it, applies the session caps, starts the worker in the background, and waits until Pidgen reports it connected |
 | 8. Prove the worker works | Runs the worker's own checks |
+
+### The sign-in wait
+
+While setup waits for you to approve the sign-in, it checks with Pidgen at the server's interval
+and shows a live line and the keys it answers:
+
+```text
+◒  Waiting for you to approve in the browser… 1m 12s · checked 2s ago
+│  Enter open in browser · n new code · Esc other options
+```
+
+- **Enter** opens the link in your browser with `open` on macOS, or `xdg-open` (`wslview` under
+  WSL) on Linux, so you don't have to select it in the terminal. Without either, Enter checks for
+  your approval at once (never sooner than the server's interval after the last check).
+- **n** drops the code, gets a new one and shows it.
+- **Esc** stops waiting and asks `Sign-in isn't finished. What next?`: *Wait again with a new code*
+  (the default), *Sign in with a token instead*, which stops setup and shows
+  `pidgen auth login <url> --with-token --account <ACC-…>` to run with a Personal API Token, or
+  *Quit setup*.
+- A code that expired before you approved it, a sign-in that was denied, or one Pidgen no longer
+  recognises doesn't stop setup: it says what happened in one line and asks the same question,
+  with a new code as the default.
+- When Pidgen can't be reached, the line says `Can't reach <server>; still trying` and setup keeps
+  checking until the code expires.
+- **Ctrl-C** (or SIGTERM) stops setup with `Setup cancelled. Everything before this is kept.`.
+
+Each check goes to [the setup log](#the-setup-log) with its time and outcome (never the code or the
+token), and `poll delayed <n>s` when one was held up.
 
 ### The install question
 
@@ -202,8 +230,10 @@ pidgen setup --agent claude --sessions claude=2 --accept-licence --label develop
 - `--accept-licence` installs the worker and accepts its licence without asking; on a re-run it
   also says yes to updating to a newer release before the worker starts.
 - `--runtime wheel` names the runtime (the only one setup offers, so it is never asked), and
-  `--label` names the worker (default: this machine's host name). The name is both the enrollment's label and the worker's host id in the
-  Account, the name `pidgen worker status` and the web app show.
+  `--label` names the worker (default: this machine's host name). The name is the enrollment's
+  label and the worker's name in the Account, its `display_name`, which `pidgen worker status` and
+  the web app show beside the worker's id. Pidgen gives the worker its id (`wkr_…`) when it
+  enrolls.
 
 For another Pidgen server, add `--url https://pidgen.example.com`, replacing the placeholder with
 your server address.
@@ -333,8 +363,12 @@ commands and their output under it, and keeps them on screen after it succeeds.
 ### The name question
 
 Before it creates an enrollment, setup always asks for the worker's name, unless `--label` answers
-it in advance. The name is both the enrollment's label and the worker's host id, the name
-`pidgen worker status` and the web app show:
+it in advance. The name is the enrollment's label and the worker's name in the Account, its
+`display_name`, which `pidgen worker status` and the web app show beside the worker's id. Pidgen
+gives every new worker an id of its own, `wkr_` and 26 characters, whatever the machine is called;
+the worker saves it in `worker.env` (`PIDGEN_LOCALITY_DOMAIN`) and connects as it, and setup waits
+for that id to connect. Setup shows the worker as its name with its id:
+`Enrolled as my-host (wkr_…) in Acme`, then `Worker running and connected to Pidgen as my-host (wkr_…)`.
 
 ```text
 ◆  Worker name
@@ -355,7 +389,8 @@ The suggestion filled in is:
 
 Press Enter to accept it, or type another name. The question stays open, saying why, on a name that
 is empty, longer than 100 characters, or held by a live worker of the Account (names are compared
-without regard to case). Nothing is created until you answer, and the answer is shown as
+with each worker's name, without regard to case, and with its id only for a worker enrolled before
+workers had names). Nothing is created until you answer, and the answer is shown as
 `◇  Worker name · my-host`. The setup log records the suggestion and why it was chosen.
 
 Setup cannot see every name that is taken: another person's pending enrollments in the Account are
@@ -372,8 +407,8 @@ whose fix is `pidgen setup --label <suggested name>`; nothing is created or star
 
 Setup decides from this install's worker home (`~/.pidgen`, or `$PIDGEN_HOME`). The machine is
 enrolled only when the home's `worker.env`, which `pidgen-worker enroll` writes, holds a credential
-for the server setup signs in to, and the Account lists that worker, by the host id in
-`worker.env`, without revoking it. Setup reads `worker.env` only to learn whether the credential is
+for the server setup signs in to, and the Account lists that worker, by the id in `worker.env`
+(`PIDGEN_LOCALITY_DOMAIN`), without revoking it. Setup reads `worker.env` only to learn whether the credential is
 there; it never prints or stores it.
 
 - **This install's worker is listed, but its credential is missing.** The Account lists a live

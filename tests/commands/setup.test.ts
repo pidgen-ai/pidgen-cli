@@ -19,7 +19,14 @@ import {
   type FakeAgentOptions,
 } from "../support/agents.js";
 import { envelope, jsonResponse } from "../support/context.js";
-import { CANCEL, scriptedPrompter, type Answer, type AskedPrompt } from "../support/prompter.js";
+import {
+  CANCEL,
+  scriptedPrompter,
+  type Answer,
+  type AskedPrompt,
+  type ScriptedWait,
+} from "../support/prompter.js";
+import type { InterruptReason } from "../../src/core/prompter.js";
 import {
   fakeUv,
   installContext,
@@ -106,6 +113,21 @@ interface ServerState {
   installId?: string | null;
   /** `DELETE /workers/enrollments/{id}` answers this instead of the withdrawn enrollment. */
   withdrawRefusal?: () => Response;
+  /** The user code of each device code issued, in order (the last one repeats). */
+  userCodes?: string[];
+  /**
+   * What `POST /auth/device/token` answers before it approves, one per poll, in order: a response,
+   * or an Error for a poll that fails on the network. Empty: the next poll is approved.
+   */
+  polls?: Array<Response | Error>;
+  /**
+   * The id the App Service mints for this install's worker, whatever host id the worker asks for:
+   * the fake worker saves it as PIDGEN_LOCALITY_DOMAIN and the list names it as `host_id`. Unset,
+   * the worker keeps the host id it asked for, as before minted ids.
+   */
+  mintedId?: string;
+  /** The label (name) the last `POST /workers/enrollments` carried: the worker's `display_name`. */
+  label?: string;
 }
 
 interface Harness extends InstallContext {
@@ -122,6 +144,10 @@ interface Harness extends InstallContext {
   started: { value: boolean };
   /** Each message a spinner showed while it ran, in order. */
   spinners: string[];
+  /** Each wait setup ran (the sign-in wait), in order. */
+  waits: ScriptedWait[];
+  /** Ctrl-C during a spinner or a wait, or SIGTERM, as the terminal reports it. */
+  interrupt(reason: InterruptReason): void;
   /**
    * Runs the CLI: the exit code, the envelope, standard error, and the setup log this run wrote
    * (`log`, empty when it wrote none) at `logPath`.
@@ -176,6 +202,7 @@ function enrollment() {
 
 interface WorkerResource {
   host_id: string;
+  display_name?: string | null;
   connected: boolean;
   last_seen_at: string;
   created_at: string;
@@ -260,7 +287,8 @@ async function writeWorkerEnv(home: string, lines: string[]): Promise<void> {
  *      worker.env.replaced and the token is exchanged.
  *
  * An exchange writes $PIDGEN_HOME/worker.env as the real worker does (the credential, the server and
- * `--host-id`, default the host name), unless FAKE_ENROLL_NO_ENV is set, and each `enroll` that
+ * the id the server answered: FAKE_MINTED_ID when set, else `--host-id`, default the host name;
+ * no id at all with FAKE_ENROLL_NO_ID), unless FAKE_ENROLL_NO_ENV is set, and each `enroll` that
  * gets that far logs `["exchange", "done"]` or `["exchange", "skipped"]` to
  * FAKE_WORKER_LOG.exchanges. An exchange for a host id in FAKE_TAKEN_HOSTS (comma-separated) is
  * refused as the server refuses a taken host id: the worker prints its refusal line and exits 1,
@@ -320,7 +348,7 @@ if (args[0] === "enroll" && !keep) {
     process.exit(1);
   }
   const hostId = value("--host-id") ?? process.env.FAKE_HOSTNAME;
-  if ((process.env.FAKE_TAKEN_HOSTS ?? "").split(",").includes(hostId)) {
+  if (!process.env.FAKE_MINTED_ID && (process.env.FAKE_TAKEN_HOSTS ?? "").split(",").includes(hostId)) {
     process.stderr.write("host id '" + hostId + "' is already enrolled in this Account (HTTP 409 WORKER_HOST_TAKEN).\\n");
     process.stderr.write("Re-run with a different --host-id, or remove the existing worker from the Workers page\\nfirst. Two machines must never share a host id.\\n");
     process.exit(1);
@@ -332,7 +360,7 @@ if (args[0] === "enroll" && !keep && !process.env.FAKE_ENROLL_NO_ENV) {
   fs.writeFileSync(envFile, [
     "PIDGEN_SERVICE_URL=" + value("--server"),
     "PIDGEN_NODE_TOKEN=pidgen_node_fake_credential",
-    "PIDGEN_LOCALITY_DOMAIN=" + (value("--host-id") ?? process.env.FAKE_HOSTNAME),
+    ...(process.env.FAKE_ENROLL_NO_ID ? [] : ["PIDGEN_LOCALITY_DOMAIN=" + (process.env.FAKE_MINTED_ID || value("--host-id") || process.env.FAKE_HOSTNAME)]),
   ].join("\\n") + "\\n", { mode: 0o600 });
 }
 if (args[0] === "doctor") process.stdout.write(JSON.stringify({ ok: true, checks: [] }));
@@ -389,6 +417,10 @@ interface HarnessOptions extends InstallContextOptions {
   npm?: boolean;
   /** This machine's host name (default HOST). */
   hostName?: string;
+  /** Called as each spinner starts. */
+  onSpinner?: (message: string, h: Harness) => void;
+  /** Called as each wait starts. */
+  onWait?: (wait: ScriptedWait, h: Harness) => void;
 }
 
 async function harness(options: HarnessOptions = {}): Promise<Harness> {
@@ -421,6 +453,7 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
   const started = { value: false };
   let pollsAfterStart = 0;
   let logins = 0;
+  let issued = 0;
   const tokens = new Map<string, string>();
 
   const workerBin = join(base.directory, "fake-worker", "pidgen-worker");
@@ -435,6 +468,7 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
   ctx.env["PIDGEN_WORKER_BIN"] = workerBin;
   ctx.env["FAKE_WORKER_LOG"] = workerLog;
   ctx.env["FAKE_HOSTNAME"] = ctx.hostName;
+  if (state.mintedId !== undefined) ctx.env["FAKE_MINTED_ID"] = state.mintedId;
   // The credential the service refuses with HTTP 401: the removed worker's (rule 2 of the fake).
   ctx.env["FAKE_REFUSED_CREDENTIALS"] ??= REVOKED_CREDENTIAL;
 
@@ -448,16 +482,21 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
     const api = `${SERVER}/api/v1`;
     if (url === `${api}/health`) return ok(HEALTH);
     if (url === `${api}/auth/device`) {
+      const codes = state.userCodes ?? ["ABCD-EFGH"];
+      const userCode = codes[Math.min(issued++, codes.length - 1)]!;
       return ok({
-        device_code: "fake-device-code",
-        user_code: "ABCD-EFGH",
+        device_code: `fake-device-code-${issued}`,
+        user_code: userCode,
         verification_uri: `${SERVER}/device`,
-        verification_uri_complete: `${SERVER}/device?user_code=ABCD-EFGH`,
+        verification_uri_complete: `${SERVER}/device?user_code=${userCode}`,
         expires_in: 600,
         interval: 5,
       });
     }
     if (url === `${api}/auth/device/token`) {
+      const answer = state.polls?.shift();
+      if (answer instanceof Error) throw answer;
+      if (answer !== undefined) return answer;
       const account = state.approvals[Math.min(logins, state.approvals.length - 1)]!;
       const token = logins === 0 ? CLI_TOKEN : OTHER_TOKEN;
       logins++;
@@ -502,9 +541,10 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
       const connected =
         started.value && pollsAfterStart >= state.connectAfter && !state.revoked && live;
       const listed = state.enrolled || connected;
-      const hostId = env?.["PIDGEN_LOCALITY_DOMAIN"] ?? HOST;
+      const hostId = env?.["PIDGEN_LOCALITY_DOMAIN"] ?? state.mintedId ?? HOST;
       const own = workerResource(connected, {
         host_id: hostId,
+        display_name: state.label ?? null,
         revoked_at: state.revoked ? "2026-09-28T10:00:00Z" : null,
         install_id: state.installId ?? null,
       });
@@ -532,6 +572,7 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
       }
       state.enrolled = true;
       state.revoked = false;
+      state.label = label;
       state.installId = (body as { install_id?: string } | undefined)?.install_id ?? null;
       return ok(enrollment(), 201);
     }
@@ -564,10 +605,9 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
   };
   ctx.workerRuntime = runtime;
 
-  const scripted = scriptedPrompter(
-    (text) => ctx.io.stderr(text),
-    answers,
-    (asked) => {
+  const self: { h?: Harness } = {};
+  const scripted = scriptedPrompter((text) => ctx.io.stderr(text), answers, {
+    onAsk: (asked) => {
       questions.push(asked.screen);
       // Setup asks the worker's name before every enrollment. A test that scripts no answer for it
       // presses Enter, accepting the suggestion; one that cares answers it like any other question.
@@ -575,11 +615,13 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
         answers.push("");
       }
     },
-  );
+    onSpinner: (message) => options.onSpinner?.(message, self.h!),
+    onWait: (wait) => options.onWait?.(wait, self.h!),
+  });
   prompts = scripted.asked;
   ctx.prompter = options.noTerminal ? null : () => Promise.resolve(scripted.prompter);
 
-  return {
+  self.h = {
     ...base,
     state,
     requests,
@@ -588,6 +630,8 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
       return prompts;
     },
     spinners: scripted.spinners,
+    waits: scripted.waits,
+    interrupt: scripted.interrupt,
     answers,
     started,
     agentRuns: agentState.runs,
@@ -619,6 +663,7 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
       };
     },
   };
+  return self.h;
 }
 
 const STEP_IDS = [
@@ -3593,19 +3638,22 @@ describe("pidgen setup output", () => {
     expect(stderr).not.toMatch(/sha256:|\.whl/);
     for (const line of [
       `◇  Enrolled as ${HOST} in Example`,
-      "◇  Worker running and connected to Pidgen",
+      `◇  Worker running and connected to Pidgen as ${HOST}`,
       "◇  Worker checks passed",
     ])
       expect(stderr).toContain(`│\n${line}\n`);
     expect(h.spinners).toEqual([
       "Checking this machine…",
-      "Waiting for you to approve in the browser…",
       "Installing pidgen-worker 1.0.0…",
       "Verifying it was published by Pidgen's release workflow…",
       `Enrolling as ${HOST}…`,
       "Starting the worker…",
       "Waiting for Pidgen to report the worker connected…",
       "Running the worker's checks…",
+    ]);
+    // The sign-in waits in its own task, which answers keys while it polls.
+    expect(h.waits.map((wait) => wait.message)).toEqual([
+      "Waiting for you to approve in the browser…",
     ]);
   });
 
@@ -4087,7 +4135,7 @@ describe("pidgen setup finish", () => {
         "",
       ].join("\n"),
     );
-    expect(h.spinners).toContain("Waiting for you to approve in the browser…");
+    expect(h.waits[0]?.message).toBe("Waiting for you to approve in the browser…");
     expect(stderr).not.toContain("Open https://pidgen.example.com/device and enter the code");
   });
 });
@@ -4332,7 +4380,7 @@ describe("pidgen setup, one action at a time", () => {
     "│",
     `◇  Enrolled as ${LAPTOP} in Example`,
     "│",
-    "◇  Worker running and connected to Pidgen",
+    `◇  Worker running and connected to Pidgen as ${LAPTOP}`,
     "│",
     "◇  Worker checks passed",
     "",
@@ -4412,7 +4460,16 @@ describe("pidgen setup, one action at a time", () => {
       capacity: ["caps", "command", "id", "plans", "status", "summary"],
       runtime: ["command", "id", "runtime", "status", "summary"],
       install: ["command", "id", "status", "summary", "version"],
-      enroll: ["capacity", "command", "connected", "host_id", "id", "status", "summary"],
+      enroll: [
+        "capacity",
+        "command",
+        "connected",
+        "display_name",
+        "host_id",
+        "id",
+        "status",
+        "summary",
+      ],
       prove: ["command", "id", "next", "report", "status", "summary"],
     });
     expect(step(body, "enroll")).toMatchObject({ host_id: LAPTOP, connected: true });
@@ -4434,6 +4491,7 @@ describe("pidgen setup, one action at a time", () => {
     expect(body.error!.code).toBe("WORKER_NOT_CONNECTED");
     expect(Object.keys(body.error!.details).sort()).toEqual([
       "command",
+      "display_name",
       "error",
       "fix",
       "host_id",
@@ -4463,6 +4521,45 @@ describe("pidgen setup, one action at a time", () => {
 
 describe("pidgen setup documentation", () => {
   const read = (path: string) => readFile(join(import.meta.dirname, "..", "..", path), "utf8");
+
+  // AC-00f2184a38b9: the guides describe the sign-in wait's keys, the Esc question, Ctrl-C and
+  // SIGTERM, and what an expired or denied code does.
+  it.each(["docs/commands.md", "docs/install-worker.md"])(
+    "%s describes the sign-in wait's keys, its question, Ctrl-C, SIGTERM and expiry",
+    async (page) => {
+      const text = await read(page);
+      for (const words of [
+        "Enter open in browser · n new code · Esc other options",
+        "Sign-in isn't finished. What next?",
+        "Wait again with a new code",
+        "Sign in with a token instead",
+        "Quit setup",
+        "SIGTERM",
+        "Ctrl-C",
+        "expired",
+        "denied",
+        "xdg-open",
+        "wslview",
+      ])
+        expect(text, words).toContain(words);
+    },
+  );
+
+  it("docs/troubleshooting.md covers setup that seems stuck waiting for approval", async () => {
+    const text = await read("docs/troubleshooting.md");
+    expect(text).toMatch(/setup seems stuck waiting for approval/i);
+    expect(text).toContain("poll delayed");
+  });
+
+  it("the changelog records the sign-in wait and that Ctrl-C during a spinner exits 2", async () => {
+    const text = await read("CHANGELOG.md");
+    // These changes shipped in 0.1.0-alpha.6: its section and anything newer.
+    const alpha6 = text.slice(0, text.indexOf("\n## 0.1.0-alpha.5"));
+    expect(alpha6).toMatch(/Ctrl-C during a spinner/);
+    expect(alpha6).toContain("exits 2");
+    expect(alpha6).toContain("SIGTERM");
+    expect(alpha6).toMatch(/sign-in wait/i);
+  });
 
   // c3-docs: the guides and the setup-worker skill describe the finished eight-step flow.
   it.each([
@@ -4970,5 +5067,550 @@ describe("enrollment states", { timeout: 20_000 }, () => {
       expect(line!.split(" | ").at(-1), `row ${row}`).toMatch(/`(pidgen|mv) [^`]+`/);
     }
     expect(text).toContain("row 13");
+  });
+});
+
+describe("pidgen setup's sign-in wait", () => {
+  /** A fresh machine's answers after sign-in: the coding agents, each one's sessions, the install. */
+  const AFTER_SIGN_IN = ["", "", "", ""];
+  const WAITING = "Waiting for you to approve in the browser…";
+  const KEYS = "Enter open in browser · n new code · Esc other options";
+  const QUESTION = "Sign-in isn't finished. What next?";
+  const LINK = `${SERVER}/device?user_code=ABCD-EFGH`;
+  const pending = () => refusal(400, "authorization_pending");
+  const tokenPolls = (h: Harness) =>
+    h.requests.filter((request) => request.url.endsWith("/auth/device/token"));
+  const deviceRequests = (h: Harness) =>
+    h.requests.filter((request) => request.url.endsWith("/auth/device"));
+  /** The block setup draws for a device code. */
+  const block = (code: string) =>
+    [
+      "◆  Sign in to Pidgen",
+      "│  Open this link and approve the sign-in:",
+      `│    ${SERVER}/device?user_code=${code}`,
+      `│  Or go to ${SERVER}/device and enter  ${code}`,
+    ].join("\n");
+
+  // AC-a7746e57d065: the block, the live line and the key line.
+  it("shows the live line and the keys while it polls, then ends in the signed-in line", async () => {
+    const h = await harness({ answers: AFTER_SIGN_IN, state: { polls: [pending(), pending()] } });
+
+    const { code, stderr } = await h.run("setup", "--url", SERVER);
+
+    expect(code, stderr).toBe(ExitCode.Ok);
+    expect(stderr).toContain(block("ABCD-EFGH"));
+    expect(h.waits).toHaveLength(1);
+    const wait = h.waits[0]!;
+    expect(wait.message).toBe(WAITING);
+    expect(wait.keys).toBe(KEYS);
+    expect(wait.lines).toContain(`${WAITING} 5s · checked 0s ago`);
+    expect(wait.lines).toContain(`${WAITING} 10s · checked 0s ago`);
+    expect(wait.ended).toBe("Signed in as person@example.com · Example · Administrator");
+    expect(h.spinners).not.toContain(WAITING);
+    // Polls at the server's interval.
+    expect(tokenPolls(h)).toHaveLength(3);
+  });
+
+  it.each([
+    ["linux", {}, "xdg-open"],
+    ["linux", { WSL_DISTRO_NAME: "Ubuntu" }, "wslview"],
+    ["darwin", {}, "open"],
+  ] as const)(
+    "Enter opens the complete link with the platform's opener (%s %j: %s)",
+    async (platform, env, opener) => {
+      const h = await harness({
+        answers: AFTER_SIGN_IN,
+        state: { polls: [pending()] },
+        onWait: (wait) => wait.press("enter"),
+      });
+      h.ctx.workerRuntime = { ...h.ctx.workerRuntime, platform };
+      Object.assign(h.ctx.env, env);
+      const openers = join(h.directory, "openers");
+      for (const name of ["xdg-open", "wslview", "open"]) {
+        await writeExecutable(join(openers, name), "#!/bin/sh\nexit 0\n");
+      }
+      h.ctx.env["PATH"] = `${openers}:${h.ctx.env["PATH"]}`;
+
+      const { code, stderr, log } = await h.run("setup", "--url", SERVER);
+
+      expect(code, stderr).toBe(ExitCode.Ok);
+      const opened = h.spawns.filter((spawn) => spawn.command.startsWith(openers));
+      expect(opened.map((spawn) => [basename(spawn.command), spawn.args])).toEqual([
+        [opener, [LINK]],
+      ]);
+      expect(log).toContain(`opened the sign-in link with ${opener}`);
+      // The link is never selected from the terminal: the block is drawn once, and the wait goes on.
+      expect(stderr.split("◆  Sign in to Pidgen")).toHaveLength(2);
+      expect(h.waits).toHaveLength(1);
+    },
+  );
+
+  it("Enter without an opener checks for approval at once, never sooner than the interval", async () => {
+    const h = await harness({
+      answers: AFTER_SIGN_IN,
+      state: { polls: [pending(), pending()] },
+      onWait: (wait) => wait.press("enter"),
+    });
+    // No xdg-open anywhere on PATH.
+    h.ctx.env["PATH"] = h.pathDir;
+
+    const { code, stderr, log } = await h.run("setup", "--url", SERVER);
+
+    expect(code, stderr).toBe(ExitCode.Ok);
+    expect(log).toContain("no browser opener on this machine; checking for approval now");
+    expect(h.waits[0]!.lines).toContain(
+      `No browser opener here: open the link yourself · checking now`,
+    );
+    const polls = log
+      .split("\n")
+      .filter((line) => / poll: /.test(line))
+      .map((line) => Date.parse(/^\[([^\]]+)\]/.exec(line)![1]!));
+    expect(polls).toHaveLength(3);
+    for (let index = 1; index < polls.length; index++) {
+      expect(polls[index]! - polls[index - 1]!).toBeGreaterThanOrEqual(5000);
+    }
+  });
+
+  it("n abandons the code, asks for a new one and draws the block again", async () => {
+    const h = await harness({
+      answers: AFTER_SIGN_IN,
+      state: { userCodes: ["ABCD-EFGH", "JKLM-NPQR"], polls: [pending()] },
+      onWait: (wait, harness) => {
+        if (harness.waits.length === 1) wait.press("new");
+      },
+    });
+
+    const { code, stderr, log } = await h.run("setup", "--url", SERVER);
+
+    expect(code, stderr).toBe(ExitCode.Ok);
+    expect(deviceRequests(h).map((request) => request.method)).toEqual(["POST", "POST"]);
+    const [first, second] = order(stderr, block("ABCD-EFGH"), block("JKLM-NPQR"));
+    expect(first).toBeLessThan(second!);
+    expect(h.waits).toHaveLength(2);
+    expect(h.waits[0]!.ended).toBeNull();
+    expect(h.waits[1]!.ended).toBe("Signed in as person@example.com · Example · Administrator");
+    expect(log).toContain("new code asked for (n)");
+    // Every poll after the new code is for it.
+    expect(tokenPolls(h).at(-1)?.body).toMatchObject({ device_code: "fake-device-code-2" });
+  });
+
+  // AC-d13e9485c287: Esc stops polling and asks what next.
+  describe("Esc", () => {
+    const escape = (wait: ScriptedWait, h: Harness) => {
+      if (h.waits.length === 1) wait.press("escape");
+    };
+
+    it("asks what next; the default waits again with a new code", async () => {
+      const h = await harness({
+        answers: ["", ...AFTER_SIGN_IN],
+        state: { userCodes: ["ABCD-EFGH", "JKLM-NPQR"] },
+        onWait: escape,
+      });
+
+      const { code, stderr } = await h.run("setup", "--url", SERVER);
+
+      expect(code, stderr).toBe(ExitCode.Ok);
+      const question = h.prompts.find((prompt) => prompt.message === QUESTION)!;
+      expect(question.kind).toBe("select");
+      expect(question.options.map((option) => option.label)).toEqual([
+        "Wait again with a new code",
+        "Sign in with a token instead",
+        "Quit setup",
+      ]);
+      expect(question.screen).toContain("● Wait again with a new code");
+      expect(stderr).toContain(`◇  ${QUESTION} · Wait again with a new code`);
+      expect(stderr).toContain(block("JKLM-NPQR"));
+      expect(deviceRequests(h)).toHaveLength(2);
+      expect(h.waits[0]!.ended).toBeNull();
+    });
+
+    it("Sign in with a token instead stops setup with the token command as the fix", async () => {
+      const h = await harness({
+        answers: ["Sign in with a token instead"],
+        onWait: escape,
+      });
+
+      const { code, body, stderr } = await h.run("setup", "--url", SERVER);
+
+      const command = `pidgen auth login ${SERVER} --with-token --account <ACC-…>`;
+      expect(code).toBe(ExitCode.Auth);
+      expect(body.error).toMatchObject({
+        code: "SIGN_IN_NOT_FINISHED",
+        details: { step: "sign-in", fix: expect.stringContaining(command) },
+      });
+      expect(stderr).toContain(`│    ${command}`);
+      expect(stderr).toContain(
+        "└  Run `pidgen setup` again to continue from here.".replace(/`/g, ""),
+      );
+      expect(step(body, "sign-in").status).toBe("failed");
+    });
+
+    it("Quit setup stops it with SETUP_CANCELLED, exit 2", async () => {
+      const h = await harness({ answers: ["Quit setup"], onWait: escape });
+
+      const { code, body, stderr, log } = await h.run("setup", "--url", SERVER);
+
+      expect(code).toBe(ExitCode.Usage);
+      expect(body.error?.code).toBe("SETUP_CANCELLED");
+      expect(stderr).toMatch(
+        /■ {2}Setup cancelled\. Everything before this is kept\.\n└ {2}Run pidgen setup again to continue\.\n$/,
+      );
+      expect(log).toContain('answer: "quit"');
+    });
+  });
+
+  // AC-d187c0026816: an expired, denied or lost login asks what next instead of stopping setup.
+  it.each([
+    ["expired_token", "The code expired before the sign-in was approved.", "expired"],
+    ["access_denied", "The sign-in was denied in the browser.", "denied"],
+    ["invalid_grant", "Pidgen no longer recognises this sign-in.", "invalid"],
+  ])(
+    "%s says what happened and asks what next, defaulting to a new code",
+    async (refused, line, outcome) => {
+      const h = await harness({
+        answers: ["", ...AFTER_SIGN_IN],
+        state: { userCodes: ["ABCD-EFGH", "JKLM-NPQR"], polls: [pending(), refusal(400, refused)] },
+      });
+
+      const { code, stderr, log } = await h.run("setup", "--url", SERVER);
+
+      expect(code, stderr).toBe(ExitCode.Ok);
+      expect(stderr).toContain(`│\n▲  ${line}\n`);
+      const question = h.prompts.find((prompt) => prompt.message === QUESTION)!;
+      expect(question.screen).toContain("● Wait again with a new code");
+      expect(deviceRequests(h)).toHaveLength(2);
+      expect(stderr).toContain(block("JKLM-NPQR"));
+      expect(log).toMatch(new RegExp(`\\] poll: ${outcome}\\n`));
+    },
+  );
+
+  // AC-f5ceb49fc60f: each poll is logged with its time and outcome, never a code or the token.
+  it("logs each poll's time and outcome, a delayed poll, and never a code or the token", async () => {
+    const h = await harness({
+      answers: AFTER_SIGN_IN,
+      state: {
+        polls: [
+          pending(),
+          jsonResponse(400, {
+            status: "error",
+            error: { code: "slow_down", message: "slow down", details: { interval: 10 } },
+          }),
+          new TypeError("fetch failed"),
+          pending(),
+        ],
+      },
+    });
+    // The fourth wait is held up: three times the interval passes before the poll starts.
+    const sleep = h.ctx.sleep;
+    let sleeps = 0;
+    h.ctx.sleep = (ms) => sleep(++sleeps === 4 ? ms * 3 : ms);
+
+    const { code, stderr, log } = await h.run("setup", "--url", SERVER);
+
+    expect(code, stderr).toBe(ExitCode.Ok);
+    const polls = log.split("\n").filter((entry) => / poll[: ]/.test(entry));
+    expect(polls.map((entry) => entry.replace(/^\[[^\]]+\] /, ""))).toEqual([
+      "poll: pending",
+      "poll: slow_down; interval now 10s",
+      "poll: network error (Could not reach https://pidgen.example.com.)",
+      "poll delayed 30s",
+      "poll: pending",
+      "poll: approved",
+    ]);
+    for (const entry of polls) expect(entry).toMatch(/^\[\d{4}-\d{2}-\d{2}T[\d:.]+Z\] /);
+    for (const secret of ["ABCD-EFGH", "fake-device-code", CLI_TOKEN]) {
+      expect(log).not.toContain(secret);
+    }
+  });
+
+  // AC-72059b293463: a network failure is "not yet"; the wait line says so.
+  it("a poll that fails on the network shows it can't reach the server, and keeps polling", async () => {
+    const h = await harness({
+      answers: AFTER_SIGN_IN,
+      state: { polls: [new TypeError("fetch failed"), pending()] },
+    });
+
+    const { code, stderr, log } = await h.run("setup", "--url", SERVER);
+
+    expect(code, stderr).toBe(ExitCode.Ok);
+    expect(h.waits[0]!.lines).toContain(`Can't reach ${SERVER}; still trying · 5s`);
+    expect(h.waits[0]!.lines).toContain(`${WAITING} 10s · checked 0s ago`);
+    expect(log).toContain("poll: network error");
+    // One request per poll: the HTTP client did not retry it.
+    expect(tokenPolls(h)).toHaveLength(3);
+  });
+
+  it("invalid_grant after a network failure says the approval's answer was lost and offers a new code", async () => {
+    const h = await harness({
+      answers: ["", ...AFTER_SIGN_IN],
+      state: {
+        userCodes: ["ABCD-EFGH", "JKLM-NPQR"],
+        polls: [new TypeError("fetch failed"), refusal(400, "invalid_grant")],
+      },
+    });
+
+    const { code, stderr, log } = await h.run("setup", "--url", SERVER);
+
+    expect(code, stderr).toBe(ExitCode.Ok);
+    expect(stderr).toContain(
+      "▲  The approval's answer was lost on the way back, so this code can't be used again.\n",
+    );
+    expect(h.prompts.find((prompt) => prompt.message === QUESTION)).toBeDefined();
+    expect(deviceRequests(h)).toHaveLength(2);
+    expect(log).toContain("poll: invalid");
+  });
+
+  // AC-c16d531ac9ab: Ctrl-C and SIGTERM during a spinner or the wait stop setup as documented.
+  const CANCELLED_LINES =
+    /\n■ {2}Setup cancelled\. Everything before this is kept\.\n└ {2}Run pidgen setup again to continue\.\n$/;
+
+  it("Ctrl-C during the wait stops setup: exit 2, the cancel lines, the log line", async () => {
+    const h = await harness({
+      state: { polls: [pending(), pending(), pending()] },
+      onWait: (_wait, harness) => harness.interrupt("ctrl-c"),
+    });
+
+    const { code, body, stderr, log } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Usage);
+    expect(body.error).toMatchObject({ code: "SETUP_CANCELLED", details: { step: "sign-in" } });
+    expect(stderr).toMatch(CANCELLED_LINES);
+    expect(log).toContain("answer: cancelled (Ctrl-C)");
+    expect(h.waits[0]!.ended).toBeNull();
+  });
+
+  it.each([
+    ["ctrl-c", "answer: cancelled (Ctrl-C)"],
+    ["sigterm", "terminated (SIGTERM)"],
+  ] as const)(
+    "%s during a spinner stops setup: exit 2, the cancel lines, the log line",
+    async (reason, logged) => {
+      const h = await harness({
+        onSpinner: (message, harness) => {
+          if (message === "Checking this machine…") setTimeout(() => harness.interrupt(reason), 0);
+        },
+      });
+
+      const { code, body, stderr, log } = await h.run("setup", "--url", SERVER);
+
+      expect(code).toBe(ExitCode.Usage);
+      expect(body.error).toMatchObject({ code: "SETUP_CANCELLED", details: { step: "check" } });
+      expect(stderr).toMatch(CANCELLED_LINES);
+      expect(stderr).not.toContain("This machine isn't ready");
+      expect(log).toContain(logged);
+      expect(deviceRequests(h)).toHaveLength(0);
+    },
+  );
+});
+
+// Since the App Service mints worker ids, a new worker's host_id is `wkr_…` whatever host id it
+// asked for, and the chosen name is its display_name. The worker saves the minted id in worker.env.
+describe("pidgen setup and minted worker ids", () => {
+  const ANSWERS = ["", "", "", ""];
+  const MACHINE = "dev-laptop";
+  const MAD_MAX_ID = "wkr_examplexxxxxxxxxxxxxxxxxx";
+  const OTHER_ID = "wkr_otherxxxxxxxxxxxxxxxxxxxx";
+  const LAPTOP = "sams-laptop";
+  const INSTALL_ID = "0123456789abcdef0123456789abcdef";
+
+  // AC-7edc22ddf8d7, AC-62387f1bd71c: setup waits for the id the worker saved, not the name.
+  it("waits for the minted id worker.env names and reaches step 8 connected, naming the worker with its id", async () => {
+    const h = await harness({
+      hostName: MACHINE,
+      answers: [...ANSWERS, "Mad-Max"],
+      state: { mintedId: MAD_MAX_ID },
+    });
+
+    const { code, body, stderr } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(enrollments(h)[0]!.body).toEqual({ label: "Mad-Max", install_id: ANY_INSTALL_ID });
+    expect(await readWorkerEnv(h.ctx.homeDir)).toMatchObject({
+      PIDGEN_LOCALITY_DOMAIN: MAD_MAX_ID,
+    });
+    expect(stderr).toContain(`Enrolled as Mad-Max (${MAD_MAX_ID}) in Example`);
+    expect(stderr).toContain("Worker running and connected to Pidgen");
+    expect(stderr).toContain(`connected to Pidgen as Mad-Max (${MAD_MAX_ID})`);
+    expect(stderr).not.toContain("Host id");
+    expect(step(body, "enroll")).toMatchObject({
+      status: "done",
+      host_id: MAD_MAX_ID,
+      display_name: "Mad-Max",
+      connected: true,
+    });
+  });
+
+  it("with no id in worker.env, finds the new worker by its name among unrevoked workers", async () => {
+    const removed = workerResource(false, {
+      host_id: OTHER_ID,
+      display_name: "mad-max",
+      revoked_at: "2026-09-01T10:00:00Z",
+    });
+    const h = await harness({
+      hostName: MACHINE,
+      answers: [...ANSWERS, "Mad-Max"],
+      state: { mintedId: MAD_MAX_ID, others: [removed] },
+      env: { FAKE_ENROLL_NO_ID: "1" },
+    });
+
+    const { code, body, stderr } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(await readWorkerEnv(h.ctx.homeDir)).not.toHaveProperty("PIDGEN_LOCALITY_DOMAIN");
+    expect(stderr).toContain(`connected to Pidgen as Mad-Max (${MAD_MAX_ID})`);
+    expect(step(body, "enroll")).toMatchObject({
+      host_id: MAD_MAX_ID,
+      display_name: "Mad-Max",
+      connected: true,
+    });
+  });
+
+  it("WORKER_NOT_CONNECTED names the worker with its id", async () => {
+    const h = await harness({
+      hostName: MACHINE,
+      answers: [...ANSWERS, "Mad-Max"],
+      state: { mintedId: MAD_MAX_ID, connectAfter: Number.POSITIVE_INFINITY },
+    });
+
+    const { code, body } = await h.run("--timeout", "30", "setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Network);
+    expect(body.error!.code).toBe("WORKER_NOT_CONNECTED");
+    const inner = body.error!.details["error"] as { message: string };
+    expect(inner.message).toBe(
+      `The App Service did not report Mad-Max (${MAD_MAX_ID}) connected within 30 seconds.`,
+    );
+    expect(body.error!.message).toContain(inner.message);
+    expect(body.error!.details).toMatchObject({ host_id: MAD_MAX_ID, display_name: "Mad-Max" });
+  });
+
+  it("a re-run finds the enrolled worker by the id worker.env names and shows its name", async () => {
+    const h = await harness({
+      hostName: MACHINE,
+      answers: ANSWERS,
+      state: { enrolled: true, mintedId: MAD_MAX_ID, label: "Mad-Max" },
+    });
+    await writeWorkerEnv(h.ctx.homeDir, [
+      `PIDGEN_SERVICE_URL=${SERVER}`,
+      "PIDGEN_NODE_TOKEN=pidgen_node_fake_credential",
+      `PIDGEN_LOCALITY_DOMAIN=${MAD_MAX_ID}`,
+    ]);
+
+    const { code, body, stderr } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(enrollments(h)).toHaveLength(0);
+    expect(stderr).toContain(`Already done · enrolled as Mad-Max (${MAD_MAX_ID})`);
+    expect(stderr).toContain(`connected to Pidgen as Mad-Max (${MAD_MAX_ID})`);
+    expect(step(body, "enroll")).toMatchObject({
+      host_id: MAD_MAX_ID,
+      display_name: "Mad-Max",
+      connected: true,
+    });
+  });
+
+  // AC-6065116ba041: names are compared with display_name, and host_id only when it is null.
+  it("compares the chosen name with display_name, and a pre-names worker's host_id", async () => {
+    const named = (hostId: string, name: string) =>
+      workerResource(true, {
+        host_id: hostId,
+        display_name: name,
+        created_at: "2026-09-20T09:00:00Z",
+      });
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: [...ANSWERS, "OLD-BOX", "Sams-Laptop-2", ""],
+      state: {
+        mintedId: MAD_MAX_ID,
+        others: [
+          named(OTHER_ID, LAPTOP.toUpperCase()),
+          named("wkr_secondxxxxxxxxxxxxxxxxxxx", `${LAPTOP}-2`),
+          workerResource(true, { host_id: "old-box", display_name: null }),
+        ],
+      },
+    });
+
+    const { code, body, stderr } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(stderr).toContain(
+      `Example already has a worker named ${LAPTOP.toUpperCase()} (connected; enrolled 20 Sep).`,
+    );
+    expect(stderr).not.toContain(`worker named ${OTHER_ID}`);
+    // The suggestion skips every listed name: sams-laptop-2 is a display_name.
+    expect(h.questions[4]).toContain(`│  ${LAPTOP}-3\n`);
+    // A pre-names worker's host_id is its name; a named worker's display_name, in any case.
+    expect(h.questions[5]).toContain("▲  OLD-BOX is taken");
+    expect(h.questions[6]).toContain("▲  Sams-Laptop-2 is taken");
+    expect(enrollments(h)[0]!.body).toEqual({ label: `${LAPTOP}-3`, install_id: ANY_INSTALL_ID });
+    expect(step(body, "enroll")).toMatchObject({
+      host_id: MAD_MAX_ID,
+      display_name: `${LAPTOP}-3`,
+      connected: true,
+    });
+  });
+
+  it("does not take a worker's minted id for its name", async () => {
+    const h = await harness({
+      hostName: LAPTOP,
+      answers: [...ANSWERS, ""],
+      state: {
+        mintedId: MAD_MAX_ID,
+        others: [workerResource(true, { host_id: LAPTOP, display_name: "studio" })],
+      },
+    });
+
+    const { code, stderr } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Ok);
+    // The worker whose host id is this host's name is named studio: the host's name is free.
+    expect(stderr).not.toContain("already has a worker named");
+    expect(h.questions[4]).toContain(`│  ${LAPTOP}\n`);
+  });
+
+  it("--label a listed worker's display_name holds, in any case, stops with WORKER_NAME_TAKEN", async () => {
+    const h = await harness({
+      hostName: MACHINE,
+      answers: ANSWERS,
+      state: {
+        mintedId: MAD_MAX_ID,
+        others: [workerResource(true, { host_id: OTHER_ID, display_name: "Mad-Max" })],
+      },
+    });
+
+    const { code, body } = await h.run("setup", "--url", SERVER, "--label", "mad-max");
+
+    expect(code).toBe(ExitCode.Refused);
+    expect(body.error).toMatchObject({
+      code: "WORKER_NAME_TAKEN",
+      details: { display_name: "mad-max", suggested_name: "mad-max-2" },
+    });
+    expect(enrollments(h)).toHaveLength(0);
+  });
+
+  it("this install's live worker is named by its display_name when setup asks to replace it", async () => {
+    const mine = workerResource(true, {
+      host_id: OTHER_ID,
+      display_name: "build-box",
+      install_id: INSTALL_ID,
+    });
+    const h = await harness({
+      hostName: MACHINE,
+      answers: [...ANSWERS, "n", ""],
+      state: { mintedId: MAD_MAX_ID, others: [mine] },
+    });
+    await writeInstallId(h.ctx.homeDir, INSTALL_ID);
+
+    const { code, body, stderr } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.prompts[4]).toMatchObject({ kind: "confirm", message: "Replace build-box?" });
+    expect(h.questions[5]).toContain("│  build-box-2\n");
+    expect(enrollments(h)[0]!.body).toEqual({ label: "build-box-2", install_id: INSTALL_ID });
   });
 });

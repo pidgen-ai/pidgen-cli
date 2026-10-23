@@ -17,7 +17,8 @@ When a command fails, it names an error code, a message, and the details: `error
 | Problem | What to do |
 |---|---|
 | `AUTH_REQUIRED`, `TOKEN_INVALID`, or `TOKEN_EXPIRED` | Run `pidgen auth login` and approve access for the intended Account. For automation, check or replace its Personal API Token. |
-| Login code expires or approval is denied | Run `pidgen auth login` again and approve the new code before it expires. |
+| Login code expires or approval is denied | Run `pidgen auth login` again and approve the new code before it expires. In `pidgen setup`, choose *Wait again with a new code*. |
+| Setup seems stuck waiting for approval (`pidgen setup`) | Setup checks for your approval at the server's interval and shows `checked <n>s ago` on its live line; once you approve, it signs in within one interval. Press Enter to open the link in your browser (or to check at once), n for a new code, or Esc for other options, such as signing in with a token instead. If the live line says `Can't reach <server>; still trying`, check your network. The setup log (`~/.pidgen/logs/setup-<time>.log`) records each check with its time and outcome, and `poll delayed <n>s` if a check was held up. |
 | You see the wrong Account's work | Run `pidgen auth status` and `pidgen account list`. Switch with `pidgen account use ACC-EXAMPLE`, replacing the placeholder. Sign in for that Account first if it has no stored credential. |
 | Projects or tickets are missing | Confirm the Account, then ask its administrator about project access. Empty lists are successful results. |
 | `API_VERSION_UNSUPPORTED` | Update the CLI with `npm install -g pidgen@alpha --ignore-scripts`, then run `pidgen auth status --check`. Refresh your installed skills too. |
@@ -44,7 +45,7 @@ See [Install agent skills](install-skills.md) for the complete path.
 |---|---|
 | Setup failed and the screen shows too little | The failed task's last ten lines are on screen; everything setup ran, with its full output and the error in full, is in the setup log it names, `~/.pidgen/logs/setup-<start time>.log`. Run `pidgen setup --verbose` to watch the commands as they run. |
 | `TERMINAL_REQUIRED` | Run `pidgen setup` in a terminal, or use the [individual commands](install-worker.md#use-separate-commands-for-automation). Flags do not make setup headless. |
-| `SETUP_CANCELLED` | Ctrl-C at one of setup's questions stopped it, or you answered no to the install question (the worker wasn't installed) or to enrolling a removed worker again. Everything it finished is kept: run `pidgen setup` again to continue, and accept the licence (or give `--accept-licence`) to install the worker. |
+| `SETUP_CANCELLED` | Ctrl-C at one of setup's questions, during a task or while it waited for you to sign in (or SIGTERM) stopped it, you chose *Quit setup*, or you answered no to the install question (the worker wasn't installed) or to enrolling a removed worker again. Everything it finished is kept: run `pidgen setup` again to continue, and accept the licence (or give `--accept-licence`) to install the worker. |
 | `RUNTIME_UNAVAILABLE` | Install the runtime named in `error.details.install`. Guided setup requires `uv` on `PATH`. |
 | `pidgen doctor` fails | Inspect `error.details.checks` and each check's `fix`. Before sign-in, the credential check can fail; before installation, the worker check may warn. Resolve the runtime, release, and harness requirements before installing. |
 | `RELEASE_UNSUPPORTED` | Inspect the accepted series in `error.details`. The server needs a supported, published release; selecting another version must stay within those series. When `error.details.pre_release` names a version, the series has only pre-releases: install it explicitly with `--version <pre_release>`. |
@@ -96,7 +97,7 @@ Run `pidgen setup` again. It sees the worker removed from the Account and asks
 `Enroll it again?`. Yes runs `pidgen worker enroll --replace-credential`, which moves `worker.env`
 aside to `worker.env.replaced-<UTC timestamp>` (kept, mode 0600; the setup log names it) before
 creating the enrollment, so the worker redeems the new enrollment, starts with its new credential
-and connects. Setup ends with `Worker running and connected to Pidgen`.
+and connects. Setup ends with `Worker running and connected to Pidgen as <name> (<id>)`.
 
 Without setup, run `pidgen worker enroll --replace-credential`, then `pidgen worker start --detach`.
 With a CLI older than the flag, move the file aside yourself:

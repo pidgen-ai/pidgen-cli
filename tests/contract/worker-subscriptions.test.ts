@@ -9,6 +9,9 @@ import { useMockServer } from "../support/mock-server.js";
 
 const server = useMockServer();
 
+/** A worker id as the App Service mints it: the command sends it with no lookup by name. */
+const WORKER = "wkr_vyemfavnwd4fa7v3uzpr4hq6ia";
+
 interface Body {
   ok: boolean;
   data: Record<string, unknown> | null;
@@ -38,10 +41,7 @@ describe("pidgen worker subscriptions against the Prism mock of the committed do
   it("reads the documented subscriptions route and passes its data through", async () => {
     const sent: { method: string; url: string }[] = [];
     const ctx = await context(sent);
-    const code = await runCli(
-      ["--timeout", "10", "worker", "subscriptions", "worker-host.example.com"],
-      ctx,
-    );
+    const code = await runCli(["--timeout", "10", "worker", "subscriptions", WORKER], ctx);
     const body = envelope(ctx) as unknown as Body;
 
     expect(code).toBe(ExitCode.Ok);
@@ -54,7 +54,7 @@ describe("pidgen worker subscriptions against the Prism mock of the committed do
     expect(sent).toEqual([
       {
         method: "GET",
-        url: `${server().url}/api/v1/workers/worker-host.example.com/subscriptions`,
+        url: `${server().url}/api/v1/workers/${WORKER}/subscriptions`,
       },
     ]);
   });
@@ -72,7 +72,7 @@ describe("pidgen worker subscriptions against the Prism mock of the committed do
     expect(harness).toBeDefined();
 
     const code = await runCli(
-      ["--timeout", "10", "worker", "subscriptions", "use", "w", harness.harness, "claude-a"],
+      ["--timeout", "10", "worker", "subscriptions", "use", WORKER, harness.harness, "claude-a"],
       ctx,
     );
     const body = envelope(ctx) as unknown as Body;

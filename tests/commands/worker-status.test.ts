@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { runCli } from "../../src/cli.js";
@@ -207,6 +207,8 @@ describe("pidgen worker status", () => {
         running: true,
         server: {
           host_id: HOST,
+          display_name: null,
+          selected_by: "host_name",
           enrolled: true,
           worker: worker(HOST),
           service_protocol: "2.3",
@@ -342,6 +344,129 @@ describe("pidgen worker status", () => {
         server: null,
         warnings: [{ code: "SERVER_RESPONSE_INVALID" }],
       });
+    });
+  });
+
+  // AC-e08e6c67ad9b, AC-62387f1bd71c: this machine's worker is the one it authenticates as.
+  describe("this machine's worker", () => {
+    const MAD_MAX_ID = "wkr_examplexxxxxxxxxxxxxxxxxx";
+    const MACHINE = "dev-laptop";
+    const INSTALL_ID = "0123456789abcdef0123456789abcdef";
+    const madMax = (overrides: Record<string, unknown> = {}) =>
+      worker(MAD_MAX_ID, { display_name: "Mad-Max", ...overrides });
+
+    async function writeHome(ctx: TestContext, files: Record<string, string>) {
+      const home = join(ctx.homeDir, ".pidgen");
+      await mkdir(home, { recursive: true });
+      for (const [name, text] of Object.entries(files)) await writeFile(join(home, name), text);
+    }
+
+    function workerEnv(server: string, hostId: string): string {
+      return [
+        `PIDGEN_SERVICE_URL=${server}`,
+        "PIDGEN_NODE_TOKEN=pidgen_node_fake_credential",
+        `PIDGEN_LOCALITY_DOMAIN=${hostId}`,
+        "",
+      ].join("\n");
+    }
+
+    it("finds Mad-Max on dev-laptop by the id worker.env names (worker_home)", async () => {
+      const { ctx } = await setup({
+        respond: () =>
+          Promise.resolve(ok(workerList([worker(MACHINE, { display_name: null }), madMax()]))),
+      });
+      ctx.hostName = MACHINE;
+      await writeHome(ctx, { "worker.env": workerEnv(SERVER, MAD_MAX_ID) });
+
+      const { code, body } = await status(ctx);
+
+      expect(code).toBe(ExitCode.Ok);
+      expect(body.data?.["server"]).toMatchObject({
+        host_id: MAD_MAX_ID,
+        display_name: "Mad-Max",
+        selected_by: "worker_home",
+        enrolled: true,
+        worker: { host_id: MAD_MAX_ID, display_name: "Mad-Max" },
+      });
+    });
+
+    it("ignores a worker.env credential for another server", async () => {
+      const { ctx } = await setup({
+        respond: () => Promise.resolve(ok(workerList([worker(HOST), madMax()]))),
+      });
+      await writeHome(ctx, { "worker.env": workerEnv("https://other.example.com", MAD_MAX_ID) });
+
+      const { body } = await status(ctx);
+
+      expect(body.data?.["server"]).toMatchObject({ host_id: HOST, selected_by: "host_name" });
+    });
+
+    it("without a credential in the worker home, this install's newest worker (install_id)", async () => {
+      const older = worker("wkr_olderxxxxxxxxxxxxxxxxxxxx", {
+        display_name: "Old-Max",
+        install_id: INSTALL_ID,
+        created_at: "2026-09-01T08:00:00Z",
+      });
+      const { ctx } = await setup({
+        respond: () =>
+          Promise.resolve(
+            ok(workerList([older, madMax({ install_id: INSTALL_ID }), worker(HOST)])),
+          ),
+      });
+      await writeHome(ctx, { "install-id": `${INSTALL_ID}\n` });
+
+      const { body } = await status(ctx);
+
+      expect(body.data?.["server"]).toMatchObject({
+        host_id: MAD_MAX_ID,
+        display_name: "Mad-Max",
+        selected_by: "install_id",
+        enrolled: true,
+      });
+    });
+
+    it("--host takes a worker's name, case-insensitively, and reports selected_by option", async () => {
+      const { ctx } = await setup({
+        respond: () => Promise.resolve(ok(workerList([worker(HOST), madMax()]))),
+      });
+
+      const { body } = await status(ctx, ["--host", "mad-max"]);
+
+      expect(body.data?.["server"]).toMatchObject({
+        host_id: MAD_MAX_ID,
+        display_name: "Mad-Max",
+        selected_by: "option",
+        enrolled: true,
+      });
+    });
+
+    it("shows the worker as its name with its id, with no Host id label", async () => {
+      const { ctx } = await setup({
+        installed: "1.0.0",
+        respond: () => Promise.resolve(ok(workerList([madMax()]))),
+      });
+      await writeHome(ctx, { "worker.env": workerEnv(SERVER, MAD_MAX_ID) });
+      ctx.io.stdoutIsTTY = true;
+
+      expect(await runCli(["worker", "status"], ctx)).toBe(ExitCode.Ok);
+      const human = ctx.out.join("");
+
+      expect(human).toContain(`Worker: Mad-Max (${MAD_MAX_ID})`);
+      expect(human).not.toContain("Host id");
+    });
+
+    it("shows a worker enrolled before names by its host id", async () => {
+      const { ctx } = await setup({
+        installed: "1.0.0",
+        respond: () => Promise.resolve(ok(workerList([worker(HOST, { display_name: null })]))),
+      });
+      ctx.io.stdoutIsTTY = true;
+
+      expect(await runCli(["worker", "status"], ctx)).toBe(ExitCode.Ok);
+      const human = ctx.out.join("");
+
+      expect(human).toContain(`Worker: ${HOST}\n`);
+      expect(human).not.toContain("Host id");
     });
   });
 
@@ -483,6 +608,8 @@ describe("pidgen worker status", () => {
         running: true,
         server: {
           host_id: HOST,
+          display_name: null,
+          selected_by: "host_name",
           enrolled: false,
           worker: null,
           service_protocol: "2.3",
@@ -706,6 +833,8 @@ describe("pidgen worker status", () => {
         running: false,
         server: {
           host_id: HOST,
+          display_name: null,
+          selected_by: "host_name",
           enrolled: true,
           worker: worker(HOST),
           service_protocol: "2.3",
@@ -832,6 +961,33 @@ describe("pidgen worker status", () => {
       expect(code).toBe(ExitCode.Usage);
       expect(body).toMatchObject({ ok: false, error: { code: "UNSUPPORTED_PLATFORM" } });
       expect(calls).toHaveLength(0);
+    });
+  });
+
+  // AC-f29945f0cdbc: --host takes a worker's name or id, and the docs say how status finds it.
+  describe("help and docs", () => {
+    const doc = (name: string) => readFile(new URL(`../../${name}`, import.meta.url), "utf8");
+
+    it("--host's help says it takes a worker's name or id", async () => {
+      const ctx = await testContext();
+      expect(await runCli(["worker", "status", "--help"], ctx)).toBe(ExitCode.Ok);
+      const help = ctx.out.join("").replace(/\s+/g, " ");
+      expect(help).toContain("--host <worker>");
+      expect(help).toContain("a worker's name or id");
+    });
+
+    it("docs describe how status finds this machine's worker, and the CHANGELOG notes the fix", async () => {
+      const commands = (await doc("docs/commands.md")).replace(/\s+/g, " ");
+      expect(commands).toContain("`pidgen worker status [--host <worker>]`");
+      expect(commands).toContain("by its name or id");
+      const workers = (await doc("docs/workers.md")).replace(/\s+/g, " ");
+      for (const rule of ["option", "worker_home", "install_id", "host_name"]) {
+        expect(workers).toContain(`| \`${rule}\` |`);
+      }
+      expect(workers).toContain("`Worker: Mad-Max (wkr_…)`");
+      const changelog = (await doc("CHANGELOG.md")).split("## 0.1.0-alpha.5")[0]!;
+      expect(changelog).toContain("selected_by");
+      expect(changelog).toContain("WORKER_NOT_CONNECTED");
     });
   });
 });

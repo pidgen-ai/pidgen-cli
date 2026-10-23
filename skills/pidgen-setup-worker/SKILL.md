@@ -551,8 +551,8 @@ pidgen-worker subscriptions use claude claude-second
 ```
 
 From anywhere, through the Pidgen server (needs an Owner or Administrator and the Account's
-`multiple_subscriptions` entitlement). The worker is its host id, as `pidgen worker status --format json` reports
-it in `data.server.host_id`:
+`multiple_subscriptions` entitlement). The worker is its name or its id, as `pidgen worker status --format json`
+reports them in `data.server.display_name` and `data.server.host_id`:
 
 ```console
 pidgen worker subscriptions build-box-1 --format json
