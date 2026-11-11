@@ -2546,3 +2546,40 @@ describe("pidgen ticket actions explains a failed step", () => {
     expect(ctx.err).toEqual([]);
   });
 });
+
+// z5-moments / z5-json: a refusal's message names its moment in the machine's zone
+// (TZ=America/Los_Angeles for every test, vitest.config.ts); JSON keeps the API's text and moments.
+describe("a refused ticket act writes its moments in the machine's time zone", () => {
+  const MESSAGE = "The worker is offline since Sun 25 Oct at 2:03 PM UTC.";
+  const MOMENTS = [{ text: "Sun 25 Oct at 2:03 PM UTC", at: "2026-10-25T14:03:00Z" }];
+  const routes = () => ({
+    [LIST]: [ok(ACTIONS)],
+    [PREVIEW]: [ok(preview("retry_run", runTarget()))],
+    [EXECUTE]: [refusal(409, "WORKER_OFFLINE", MESSAGE, { moments: MOMENTS })],
+  });
+
+  it("human output replaces the moment in the message and shows no moments", async () => {
+    const { ctx } = await setup(routes());
+    ctx.now = () => Date.parse("2026-10-25T00:00:00Z");
+    ctx.io.stdoutColumns = 200;
+    const argv = ["ticket", "act", REF, "retry_run", "--apply", "--format", "table"];
+    expect(await runCli(argv, ctx)).toBe(ExitCode.Refused);
+    const output = ctx.out.join("");
+    expect(output).toContain(
+      "error WORKER_OFFLINE: The worker is offline since Sun 25 Oct at 7:03 AM PDT.",
+    );
+    expect(output).not.toContain("2:03 PM UTC");
+    expect(output).not.toMatch(/moments/i);
+  });
+
+  it("--format json keeps the API's message and moments", async () => {
+    const { ctx } = await setup(routes());
+    const { code, body } = await cli(ctx, "ticket", "act", REF, "retry_run", "--apply");
+    expect(code).toBe(ExitCode.Refused);
+    expect(body.error).toEqual({
+      code: "WORKER_OFFLINE",
+      message: MESSAGE,
+      details: { status: 409, request_id: "req-example", moments: MOMENTS },
+    });
+  });
+});

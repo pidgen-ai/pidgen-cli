@@ -142,6 +142,7 @@ function emit(
 function presentationContext(ctx: RunContext, command?: readonly string[]): PresentationContext {
   return {
     ...(command ? { command } : {}),
+    now: ctx.now(),
     terminal: {
       isTTY: ctx.io.stdoutIsTTY,
       ...(ctx.io.stdoutColumns ? { columns: ctx.io.stdoutColumns } : {}),

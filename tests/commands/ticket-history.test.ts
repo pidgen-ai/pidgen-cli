@@ -536,3 +536,46 @@ it.each([40, 80, 120])("resource presentation: history at %s columns", async (co
   expect(ctx.err).toEqual(previousErrors);
   expect(json.ok).toBe(true);
 });
+
+// z5-moments / z5-instants / z5-json: human output writes the server's moments and instants in the
+// machine's zone (TZ=America/Los_Angeles for every test, vitest.config.ts); JSON keeps the API's.
+describe("pidgen ticket history writes times in the machine's time zone", () => {
+  const MOMENTS_HISTORY = {
+    ticket_id: "TKT-example-7",
+    entries: [
+      {
+        ...entry(
+          1,
+          "observation",
+          "observations",
+          "Worker offline since Sun 25 Oct at 2:03 PM UTC",
+        ),
+        occurred_at: "2026-10-25T14:03:00Z",
+        moments: [{ text: "Sun 25 Oct at 2:03 PM UTC", at: "2026-10-25T14:03:00Z" }],
+      },
+    ],
+    next_after: null,
+  };
+  const respond = () => ok(MOMENTS_HISTORY);
+
+  it("human output replaces the moment and the instant, and shows no moments", async () => {
+    const { ctx } = await setup({ respond });
+    ctx.now = () => Date.parse("2026-10-25T00:00:00Z");
+    ctx.io.stdoutColumns = 200;
+    expect(await runCli(["ticket", "history", "ALPHA-7", "--format", "table"], ctx)).toBe(
+      ExitCode.Ok,
+    );
+    const output = ctx.out.join("");
+    expect(output).toContain("Worker offline since Sun 25 Oct at 7:03 AM PDT");
+    expect(output).not.toContain("2:03 PM UTC");
+    expect(output).not.toContain("2026-10-25T14:03:00Z");
+    expect(output).not.toMatch(/moments/i);
+  });
+
+  it("--format json keeps the API's instants and moments", async () => {
+    const { ctx } = await setup({ respond });
+    const { code, body } = await run(ctx, "ticket", "history", "ALPHA-7", "--format", "json");
+    expect(code).toBe(ExitCode.Ok);
+    expect(body.data).toEqual(MOMENTS_HISTORY);
+  });
+});

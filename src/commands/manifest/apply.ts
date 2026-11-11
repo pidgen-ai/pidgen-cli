@@ -5,6 +5,7 @@ import { inputInvalid, readInput, validateBody, type InputIssue } from "../../co
 import { addPreviewApplyOptions, previewApplyOptionsFrom } from "../../core/preview-options.js";
 import { runPreviewApply, serverPreviewApply, type Preview } from "../../core/preview.js";
 import type { CommandSpec } from "../../core/registry.js";
+import { reportingReferenceRefusal } from "../../core/references.js";
 import { openSession } from "../../core/session.js";
 import { MANIFEST_DOCUMENT, MANIFEST_PREVIEW_ROUTE } from "./contract.js";
 
@@ -30,8 +31,9 @@ interface ManifestPreview extends Preview {
  * finding grouped by ref with `committable`, `promotable` and the digest. A manifest that is not
  * committable exits 5 (`MANIFEST_NOT_COMMITTABLE`), and nothing is committed. With `--apply` it
  * then commits the same manifest (`POST /ticket-manifests`) with the preview's digest (or
- * `--digest`) and an idempotency key, and prints each ref's ticket key. See docs/commands.md,
- * "manifest apply".
+ * `--digest`) and an idempotency key, and prints each ref's ticket key. The root and each child may
+ * name `references`; a reference outside the ticket's own domains is `REFERENCE_OUTSIDE_DOMAIN`,
+ * reported with the Project's key and the fix. See docs/commands.md, "manifest apply".
  */
 export const manifestApply: CommandSpec = {
   path: ["manifest", "apply"],
@@ -55,7 +57,7 @@ export const manifestApply: CommandSpec = {
     let last: ApiResponse | null = null;
     const api: Pick<ApiClient, "request"> = {
       async request(request) {
-        const response = await session.client.request(request);
+        const response = await reportingReferenceRefusal(() => session.client.request(request));
         last = response;
         return response as never;
       },

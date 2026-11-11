@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { runCli } from "../../src/cli.js";
 import { ExitCode } from "../../src/core/exit-codes.js";
@@ -16,11 +18,11 @@ interface Body {
   meta: Record<string, unknown>;
 }
 
-async function setup() {
+async function setup(mock: () => { url: string } = server) {
   const urls: string[] = [];
   const ctx = await testContext({
     env: {
-      PIDGEN_API_URL: server().url,
+      PIDGEN_API_URL: mock().url,
       PIDGEN_TOKEN: "pidgen_pat_fake_contract_token",
       PIDGEN_ACCOUNT: "ACC-EXAMPLE",
     },
@@ -287,5 +289,38 @@ describe("read commands against the Prism mock of the committed document", () =>
       expect.objectContaining({ node_id: expect.any(String), attempts: expect.any(Array) }),
     );
     expect(urls).toEqual([`${server().url}/api/v1/runs/WFR-1/nodes/implement`]);
+  });
+});
+
+// cli-contract: `pidgen ticket types` against Prism mocking the pending workflow types fragment
+// (contracts/pending/workflow-types.json), which adds when_to_use and workflow_title to each type.
+// Prism answers with the fragment's example; the command validates it against the fragment.
+const WORKFLOW_TYPES = fileURLToPath(
+  new URL("../../contracts/pending/workflow-types.json", import.meta.url),
+);
+
+describe("pidgen ticket types against the Prism mock of the pending workflow types fragment", () => {
+  const pending = useMockServer(WORKFLOW_TYPES);
+
+  it("pidgen ticket types returns each type's When to use and workflow title as the fragment states them", async () => {
+    const fragment = JSON.parse(readFileSync(WORKFLOW_TYPES, "utf8")) as {
+      paths: Record<
+        string,
+        { get: { responses: { 200: { content: { "application/json": { example: unknown } } } } } }
+      >;
+    };
+    const example = fragment.paths["/api/v1/workflow-types"]!.get.responses[200].content[
+      "application/json"
+    ].example as { data: Record<string, unknown>[] };
+    const { ctx, urls } = await setup(pending);
+    const { code, body } = await run(ctx, "ticket", "types");
+    expect(code).toBe(ExitCode.Ok);
+    expect(body).toMatchObject({ ok: true, error: null, meta: { account: "ACC-EXAMPLE" } });
+    expect(body.data).toEqual(example.data);
+    const types = body.data as Record<string, unknown>[];
+    expect(types.some((type) => typeof type["when_to_use"] === "string")).toBe(true);
+    expect(types.some((type) => type["when_to_use"] === null)).toBe(true);
+    for (const type of types) expect(type["workflow_title"]).toEqual(expect.any(String));
+    expect(urls).toEqual([`${pending().url}/api/v1/workflow-types`]);
   });
 });

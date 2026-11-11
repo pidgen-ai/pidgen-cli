@@ -62,6 +62,51 @@ request filed: its `error.details` name it and the files already uploaded, so do
 `REQUEST_SOURCE_PAUSED` means nothing was filed and the source this credential submits through is
 paused; `REQUEST_RATE_LIMITED` means wait and submit again. Both exit 5.
 
+## Reference another Project, carry its interface, or file a domain Request
+
+Work often touches a Project other than the one it is filed in. Choose by what the other Project
+is to the work:
+
+- A **reference** when the ticket's refinement must be reading another Project: its code, its
+  docs or its conventions, to write a sound plan. Name it in the ticket's `references`, a list
+  of Projects by id or ticket-key prefix. A reference is only read, by the ticket's reading runs
+  (refinement and queries); implementation never gets a checkout of it, so a reference never
+  carries what the implementer must build against. Reference only Projects in the ticket's own
+  domains: a Project outside them is refused with `REFERENCE_OUTSIDE_DOMAIN`, whose message names
+  the Project's key, and nothing is filed. Remove that Project from `references`, then preview
+  again. A Project in no domain may reference any Project of its Account.
+- A **contract or attachment** when the work relies on another Project's interface: the
+  operations, fields and errors it calls. Attach the spec file as a `context_artifacts` item, state
+  the interface in the ticket's scope, or link a contract (the `pidgen-manage-contracts` skill).
+  This is what the implementer sees; a reference alone does not reach it.
+- A **domain-level Request** when the work itself spans Projects and nobody has split it yet.
+  File it in the domain with `pidgen request submit --target domain:<domain> --format json`, and its triage
+  decomposes it into work for each Project (see "File a request rather than a ticket"):
+
+```console
+pidgen request submit --kind feature --title "Show payment status everywhere" --body "The web app and the mobile app both show a payment's status." --target domain:PAY --format json
+```
+
+A ticket that reads a sibling Project while refining names it in its manifest's root:
+
+```yaml
+schema_version: pidgen.ticket-manifest.v1
+project_id: EXAMPLE
+epic_id: null
+promote: false
+root:
+  ref: root
+  title: Reuse the shared retry policy in the export job
+  objective: The export job retries with the same backoff as the shared client library.
+  workflow_type: implementation
+  references: [CLIENT]
+  scope_boundaries: 'In: the export job and its tests. Out: the client library itself.'
+  acceptance_criteria:
+    - statement: An export retried after a timeout waits as the shared policy does.
+children: []
+edges: []
+```
+
 ## Resolve the Project and workflow
 
 ```console
@@ -72,10 +117,30 @@ pidgen ticket types --format json
 ```
 
 Read Project IDs or ticket-key prefixes from `data`; use the user's intended Project explicitly.
-Use a registered workflow type key from `pidgen ticket types --format json`, such as `implementation`.
-An Epic is optional: a ticket of kind `epic` in the same Project, by key (such as `EXAMPLE-40`)
+Use a registered workflow type key from `pidgen ticket types --format json` as the ticket's
+`workflow_type`; "Choose the ticket's type" says which. An Epic is optional: a ticket of kind `epic` in the same Project, by key (such as `EXAMPLE-40`)
 or id. The ticket's `parent_ticket_id` names it once filed. Use `pidgen-manage-epics` to create one.
 If the Project is missing, report the missing Project rather than inventing an unsupported command.
+
+## Choose the ticket's type
+
+Choose the type from the same words a person reads in Pidgen. Read the types:
+
+```console
+pidgen ticket types --format json
+```
+
+Each item of `data` is a type: its `key` is what the ticket's `workflow_type` names, `label` its
+name, `workflow_title` the workflow it runs, and `when_to_use` the text that says what work it is
+for. Read every type's `when_to_use` and choose the type whose When to use fits the work. Tell
+the person which type you chose and why it fits, in one line, for example: "Type `bug`: the export
+used to keep every row and now drops the last one, which is what Bug's When to use describes."
+
+Never choose a type whose `when_to_use` is null or empty: nothing says what it is for. When no
+type's When to use fits, use the type the person stated; when they stated none, use the Account's
+default: the type whose `default` is true in `pidgen ticket types --format json`. Say so in the
+same one line, for example: "Type `task`: no type's When to use fits and you stated none, so the
+Account's default." Use only `pidgen` commands to read the types.
 
 ## Keep the whole completion contract free of human prerequisites
 

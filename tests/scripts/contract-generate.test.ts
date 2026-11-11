@@ -32,6 +32,7 @@ const PENDING_ROUTES: Record<string, readonly string[]> = {
     "POST /api/v1/projects/{project_ref}/readiness/rehearse",
     "POST /api/v1/projects/{project_ref}/readiness/doctor",
   ],
+  "workflow-types": ["GET /api/v1/workflow-types"],
 };
 
 /** The published schemas each fragment copies verbatim from contracts/openapi.json. */
@@ -45,6 +46,7 @@ const COPIED_SCHEMAS: Record<string, readonly string[]> = {
     "WorkerEula",
   ],
   "project-readiness": ["PublicError", "PublicErrorDetail"],
+  "workflow-types": ["WorkflowTypeListResponse", "PublicError", "PublicErrorDetail"],
 };
 const FRAGMENTS = Object.keys(PENDING_ROUTES);
 
@@ -54,6 +56,7 @@ const FRAGMENTS = Object.keys(PENDING_ROUTES);
  */
 const EXTENDED_ROUTES: Record<string, readonly string[]> = {
   "worker-enrollments": ["GET /api/v1/workers", "POST /api/v1/workers/enrollments"],
+  "workflow-types": ["GET /api/v1/workflow-types"],
 };
 
 /**
@@ -67,6 +70,7 @@ const EXTENDED_SCHEMAS: Record<string, Record<string, readonly string[]>> = {
     CreatedEnrollment: ["install_id"],
     WorkerResource: ["install_id"],
   },
+  "workflow-types": { WorkflowTypeResource: ["when_to_use", "workflow_title"] },
 };
 
 /**
@@ -604,6 +608,64 @@ describe("npm run contract:generate", () => {
         expect(schemaIssues(pending as never, json.schema, example), route).toEqual([]);
       }
     }
+  });
+
+  // cli-contract: the workflow types fragment adds When to use and the workflow's title, nothing else.
+  it("the workflow types fragment adds when_to_use and workflow_title to each type, and its example matches", async () => {
+    const pending = (await fragment("workflow-types")) as Fragment & {
+      security?: unknown;
+      components: { securitySchemes?: unknown };
+    };
+    const published = JSON.parse(await readFile(DOCUMENT, "utf8")) as Fragment;
+    expect(pending.info.title).toBe("Pidgen Public API: pending workflow type routes");
+    expect(pending.security).toEqual([{ bearerAuth: [] }]);
+    expect(pending.components.securitySchemes).toHaveProperty("bearerAuth");
+    const type = pending.components.schemas["WorkflowTypeResource"] as {
+      properties: Record<string, unknown>;
+      required: string[];
+    };
+    // when_to_use: a string of at most 600 characters, or null; workflow_title: a string.
+    expect(type.properties["when_to_use"]).toMatchObject({
+      anyOf: [{ type: "string", maxLength: 600 }, { type: "null" }],
+    });
+    expect(type.properties["workflow_title"]).toMatchObject({ type: "string" });
+    // Neither is required, so a server that does not send them yet still matches.
+    expect(type.required).not.toContain("when_to_use");
+    expect(type.required).not.toContain("workflow_title");
+    // The route is held as published: same operation id, parameters and response schemas.
+    const ours = pending.paths["/api/v1/workflow-types"]!["get"]!;
+    const theirs = published.paths["/api/v1/workflow-types"]!["get"]!;
+    expect(ours["operationId"]).toBe(theirs["operationId"]);
+    expect(ours["parameters"]).toEqual(theirs["parameters"]);
+    const schemas = (responses: unknown) =>
+      Object.fromEntries(
+        Object.entries(
+          responses as Record<string, { content?: Record<string, { schema?: unknown }> }>,
+        ).map(([status, response]) => [status, response.content?.["application/json"]?.schema]),
+      );
+    expect(schemas(ours["responses"])).toEqual(schemas(theirs["responses"]));
+    // The example matches the fragment, with a type that has When to use and one that has none.
+    const { schemaIssues } = await import("../../src/core/input.js");
+    const json = (
+      ours["responses"] as Record<
+        string,
+        {
+          content: Record<
+            string,
+            { example: { data: Record<string, unknown>[] }; schema: unknown }
+          >;
+        }
+      >
+    )["200"]!.content["application/json"]!;
+    expect(schemaIssues(pending as never, json.schema, json.example)).toEqual([]);
+    expect(json.example.data.map((item) => item["when_to_use"] === null)).toEqual([false, true]);
+    // A type as a server from before the fields sends it still matches.
+    const legacy = json.example.data.map(
+      ({ when_to_use: _w, workflow_title: _t, ...rest }) => rest,
+    );
+    expect(schemaIssues(pending as never, json.schema, { ...json.example, data: legacy })).toEqual(
+      [],
+    );
   });
 
   // AC-9f7dca84dddc: the doctor route answers the report the command renders, its examples the

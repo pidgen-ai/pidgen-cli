@@ -246,6 +246,29 @@ describe("skills file work as one manifest", () => {
         expect(manifest["edges"] ?? []).toEqual([]);
       }
     });
+
+    // cli-skill: the type is chosen from the When to use pidgen ticket types states.
+    it("chooses the ticket's type from pidgen ticket types by its When to use, saying why in one line", () => {
+      const choosing = section(raw, /choose the ticket's type/i);
+      expect(choosing).toMatch(/\bpidgen ticket types --format json\b/);
+      const text = prose(choosing);
+      expect(text).toMatch(/`when_to_use`/);
+      expect(text).toMatch(/whose When to use fits the work/i);
+      expect(text).toMatch(/why[^.]*in one line|one line[^.]*why/i);
+      // Never a type without When to use, and a fallback when none fits.
+      expect(text).toMatch(/never choose a type (?:whose `when_to_use` is null|without When to use)/i);
+      expect(text).toMatch(/when no type's When to use fits/i);
+      expect(text).toMatch(/type the person stated/i);
+      // The fallback is the Account's default type, read from pidgen ticket types, never a fixed key.
+      expect(text).toMatch(/type whose `default` is true in `pidgen ticket types --format json`/i);
+      expect(text).not.toMatch(/`implementation`/);
+      // Only pidgen commands: every command the section shows is a pidgen command.
+      const commands = [...choosing.matchAll(/```console\n([\s\S]*?)\n```/g)].flatMap((match) =>
+        match[1]!.split("\n"),
+      );
+      expect(commands.length).toBeGreaterThan(0);
+      for (const command of commands) expect(command).toMatch(/^pidgen /);
+    });
   });
 
   describe("pidgen-decompose-plan", () => {
@@ -1246,5 +1269,168 @@ describe("pidgen-setup-worker and docs/install-worker.md describe model restrict
   // AC-3e7e32030d0f: the install guide matches the skill and mentions no vision table either.
   it("docs/install-worker.md names no vision table, model_modalities or fallback_model", () => {
     expect(install).not.toMatch(/\bvision\b|model_modalities|fallback_model/i);
+  });
+});
+
+/**
+ * The pidgen-implement-reviewed workflow runs the implementer in review rounds: its `implement`
+ * node is a loop group whose output is the loop envelope (`exhausted`, `iterations`, `final`), and
+ * `final` is the review gate's result: `verdict`, `issues` and the implementer's own `complete`,
+ * `summary`, `remaining`, `criteria` and `handoff` for that round. pidgen-retry-run says how to read
+ * it and that a run failed by exhausting its rounds is failed on its merits; pidgen-query-tickets
+ * describes both shapes of the implement node's output.
+ */
+describe("the skills read an implement node that runs review rounds", () => {
+  const root = new URL("../../", import.meta.url).pathname;
+  const read = (name: string) => readFileSync(join(REPO_SKILLS_DIR, name, "SKILL.md"), "utf8");
+  const prose = (raw: string) => raw.replace(/[ \t]*\n[ \t]*(?=[A-Za-z`(*0-9|])/g, " ");
+  const section = (raw: string, heading: RegExp) =>
+    raw.split(/^(?=#{2,3} )/m).find((part) => heading.test(part.split("\n")[0]!)) ?? "";
+  const GATE = ["`verdict`", "`issues`", "`complete`", "`summary`", "`remaining`", "`criteria`", "`handoff`"];
+
+  describe("pidgen-retry-run", () => {
+    const raw = read("pidgen-retry-run");
+    const text = prose(raw);
+
+    it("reads the review group's final.verdict, final.issues and final.remaining", () => {
+      expect(text).toContain("pidgen-implement-reviewed");
+      for (const field of ["`exhausted`", "`iterations`", "`final.verdict`", "`final.issues`", "`final.remaining`"]) {
+        expect(text, field).toContain(field);
+      }
+      expect(text).toMatch(/`done`[^.]*`issues`|`issues`[^.]*`done`/);
+      for (const severity of ["`blocking`", "`major`", "`minor`"]) expect(text, severity).toContain(severity);
+      expect(text).toMatch(/`final\.remaining`[^.]*implementer/);
+      expect(text).toMatch(/`final\.issues`[^.]*reviewers/);
+    });
+
+    it("treats a run that exhausted its review rounds as failed on its merits", () => {
+      expect(text).toMatch(/exhaust[^.]*review rounds[^.]*on its merits/i);
+      expect(text).toMatch(/unresolved `blocking` issues[^.]*not a reason to retry unchanged/i);
+    });
+  });
+
+  describe("pidgen-query-tickets", () => {
+    const runs = prose(section(read("pidgen-query-tickets"), /Runs and node outputs/));
+
+    it("describes both shapes of the implement node's output with the gate's fields", () => {
+      expect(runs).toMatch(/plain implementer/i);
+      expect(runs).toMatch(/review group|loop group/i);
+      expect(runs).toContain("pidgen-implement-reviewed");
+      for (const field of ["`exhausted`", "`iterations`", "`final`", ...GATE]) expect(runs, field).toContain(field);
+      for (const field of ["`reviewer`", "`severity`", "`path`", "`evidence`"]) expect(runs, field).toContain(field);
+      expect(runs).toMatch(/`final\.remaining`/);
+      expect(runs).toMatch(/`final\.issues`/);
+    });
+  });
+
+  it("CHANGELOG.md notes the skill change in 0.1.0-alpha.7 or newer", () => {
+    const changelog = readFileSync(join(root, "CHANGELOG.md"), "utf8");
+    // The change shipped in 0.1.0-alpha.7: its section and anything newer.
+    const alpha7 = changelog.slice(0, changelog.indexOf("\n## 0.1.0-alpha.6"));
+    const entry = alpha7.split(/^(?=### )/m).find((part) => /review rounds/i.test(part.split("\n")[0]!));
+    expect(entry, "a ### entry in 0.1.0-alpha.7 or newer on review rounds").toBeDefined();
+    for (const term of ["pidgen-retry-run", "pidgen-query-tickets", "final.issues", "final.remaining", "pidgen skills install"]) {
+      expect(entry, term).toContain(term);
+    }
+  });
+});
+
+/**
+ * AC-b6b27628950f: pidgen-file-ticket and pidgen-decompose-plan say when to use each of three
+ * things another Project can be to a ticket: a reference (a Project the ticket's reading runs
+ * read, while refining), a contract or an attachment (the interface the work relies on), or a
+ * domain-level Request (work that spans Projects).
+ */
+describe("the filing skills say when to use a reference, a contract or attachment, or a domain Request", () => {
+  const root = new URL("../../", import.meta.url).pathname;
+  const read = (name: string) => readFileSync(join(REPO_SKILLS_DIR, name, "SKILL.md"), "utf8");
+  const prose = (raw: string) => raw.replace(/[ \t]*\n[ \t]*(?=[A-Za-z`(*0-9])/g, " ");
+  /** The `## `/`### ` section whose heading matches, up to the next heading of any level. */
+  const section = (raw: string, heading: RegExp) => {
+    const parts: string[] = [];
+    let fenced = false;
+    for (const line of raw.split("\n")) {
+      if (line.startsWith("```")) fenced = !fenced;
+      if (!fenced && /^#{2,4} /.test(line)) parts.push("");
+      if (parts.length > 0) parts[parts.length - 1] += `${line}\n`;
+    }
+    return parts.find((part) => heading.test(part.split("\n")[0]!)) ?? "";
+  };
+  const HEADING = /^#{2,3} Reference another Project, carry its interface, or file a domain Request$/;
+
+  describe.each(["pidgen-file-ticket", "pidgen-decompose-plan"])("%s", (name) => {
+    const raw = read(name);
+    const part = section(raw, HEADING);
+    const text = prose(part);
+
+    it("has the section", () => {
+      expect(part, `${name}: a section matching ${HEADING}`).not.toBe("");
+    });
+
+    it("uses a reference when the ticket's refinement must read another Project", () => {
+      expect(text).toMatch(/\*\*reference\*\*/i);
+      expect(text).toMatch(/`references`/);
+      expect(text).toMatch(/read(?:s|ing)? another Project/i);
+      expect(text).toMatch(/refin(?:e|ing|ement)/i);
+      // A reference is read, never built: implementation never checks the other Project out.
+      expect(text).toMatch(/implementation never gets a checkout/i);
+      expect(text).toMatch(/REFERENCE_OUTSIDE_DOMAIN/);
+      expect(text).toMatch(/own domains/i);
+    });
+
+    it("uses a contract or an attachment for an interface", () => {
+      expect(text).toMatch(/\*\*contract or attachment\*\*/i);
+      expect(text).toMatch(/interface/i);
+      expect(text).toMatch(/`context_artifacts`/);
+      expect(text).toMatch(/\bpidgen-manage-contracts\b/);
+    });
+
+    it("uses a domain-level Request for work that spans Projects", () => {
+      expect(text).toMatch(/\*\*domain-level Request\*\*/i);
+      expect(text).toMatch(/spans (?:several )?Projects/i);
+      expect(part).toMatch(/\bpidgen request submit\b[^\n]*--target domain:\S+/);
+    });
+
+    it("shows references in a manifest example that matches the manifest schema", () => {
+      const examples = [...part.matchAll(/```yaml\n([\s\S]*?)\n```/g)].map(
+        (match) => parse(match[1]!) as Record<string, unknown>,
+      );
+      const manifest = examples.find((example) => "root" in example);
+      expect(manifest, "a manifest example").toBeDefined();
+      expect((manifest!["root"] as Record<string, unknown>)["references"]).toEqual(
+        expect.arrayContaining([expect.any(String)]),
+      );
+      expect(() =>
+        validateBody(MANIFEST_DOCUMENT, "post", MANIFEST_PREVIEW_ROUTE, { manifest }),
+      ).not.toThrow();
+    });
+  });
+
+  it("CHANGELOG.md notes the skill change and --reference in 0.1.0-alpha.7 or newer", () => {
+    const changelog = readFileSync(join(root, "CHANGELOG.md"), "utf8");
+    // The change shipped in 0.1.0-alpha.7: its section and anything newer.
+    const alpha7 = changelog.slice(0, changelog.indexOf("\n## 0.1.0-alpha.6"));
+    const entry = alpha7
+      .split(/^(?=### )/m)
+      .find((part) => /reference/i.test(part.split("\n")[0]!));
+    expect(entry, "a ### entry in 0.1.0-alpha.7 or newer on references").toBeDefined();
+    for (const term of [
+      "--reference",
+      "references",
+      "REFERENCE_OUTSIDE_DOMAIN",
+      "pidgen-file-ticket",
+      "pidgen-decompose-plan",
+      "pidgen skills install",
+    ]) {
+      expect(entry, term).toContain(term);
+    }
+  });
+
+  it("docs/skills.md says the filing skills choose between a reference, a contract and a domain Request", () => {
+    const skills = readFileSync(join(root, "docs/skills.md"), "utf8");
+    for (const name of ["pidgen-file-ticket", "pidgen-decompose-plan"]) {
+      const line = skills.split("\n").find((l) => l.includes(`\`${name}\``) && /reference/i.test(l));
+      expect(line, `${name} in docs/skills.md mentions references`).toBeDefined();
+    }
   });
 });

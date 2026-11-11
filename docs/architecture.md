@@ -69,7 +69,7 @@ A human credential beside the worker would let a run act on its own ticket.
    new public route, not a workaround.
 2. **One JSON envelope, stable codes.** JSON mode uses the same envelope and maps failures onto the
    same exit codes. Human mode presents those results without changing execution. Help/version print
-   text; foreground `worker start` inherits the worker's streams and status
+   text; foreground `worker start` and `worker dashboard` inherit the worker's streams and status
    ([Output and exit codes](output-and-exit-codes.md)).
 3. **No surprises for agents.** No prompts outside `pidgen setup`, no implicit acknowledgements, no
    apply without a digest the caller has seen ([Preview and apply](preview-and-apply.md)).

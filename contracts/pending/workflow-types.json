@@ -1,0 +1,261 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Pidgen Public API: pending workflow type routes",
+    "version": "1.0",
+    "description": "When to use on the workflow types: GET /api/v1/workflow-types gains, on each item, `when_to_use` (a string of at most 600 characters, or null when the type states none) and `workflow_title` (the display title of the workflow the type is bound to); no other field changes. The route is published; this fragment holds it with WorkflowTypeResource extended by those two fields, neither required, so a server that does not send them yet still matches. When the server publishes them, they are pulled with contracts/openapi.json and this file is deleted. Every route takes the bearer credential and the X-PIDGEN-Account header like the published routes."
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/api/v1/workflow-types": {
+      "get": {
+        "tags": ["workflow-types"],
+        "summary": "List workflow types",
+        "description": "List every ticket type registered in the Account named by X-PIDGEN-Account, ordered by key, with the workflow it is bound to and how many visible Tickets carry it. A Ticket's workflow_type must be one of these keys. Each type carries its When to use (`when_to_use`, null when it states none) and its workflow's display title (`workflow_title`).",
+        "operationId": "get_workflow_types_api_v1_workflow_types_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowTypeListResponse"
+                },
+                "example": {
+                  "status": "ok",
+                  "data": [
+                    {
+                      "key": "bug",
+                      "label": "Bug",
+                      "workflow_name": "implementation",
+                      "builtin": true,
+                      "default": true,
+                      "ticket_count": 3,
+                      "version": 1,
+                      "when_to_use": "Something that worked, or was specified, no longer does. Name the steps, the expected result and the actual result.",
+                      "workflow_title": "Implementation"
+                    },
+                    {
+                      "key": "research",
+                      "label": "Research",
+                      "workflow_name": "research",
+                      "builtin": false,
+                      "default": false,
+                      "ticket_count": 0,
+                      "version": 2,
+                      "when_to_use": null,
+                      "workflow_title": "Research and report"
+                    }
+                  ],
+                  "meta": null
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "SERVICE_UNAVAILABLE: the App Service is not ready; retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error, in the public error shape.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicError"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "WorkflowTypeListResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status",
+            "description": "Always `ok` on success.",
+            "default": "ok"
+          },
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowTypeResource"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "meta": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meta",
+            "description": "Response metadata (pagination and the like), when the route has any."
+          }
+        },
+        "type": "object",
+        "required": ["status", "data", "meta"],
+        "title": "WorkflowTypeListResponse",
+        "description": "Every ticket type registered in the request's Account, ordered by key."
+      },
+      "WorkflowTypeResource": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key",
+            "description": "The type's key; what a Ticket's workflow_type names."
+          },
+          "label": {
+            "type": "string",
+            "title": "Label",
+            "description": "Display label."
+          },
+          "workflow_name": {
+            "type": "string",
+            "title": "Workflow Name",
+            "description": "The execution workflow the type is bound to."
+          },
+          "builtin": {
+            "type": "boolean",
+            "title": "Builtin",
+            "description": "Whether the type is built in (rebindable, not deletable)."
+          },
+          "default": {
+            "type": "boolean",
+            "title": "Default",
+            "description": "Whether a built-in type is still bound to the workflow it shipped with."
+          },
+          "ticket_count": {
+            "type": "integer",
+            "title": "Ticket Count",
+            "description": "Tickets of this type the caller can see."
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "description": "The expected_version an update or delete fences on."
+          },
+          "when_to_use": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 600
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "When To Use",
+            "description": "When a ticket should be of this type, in the words a person reads in Pidgen; null when the type states none."
+          },
+          "workflow_title": {
+            "type": "string",
+            "title": "Workflow Title",
+            "description": "The display title of the workflow the type is bound to."
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "label",
+          "workflow_name",
+          "builtin",
+          "default",
+          "ticket_count",
+          "version"
+        ],
+        "title": "WorkflowTypeResource",
+        "description": "A registered ticket type and the workflow it runs."
+      },
+      "PublicError": {
+        "description": "The body of every error a published route answers with; switch on error.code.",
+        "properties": {
+          "status": {
+            "const": "error",
+            "description": "Always `error`.",
+            "title": "Status",
+            "type": "string"
+          },
+          "error": {
+            "$ref": "#/components/schemas/PublicErrorDetail"
+          }
+        },
+        "required": ["status", "error"],
+        "title": "PublicError",
+        "type": "object"
+      },
+      "PublicErrorDetail": {
+        "description": "What went wrong: a stable code, a message, and optional context.",
+        "properties": {
+          "code": {
+            "description": "Stable, machine-readable error code, e.g. PROJECT_NOT_FOUND.",
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable explanation; not a stable interface.",
+            "title": "Message",
+            "type": "string"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Structured context for the error, when there is any.",
+            "title": "Details"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The request's X-Request-ID, for correlating with logs.",
+            "title": "Request Id"
+          }
+        },
+        "required": ["code", "message"],
+        "title": "PublicErrorDetail",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A CLI token, sent as `Authorization: Bearer <token>`. Obtain one with the device-code login: POST /api/v1/auth/device, then poll POST /api/v1/auth/device/token."
+      }
+    }
+  }
+}

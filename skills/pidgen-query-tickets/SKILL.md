@@ -88,6 +88,22 @@ pidgen run node-output WFR-EXAMPLE-1 implement --format json
 `pidgen run show --format json` adds `stranded_cause` and the run's `nodes`. `pidgen run node-output --format json` returns one
 node's attempts and its latest `output`; read the output, not just the status.
 
+The `implement` node's `output` has one of two shapes:
+
+- **The plain implementer loop.** The output is the implementer's own result, with `complete`,
+  `summary`, `remaining`, `criteria` and `handoff` among its fields.
+- **The review group**, in the `pidgen-implement-reviewed` workflow. The node is a loop group that
+  runs the implementer in review rounds, and its output is the loop envelope: `exhausted` (`true`
+  when the rounds ran out), `iterations` (how many rounds ran) and `final`, the review gate's
+  result for the last round. `final` has `verdict` (`done` or `issues`); `issues`, `blocking`
+  first, each with `reviewer`, `severity` (`blocking`, `major` or `minor`), `path`, `summary` and
+  `evidence`; and `complete`, `summary`, `remaining`, `criteria` and `handoff`, the implementer's
+  own final output for that round.
+
+In the review group, read `final.remaining` for what the implementer left and `final.issues` for
+what the reviewers found. A run that exhausted its rounds failed on its merits; see
+`pidgen-retry-run` before retrying it.
+
 ## What needs a person, and what can be done
 
 ```console

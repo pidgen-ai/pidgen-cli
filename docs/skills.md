@@ -14,9 +14,9 @@ shared skills directory such as `~/.claude/skills`.
 
 | Skill | Use it to |
 |---|---|
-| `pidgen-file-ticket` | Submit a prose intent and answer its clarification questions, or file one structured ticket as a manifest with no children; or file a request instead when someone outside the team asked, the work is not yet judged worth doing, or its target is unclear |
+| `pidgen-file-ticket` | Submit a prose intent and answer its clarification questions, or file one structured ticket as a manifest with no children; or file a request instead when someone outside the team asked, the work is not yet judged worth doing, or its target is unclear; says when to name a reference Project its refinement reads, carry an interface in a contract or attachment, or file a domain-level Request for work that spans Projects |
 | `pidgen-manage-epics` | Create an Epic (an epic-kind ticket), set its branch and merge policy, place tickets in it by `parent_ticket_id`, and wire dependency edges; file an Initiative (an Epic in a domain) for work across projects and place each project's work under it |
-| `pidgen-decompose-plan` | Turn related work into parent/child delivery cohorts and file each new cohort as one ticket manifest; for work across projects, file one cohort per project under one Initiative and link each root to the contract it implements or builds against |
+| `pidgen-decompose-plan` | Turn related work into parent/child delivery cohorts and file each new cohort as one ticket manifest; for work across projects, file one cohort per project under one Initiative and link each root to the contract it implements or builds against; says when a root or child names a reference Project its refinement reads, when an interface goes in a contract or attachment, and when to file a domain-level Request |
 | `pidgen-manage-contracts` | Put an interface between projects into Pidgen as files: choose publish, propose, attach or link; publish a spec file with `pidgen contract publish` after `--check`, stopping for a breaking change; propose a fragment file with `pidgen contract propose`; set up CI (publish on the default branch, `--check` on pull requests, the token a secret); read landed and pending operations; never write a schema into a command, a body or a ticket |
 | `pidgen-triage-requests` | Work the request queue: list new requests, read each with its timeline, acknowledge it or ask the requester, accept it (with a bug's details or the missing ones unknown), close it with a reason, or promote it to a ticket in a Project |
 | `pidgen-query-tickets` | Find and read tickets, Epics, runs, and their state |
@@ -108,7 +108,7 @@ preview before they apply, and never name an Account, profile or server; the pro
 |---|---|
 | `pidgen-file-ticket` | `project list\|show`, `intent submit\|respond`, `manifest template\|apply`, `ticket edit\|show\|types`, `request submit` |
 | `pidgen-manage-epics` | `project list`, `domain list\|epics\|project add`, `ticket create\|list\|show\|edit --kind epic`, `ticket create --kind epic --domain`, `ticket move\|dep add\|dep rm\|dep list\|show\|actions\|act`, `epic create\|dag show\|edge add` (and `epic create --domain`) |
-| `pidgen-decompose-plan` | `manifest template\|apply`, `plan show\|apply\|promote\|template\|cohorts`, `project show`, `ticket dep add\|edit\|show\|types`, `domain epics`, `contract list\|show\|accept`, `ticket contract implements\|builds-against` |
+| `pidgen-decompose-plan` | `manifest template\|apply`, `plan show\|apply\|promote\|template\|cohorts`, `project show`, `ticket dep add\|edit\|show\|types`, `domain epics`, `contract list\|show\|accept`, `ticket contract implements\|builds-against`, `request submit` |
 | `pidgen-manage-contracts` | `contract list\|show\|publish\|propose\|revise\|accept`, `ticket contract implements\|builds-against` |
 | `pidgen-triage-requests` | `request list\|show\|reply\|acknowledge\|accept\|close\|promote`, `project list`, `ticket show\|types` |
 | `pidgen-query-tickets` | `ticket list\|show\|dep list\|actions` (with `--kind epic`), `project list\|show`, `epic list\|show\|dag show`, `run list\|show\|node-output`, `review list\|attention` |

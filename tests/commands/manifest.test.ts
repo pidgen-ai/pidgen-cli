@@ -514,6 +514,94 @@ describe("pidgen manifest apply", () => {
     expect(body.error?.code).toBe("PROJECT_NOT_FOUND");
   });
 
+  it("sends the root's and each child's references in the preview and the commit (AC-52d0df5669e4)", async () => {
+    const children = MANIFEST["children"] as Record<string, unknown>[];
+    const manifest = {
+      ...MANIFEST,
+      root: { ...(MANIFEST["root"] as object), references: ["BETA", "proj-example-c"] },
+      children: [{ ...children[0], references: ["BETA"] }, children[1]],
+    };
+    const { ctx, calls } = await setup({
+      [`POST ${PREVIEW_PATH}`]: [recorded(PREVIEW_OK)],
+      [`POST ${COMMIT_PATH}`]: [recorded(COMMIT_APPLIED)],
+    });
+    const name = await writeManifest(ctx, manifest, "manifest.yaml");
+    const { code } = await run(ctx, "manifest", "apply", "-f", name, "--apply");
+    expect(code).toBe(ExitCode.Ok);
+    expect(calls.map((call) => (call.body as { manifest: unknown }).manifest)).toEqual([
+      manifest,
+      manifest,
+    ]);
+  });
+
+  it.each([
+    [
+      "root",
+      "not a list",
+      { root: { ...(MANIFEST["root"] as object), references: "BETA" } },
+      "$.root.references",
+    ],
+    [
+      "child",
+      "an empty Project",
+      {
+        children: [
+          { ...(MANIFEST["children"] as object[])[0], references: [""] },
+          (MANIFEST["children"] as object[])[1],
+        ],
+      },
+      "$.children[0].references[0]",
+    ],
+  ])(
+    "a %s whose references is %s exits 2 at its place in the file and sends nothing",
+    async (_, __, change, path) => {
+      const { ctx, calls } = await setup();
+      const name = await writeManifest(ctx, { ...MANIFEST, ...change });
+      const { code, body } = await run(ctx, "manifest", "apply", "-f", name);
+      expect(code).toBe(ExitCode.Usage);
+      expect(body.error?.code).toBe("INPUT_INVALID");
+      const paths = (body.error?.details["issues"] as { path: string }[]).map((i) => i.path);
+      expect(paths).toContain(path);
+      expect(calls).toEqual([]);
+    },
+  );
+
+  it.each([PREVIEW_PATH, COMMIT_PATH])(
+    "a REFERENCE_OUTSIDE_DOMAIN refusal of %s names the Project's key and the fix (AC-ce87c5e73011)",
+    async (path) => {
+      const refused = refusal(
+        422,
+        "REFERENCE_OUTSIDE_DOMAIN",
+        "A reference is outside the domains.",
+        {
+          project_key: "GAMMA",
+        },
+      );
+      const { ctx } = await setup(
+        path === PREVIEW_PATH
+          ? { [`POST ${PREVIEW_PATH}`]: [refused] }
+          : {
+              [`POST ${PREVIEW_PATH}`]: [recorded(PREVIEW_OK)],
+              [`POST ${COMMIT_PATH}`]: [refused],
+            },
+      );
+      const name = await writeManifest(ctx);
+      const { code, body } = await run(ctx, "manifest", "apply", "-f", name, "--apply");
+      expect(code).toBe(ExitCode.Usage);
+      expect(body.error?.code).toBe("REFERENCE_OUTSIDE_DOMAIN");
+      expect(body.error?.details).toMatchObject({ project_key: "GAMMA", status: 422 });
+      expect(body.error?.message).toContain("GAMMA");
+      expect(body.error?.message).toMatch(/reference only Projects in the ticket's own domains/i);
+    },
+  );
+
+  it("docs/commands.md documents references in a manifest and REFERENCE_OUTSIDE_DOMAIN", async () => {
+    const text = await readFile(new URL("../../docs/commands.md", import.meta.url), "utf8");
+    const apply = text.split(/^### manifest apply$/m)[1]!.split(/^## /m)[0]!;
+    expect(apply).toMatch(/`references`/);
+    expect(apply).toMatch(/REFERENCE_OUTSIDE_DOMAIN/);
+  });
+
   it("a preview without findings, committable and promotable is UNEXPECTED_RESPONSE", async () => {
     const data = { ...(PREVIEW_OK["data"] as Record<string, unknown>) };
     delete data["committable"];

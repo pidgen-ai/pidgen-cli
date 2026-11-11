@@ -203,7 +203,8 @@ describe("pidgen session steer", () => {
     const table = ctx.out.join("");
     expect(table).toMatch(/^State: dispatched$/m);
     expect(table).toMatch(/^Mode: steer$/m);
-    expect(table).toMatch(/^Dispatched at: 2026-10-05T09:00:02Z$/m);
+    // Human output writes the instant in the machine's zone (TZ=America/Los_Angeles in tests).
+    expect(table).toMatch(/^Dispatched at: Mon 5 Oct 2026 at 2:00 AM PDT$/m);
   });
 
   it("steer's help describes live delivery: the running session, dispatched and accepted, the modes and a returned instruction's code", async () => {

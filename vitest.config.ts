@@ -7,6 +7,8 @@ export default defineConfig({
     // Contract tests start a Prism mock server; they run with `npm run test:contract`.
     exclude: ["tests/contract/**", "**/node_modules/**"],
     environment: "node",
+    // Human output writes times in the machine's zone; no test may assume UTC (src/core/time.ts).
+    env: { TZ: "America/Los_Angeles" },
     // Removes the temporary directories tests make (tests/support/temp.ts).
     setupFiles: ["tests/support/setup.ts"],
     globalSetup: ["tests/support/global-setup.ts"],

@@ -148,8 +148,8 @@ Tests never call a real Pidgen server and never contain real credentials, hostna
 Terminal stdout defaults to human-readable output; nonterminal stdout defaults to JSON.
 `--format json` and `--format table` override this for execution and parser errors. Keep JSON
 envelopes, payloads, metadata and exit codes unchanged. Keep stderr progress and setup interactivity
-independent of stdout's terminal state. Help/version print text; foreground `worker start` inherits
-the worker's streams and status ([Output and exit codes](docs/output-and-exit-codes.md)).
+independent of stdout's terminal state. Help/version print text; foreground `worker start` and `worker dashboard`
+inherit the worker's streams and status ([Output and exit codes](docs/output-and-exit-codes.md)).
 
 `src/core/human.ts` receives command identity and stdout terminal state/width outside the envelope.
 Extend its presentation dispatch for command-specific output; never add presentation fields to data
@@ -286,6 +286,7 @@ prompts, capture foreground streams, or infer success from an unknown outcome or
 | `ticket template` | text | Copyable template text and labeled fields. |
 | `ticket types` | list | Workflow types; resource sections with compact collections where appropriate. |
 | `ticket unfollow` | mutation | Preview requirements, actual application state and complete result details. |
+| `worker dashboard` | exception | Inherits worker streams/status with no CLI result; one stderr hint on exit 2. |
 | `worker doctor` | diagnostic | Complete checks, statuses, fixes and supporting records, on success or failure. |
 | `worker login` | mutation | Labeled lifecycle details: the harness and its login state. |
 | `worker enroll` | mutation | Labeled lifecycle details; all supplied qualifications retained. |
@@ -348,14 +349,17 @@ has one of its routes, as a reminder. Each fragment is listed with its routes in
 `PENDING_ROUTES`, the published schemas it copies in `COPIED_SCHEMAS`, a published route it holds
 with a field added in `EXTENDED_ROUTES` and that field in `EXTENDED_SCHEMAS` (the schema keeps its
 published name and is otherwise the published one), and its `openapi-typescript` line is in
-`contract:generate`. There are two today. `contracts/pending/worker-enrollments.json`: `install_id`
+`contract:generate`. There are three today. `contracts/pending/worker-enrollments.json`: `install_id`
 on `POST /api/v1/workers/enrollments` and `GET /api/v1/workers`, and
 `GET /api/v1/workers/enrollments` and `DELETE /api/v1/workers/enrollments/{enrollment_id}`, typed
 in `src/generated/worker-enrollments.d.ts` and used through `src/core/worker-enrollments.ts`.
 `contracts/pending/project-readiness.json`: the five routes under
 `/api/v1/projects/{project_ref}/readiness` (the readiness, the proposal archive, the setup pull
 request, the answers and the rehearsal), typed in `src/generated/project-readiness.d.ts` and used
-through `src/core/readiness.ts`; its fixtures are under `tests/fixtures/readiness/`. The
+through `src/core/readiness.ts`; its fixtures are under `tests/fixtures/readiness/`.
+`contracts/pending/workflow-types.json`: `when_to_use` and `workflow_title` on each type
+`GET /api/v1/workflow-types` lists, typed in `src/generated/workflow-types.d.ts` and used by
+`src/commands/ticket/types.ts`. The
 worker release, domain, Domain Epic, contract, contract creation, contract publishing and Request
 fragments were deleted when the server published their routes, and that test's
 `RETIRED_FRAGMENTS` checks nothing names them again.

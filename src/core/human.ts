@@ -1,6 +1,7 @@
 import { renderLifecycle } from "./lifecycle-human.js";
 import { renderResourceRead, wrap } from "./resource-human.js";
 import { renderMutation } from "./mutation-human.js";
+import { localizeTimes, machineZone } from "./time.js";
 
 /** Presentation context stays outside response data and metadata. */
 export interface PresentationContext {
@@ -8,24 +9,36 @@ export interface PresentationContext {
   terminal?: { isTTY: boolean; columns?: number };
   /** HTTP acceptance for direct API calls, outside response data and metadata. */
   responseStatus?: number;
-  /** Observation time for human subscription quota ages, outside JSON data. */
+  /**
+   * Observation time, outside JSON data: for human subscription quota ages, and the current year
+   * human times leave out (src/core/time.ts).
+   */
   now?: number;
   /** The command's own rendering for a terminal, used in place of the generic one. */
   human?: string;
 }
 
-/** Shared fallback; command presentations can specialize without modifying JSON results. */
-export function renderHuman(data: unknown, context: PresentationContext = {}): string {
-  if (context.command?.join(" ") === "skills install" && isInstallation(data)) {
-    return renderInstallation(data, context.terminal?.columns);
+/**
+ * Shared fallback; command presentations can specialize without modifying JSON results. Times are
+ * written in the machine's zone once, here, before any presentation sees the data.
+ */
+export function renderHuman(raw: unknown, context: PresentationContext = {}): string {
+  if (context.command?.join(" ") === "skills install" && isInstallation(raw)) {
+    return renderInstallation(raw, context.terminal?.columns);
   }
+  const localize = (value: unknown) =>
+    localizeTimes(value, machineZone(), context.now ?? Date.now());
+  // Lifecycle presentations derive ages from the raw instants; they localize what they show.
   const lifecycle = renderLifecycle(
     context.command?.join(" ") ?? "",
-    data,
+    raw,
     context.terminal?.columns,
     context.now,
+    [],
+    localize,
   );
   if (lifecycle !== undefined) return lifecycle;
+  const data = localize(raw);
   const resource = renderResourceRead(
     context.command?.join(" ") ?? "",
     data,

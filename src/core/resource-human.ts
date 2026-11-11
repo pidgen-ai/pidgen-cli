@@ -56,6 +56,9 @@ export function renderResourceRead(
   const presentation = READ_PRESENTATIONS[command];
   if (!presentation) return undefined;
   const width = Number.isFinite(columns) && columns > 0 ? Math.floor(columns) : 80;
+  if (command === "ticket types" && Array.isArray(data) && data.some(describesWhenToUse)) {
+    return workflowTypes(presentation.title, data, width) + "\n";
+  }
   if (Array.isArray(data)) {
     return collection(presentation.title, data, width, 0, presentation.compact === true) + "\n";
   }
@@ -238,8 +241,8 @@ function collection(
   );
 }
 
-function compactTable(rows: Row[], width: number): string | undefined {
-  const keys = [...new Set(rows.flatMap((row) => Object.keys(row)))];
+function compactTable(rows: Row[], width: number, columns?: string[]): string | undefined {
+  const keys = columns ?? [...new Set(rows.flatMap((row) => Object.keys(row)))];
   if (!keys.length) return undefined;
   if (
     rows.some((row) => Object.values(row).some((value) => isRecord(value) || Array.isArray(value)))
@@ -258,6 +261,67 @@ function compactTable(rows: Row[], width: number): string | undefined {
       .join("  ")
       .trimEnd();
   return [line(keys.map(label)), ...cells.map(line)].join("\n");
+}
+
+/** The workflow types' own columns, after the compact ones: the workflow's title, then When to use. */
+const WORKFLOW_TYPE_TEXT = ["workflow_title", "when_to_use"] as const;
+
+/** The longest When to use a list shows, and the shortest a table cuts it to. */
+const WHEN_TO_USE_MAX = 60;
+const WHEN_TO_USE_MIN = 20;
+
+function describesWhenToUse(row: unknown): boolean {
+  return isRecord(row) && WORKFLOW_TYPE_TEXT.some((key) => key in row);
+}
+
+/** `text` on one line, cut to `limit` characters ending in an ellipsis when longer. */
+function shorten(text: string, limit: number): string {
+  const line = text.replace(/\s+/g, " ").trim();
+  return line.length <= limit ? line : `${line.slice(0, limit - 1).trimEnd()}…`;
+}
+
+/**
+ * A workflow type's compact view: its identifying fields, its workflow's title and its When to use
+ * cut to `limit` characters. A field the type has none of (null) is left out, so it shows empty.
+ */
+function workflowTypeView(row: Row, limit: number): Row {
+  const rest = Object.fromEntries(
+    Object.entries(row).filter(([key]) => !(WORKFLOW_TYPE_TEXT as readonly string[]).includes(key)),
+  );
+  const view = compactRow(rest);
+  const title = row["workflow_title"];
+  if (typeof title === "string" && title !== "") view["workflow_title"] = title;
+  const when = row["when_to_use"];
+  if (typeof when === "string" && when.trim() !== "" && limit > 0) {
+    view["when_to_use"] = shorten(when, limit);
+  }
+  return view;
+}
+
+/**
+ * The workflow types as a table whose last column, When to use, is cut to the room the terminal
+ * leaves it (between WHEN_TO_USE_MIN and WHEN_TO_USE_MAX characters). When even that does not fit,
+ * each type is listed on its own with When to use cut to WHEN_TO_USE_MAX. The JSON keeps it whole.
+ */
+function workflowTypes(title: string, rows: unknown[], width: number): string {
+  const views = (limit: number) =>
+    rows.map((row) => (isRecord(row) ? workflowTypeView(row, limit) : row));
+  const records = (limit: number) => views(limit).filter(isRecord);
+  const base = records(0);
+  const columns = [
+    ...new Set(base.flatMap((row) => Object.keys(row))),
+    ...WORKFLOW_TYPE_TEXT,
+  ].filter((key, index, all) => all.indexOf(key) === index);
+  const heading = `${title} (${rows.length} displayed)`;
+  if (rows.every(isRecord)) {
+    const without = compactTable(base, Number.POSITIVE_INFINITY, columns.slice(0, -1));
+    const used = Math.max(0, ...(without ?? "").split("\n").map((line) => line.length));
+    const room = width - used - 2;
+    const limit = Math.min(WHEN_TO_USE_MAX, Math.max(WHEN_TO_USE_MIN, room));
+    const table = compactTable(records(limit), width, columns);
+    if (table) return `${heading}\n${table}`;
+  }
+  return collection(title, views(WHEN_TO_USE_MAX), width, 0, false);
 }
 
 function contractCollections(data: Row, width: number): string {

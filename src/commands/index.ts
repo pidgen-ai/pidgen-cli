@@ -45,6 +45,7 @@ import { intentSubmit } from "./intent/submit.js";
 import { intentWithdraw } from "./intent/withdraw.js";
 import { manifestApply } from "./manifest/apply.js";
 import { manifestTemplate } from "./manifest/template.js";
+import { workerDashboard } from "./worker/dashboard.js";
 import { workerDoctor } from "./worker/doctor.js";
 import { workerEnroll } from "./worker/enroll.js";
 import { workerInstall } from "./worker/install.js";
@@ -211,6 +212,7 @@ export const commands: readonly CommandSpec[] = [
   workerRestart,
   workerStatus,
   workerDoctor,
+  workerDashboard,
   workerLogin,
   workerSubscriptions,
   workerSubscriptionsUse,

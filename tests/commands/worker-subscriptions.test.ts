@@ -375,8 +375,9 @@ describe("pidgen worker subscriptions <worker>", () => {
         "Not logged in.",
         "five_hour",
         "100",
-        "2026-10-09T09:48:00Z",
-        "2026-10-09T11:00:00Z",
+        // Instants in the machine's zone (TZ=America/Los_Angeles in tests).
+        "Fri 9 Oct at 2:48 AM PDT",
+        "Fri 9 Oct at 4:00 AM PDT",
         "Paused: true",
       ])
         expect(text).toContain(fragment);

@@ -147,6 +147,125 @@ describe("worker commands", () => {
     },
   );
 
+  describe("dashboard", () => {
+    const hint = "pidgen worker update --restart";
+
+    it("runs pidgen-worker with dashboard first, then the passthrough arguments, inheriting streams", async () => {
+      const spawns: { args: readonly string[]; stdio: unknown }[] = [];
+      const runtime: WorkerRuntime = {
+        ...defaultWorkerRuntime,
+        spawn(command, args, options) {
+          spawns.push({ args, stdio: options.stdio });
+          return defaultWorkerRuntime.spawn(command, args, options);
+        },
+      };
+      const { ctx } = await workerContext(runtime);
+
+      expect(
+        await runCli(["worker", "dashboard", "--", "--port", "8765", "--idle-minutes", "5"], ctx),
+      ).toBe(0);
+      expect(spawns).toHaveLength(1);
+      expect(spawns[0]?.args).toEqual([
+        "dashboard",
+        "--open",
+        "--port",
+        "8765",
+        "--idle-minutes",
+        "5",
+      ]);
+      expect(spawns[0]?.stdio).toBe("inherit");
+    });
+
+    it("runs with no arguments after dashboard when none are given", async () => {
+      const spawns: (readonly string[])[] = [];
+      const runtime: WorkerRuntime = {
+        ...defaultWorkerRuntime,
+        spawn(command, args, options) {
+          spawns.push(args);
+          return defaultWorkerRuntime.spawn(command, args, options);
+        },
+      };
+      const { ctx } = await workerContext(runtime);
+
+      expect(await runCli(["worker", "dashboard"], ctx)).toBe(0);
+      expect(spawns).toEqual([["dashboard", "--open"]]);
+    });
+
+    it("leaves --open out with --no-open", async () => {
+      const spawns: (readonly string[])[] = [];
+      const runtime: WorkerRuntime = {
+        ...defaultWorkerRuntime,
+        spawn(command, args, options) {
+          spawns.push(args);
+          return defaultWorkerRuntime.spawn(command, args, options);
+        },
+      };
+      const { ctx } = await workerContext(runtime);
+
+      expect(await runCli(["worker", "dashboard", "--no-open", "--", "--port", "8765"], ctx)).toBe(
+        0,
+      );
+      expect(spawns).toEqual([["dashboard", "--port", "8765"]]);
+    });
+
+    it("adds no second --open when the arguments after -- already have one", async () => {
+      const spawns: (readonly string[])[] = [];
+      const runtime: WorkerRuntime = {
+        ...defaultWorkerRuntime,
+        spawn(command, args, options) {
+          spawns.push(args);
+          return defaultWorkerRuntime.spawn(command, args, options);
+        },
+      };
+      const { ctx } = await workerContext(runtime);
+
+      expect(await runCli(["worker", "dashboard", "--", "--open", "--port", "8765"], ctx)).toBe(0);
+      expect(spawns).toEqual([["dashboard", "--open", "--port", "8765"]]);
+    });
+
+    it("passes the worker's exit status through", async () => {
+      const { ctx } = await workerContext();
+
+      expect(await runCli(["worker", "dashboard", "--", "--exit", "23"], ctx)).toBe(23);
+    });
+
+    it.each([undefined, "json", "table"])("prints no envelope with format %s", async (format) => {
+      const { ctx } = await workerContext();
+      ctx.io.stdoutIsTTY = true;
+      const flags = format ? ["--format", format] : [];
+
+      expect(await runCli([...flags, "worker", "dashboard", "--", "--exit", "23"], ctx)).toBe(23);
+      expect(ctx.out).toEqual([]);
+      expect(ctx.err).toEqual([]);
+    });
+
+    it("writes one update hint to standard error on exit 2", async () => {
+      const { ctx } = await workerContext();
+
+      expect(await runCli(["worker", "dashboard", "--", "--exit", "2"], ctx)).toBe(2);
+      expect(ctx.out).toEqual([]);
+      expect(ctx.err).toHaveLength(1);
+      expect(ctx.err.join("")).toContain(hint);
+      expect(ctx.err.join("")).toContain("dashboard");
+    });
+
+    it.each(["0", "1", "23"])("writes nothing to standard error on exit %s", async (status) => {
+      const { ctx } = await workerContext();
+
+      expect(await runCli(["worker", "dashboard", "--", "--exit", status], ctx)).toBe(
+        Number(status),
+      );
+      expect(ctx.err).toEqual([]);
+    });
+
+    it("reports WORKER_NOT_FOUND with exit 2 when no worker is found", async () => {
+      const ctx = await testContext({ env: { PATH: "" } });
+
+      expect(await runCli(["worker", "dashboard"], ctx)).toBe(ExitCode.Usage);
+      expect(envelope(ctx)).toMatchObject({ ok: false, error: { code: "WORKER_NOT_FOUND" } });
+    });
+  });
+
   it("resolves the worker from PIDGEN_WORKER_BIN", async () => {
     const { ctx, directory } = await workerContext();
     ctx.env = { PIDGEN_WORKER_BIN: join(directory, "pidgen-worker"), PATH: "" };

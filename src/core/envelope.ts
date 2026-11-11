@@ -3,6 +3,7 @@ import { renderDetails, wrap } from "./resource-human.js";
 import { renderMutationFailure } from "./mutation-human.js";
 import { INITIATIVE_REFUSALS, type CliError } from "./errors.js";
 import { CLI_VERSION } from "./version.js";
+import { localizeFailure, machineZone } from "./time.js";
 
 /** The single JSON document every command prints. See docs/output-and-exit-codes.md. */
 export interface Envelope {
@@ -53,21 +54,23 @@ export function render(
   if (format === "json") return JSON.stringify(envelope) + "\n";
   if (context.human !== undefined) return context.human;
   if (!envelope.ok && envelope.error) {
+    // Human output only: the message's moments and the details' instants in the machine's zone.
+    const error = localizeFailure(envelope.error, machineZone(), context.now ?? Date.now());
     const mutation = renderMutationFailure(
       context.command?.join(" ") ?? "",
-      envelope.error,
+      error,
       context.terminal?.columns,
     );
     if (mutation !== undefined) return mutation;
-    const sentence = INITIATIVE_REFUSALS[envelope.error.code];
+    const sentence = INITIATIVE_REFUSALS[error.code];
     const columns = context.terminal?.columns;
     const width = columns !== undefined && columns > 0 ? Math.floor(columns) : 80;
     const said = sentence === undefined ? "" : `${wrap(sentence, width)}\n`;
     const details =
-      Object.keys(envelope.error.details).length > 0
-        ? `Details:\n${renderDetails(envelope.error.details, context.terminal?.columns)}\n`
+      Object.keys(error.details).length > 0
+        ? `Details:\n${renderDetails(error.details, context.terminal?.columns)}\n`
         : "";
-    return `error ${envelope.error.code}: ${envelope.error.message}\n${said}${details}`;
+    return `error ${error.code}: ${error.message}\n${said}${details}`;
   }
   return renderHuman(envelope.data, context);
 }

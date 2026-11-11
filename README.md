@@ -35,7 +35,7 @@ enroll the worker that executes that work on their own machine. Responses are hu
 standard output is a terminal and JSON when it is redirected or piped. Use `--format json` for
 structured automation or `--format table` to request human output explicitly. JSON envelopes and
 exit codes are preserved. Commands preview side effects before applying them; only `pidgen setup`
-prompts. Help and version print text, and foreground `worker start` passes through the worker's
+prompts. Help and version print text, and foreground `worker start` and `worker dashboard` pass through the worker's
 streams and exit status. See [Output and exit codes](docs/output-and-exit-codes.md).
 
 ## Install

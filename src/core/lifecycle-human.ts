@@ -43,6 +43,8 @@ export function renderLifecycle(
   now?: number,
   /** Lines the command adds under the heading, such as why nothing was updated. */
   extraNotes: readonly string[] = [],
+  /** Applied to the details shown, after anything derived from the raw data (src/core/time.ts). */
+  present: (body: unknown) => unknown = (body) => body,
 ): string | undefined {
   let heading = LIFECYCLE_PRESENTATIONS[command];
   if (!heading) return undefined;
@@ -125,9 +127,10 @@ export function renderLifecycle(
   const width =
     columns !== undefined && Number.isFinite(columns) && columns > 0 ? Math.floor(columns) : 80;
   return (
-    [...[heading, ...notes].map((text) => wrap(text, width)), renderDetails(body, columns)].join(
-      "\n",
-    ) + "\n"
+    [
+      ...[heading, ...notes].map((text) => wrap(text, width)),
+      renderDetails(present(body), columns),
+    ].join("\n") + "\n"
   );
 }
 

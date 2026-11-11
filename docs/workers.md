@@ -413,6 +413,7 @@ credential.
 | `pidgen worker restart [--force]` | Stops the worker started with `--detach` as `worker stop` does and starts it detached again with the arguments in its run record |
 | `pidgen worker status [--host <worker>]` | Shows the detached worker record, whether that process is still the recorded `pidgen-worker`, and the App Service's record of this worker, or of the worker `--host` names by its name or id ([below](#the-app-services-view)) |
 | `pidgen worker doctor [-- args]` | Runs `pidgen-worker doctor --json` and returns the report using the selected output format (an envelope in JSON mode); for this machine before a worker is installed, use [`pidgen doctor`](#check-this-machine) |
+| `pidgen worker dashboard [--no-open] [-- args]` | Runs `pidgen-worker dashboard` in the foreground with inherited standard streams, opens the page in your browser unless `--no-open` is given, and passes the arguments that follow `--` (`--port <n>`, `--idle-minutes <n>`); see [Open the worker dashboard](#open-the-worker-dashboard) |
 
 The CLI runs the `pidgen-worker` at `PIDGEN_WORKER_BIN` when it is set; otherwise the one the
 install record names (`$PIDGEN_HOME/worker/bin/pidgen-worker` for an install by this CLI); and
@@ -423,9 +424,40 @@ using `~/.pidgen` when the variable is unset, and removes `PIDGEN_TOKEN` from th
 the worker never receives a person's credential. Worker commands are supported on Linux and macOS. A
 missing worker or unsupported platform is a usage error.
 
-Foreground `worker start` forwards `SIGINT` and `SIGTERM` and exits with the worker's status (or 128
-plus the signal number). Because it is a foreground handoff, its standard streams belong to the
-worker and the CLI does not print an output envelope.
+Foreground `worker start` and `worker dashboard` forward `SIGINT` and `SIGTERM` and exit with the
+worker's status (or 128 plus the signal number). Because each is a foreground handoff, its standard
+streams belong to the worker and the CLI does not print an output envelope.
+
+### Open the worker dashboard
+
+`pidgen worker dashboard` serves a local page for seeing and changing this machine's worker.
+
+```console
+$ pidgen worker dashboard
+```
+
+1. Run the command and leave it running. It opens the page in your browser and also prints a link
+   to a page served on this machine only. If the browser does not appear, use the printed link.
+2. The link works once and expires after five minutes; to open the page again, stop the command and
+   run it again for a new link.
+3. Stop it with Ctrl-C. It also stops by itself when the page goes unused. `--port <n>` chooses the
+   port and `--idle-minutes <n>` how long it may sit unused, passed after `--`:
+   `pidgen worker dashboard -- --port 8765 --idle-minutes 10`.
+
+`--no-open` only prints the link. Use it, for example, over SSH: forward the port to your own
+machine and open the link there. On a machine with no display nothing is opened, and the worker
+says so and carries on.
+
+The dashboard is a separate process from the worker. It works whether or not the worker is running,
+is not recorded as a run, and is not refused because the worker is running. Like foreground
+`worker start`, it hands the terminal to `pidgen-worker` and exits with its status, with no output
+envelope.
+
+A container install has no dashboard: the page listens on the container's own loopback address,
+which a browser on this machine cannot reach, so the command exits 2 with `DASHBOARD_UNSUPPORTED`
+and runs nothing. The dashboard needs a worker release that includes it. A release from before the
+dashboard does not know the subcommand, exits 2 and prints its usage; the CLI then adds one line on
+standard error. Update the worker with `pidgen worker update --restart` and run the command again.
 
 With `--detach`, the CLI starts the worker in a new session with no terminal. Standard output and
 standard error are appended to `worker-manager.log` under `PIDGEN_WORKER_LOG_DIR`, or under
@@ -485,6 +517,7 @@ record decides; none of the commands takes `--runtime`.
 | `worker restart [--force]` | What `worker stop [--force]` runs, then what `worker start --detach` runs with the arguments kept in the old container's `ai.pidgen.worker.args` label. `data` is `stopped`, `record` (the new container's) and `running: true`; in a terminal it says `Worker restarted in background (container pidgen-worker).` No running container exits 4 with `WORKER_NOT_RUNNING`, `TIMEOUT` (exit 8) leaves it running, and a new container that stops at once exits 1 with `WORKER_EXITED` |
 | `worker status` | `docker inspect --type container pidgen-worker`: `record` is `{container, id, image, volume, status, started_at, args}` (or `null` when there is no container) and `running` |
 | `worker doctor [-- args]` | `docker exec pidgen-worker pidgen-worker doctor --json [args]` in the running container |
+| `worker dashboard [--no-open] [-- args]` | Refused with `DASHBOARD_UNSUPPORTED` (exit 2); no docker command runs |
 
 A running container makes another `start` exit 5 with `WORKER_ALREADY_RUNNING`; a stopped one is
 removed and replaced. `stop` and `doctor` exit 4 with `WORKER_NOT_RUNNING` when the container is
@@ -581,7 +614,8 @@ $ pidgen worker status --format json
 ```
 
 Installation commands, verification progress and enrollment output keep their established stderr
-streams. Foreground `worker start` inherits the worker's streams and status in every output format.
+streams. Foreground `worker start` and `worker dashboard` inherit the worker's streams and status in
+every output format.
 
 ## Provider subscriptions
 

@@ -494,6 +494,164 @@ describe("pidgen ticket create", () => {
   });
 });
 
+/**
+ * Reference Projects (AC-52d0df5669e4, AC-ce87c5e73011): `--reference <project>`, repeatable,
+ * sends `references: [project_ref]` on `POST /tickets`, beside any the file names. A reference to
+ * a Project outside the ticket's own domains is refused 422 `REFERENCE_OUTSIDE_DOMAIN`, naming the
+ * Project by its key in `error.details`.
+ */
+describe("pidgen ticket create --reference", () => {
+  it("each --reference is sent in references, in the order given", async () => {
+    const { ctx, calls } = await setup();
+    const name = await file(ctx, "ticket.json", NEW_TICKET);
+    const { code, body } = await run(
+      ctx,
+      "ticket",
+      "create",
+      "-f",
+      name,
+      "--reference",
+      "BETA",
+      "--reference",
+      "proj-example-c",
+    );
+    expect(code).toBe(ExitCode.Ok);
+    expect(body).toMatchObject({ ok: true, data: CREATED });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url.pathname).toBe("/api/v1/tickets");
+    expect(calls[0]?.body).toEqual({ ...NEW_TICKET, references: ["BETA", "proj-example-c"] });
+  });
+
+  it("the file's references are sent as written, and --reference adds to them once each", async () => {
+    const { ctx, calls } = await setup();
+    const name = await file(ctx, "ticket.yaml", stringify({ ...NEW_TICKET, references: ["BETA"] }));
+    expect((await run(ctx, "ticket", "create", "-f", name)).code).toBe(ExitCode.Ok);
+    expect(calls[0]?.body).toEqual({ ...NEW_TICKET, references: ["BETA"] });
+    const again = await run(
+      ctx,
+      "ticket",
+      "create",
+      "-f",
+      name,
+      "--reference",
+      "BETA",
+      "--reference",
+      "GAMMA",
+    );
+    expect(again.code).toBe(ExitCode.Ok);
+    expect(calls[1]?.body).toEqual({ ...NEW_TICKET, references: ["BETA", "GAMMA"] });
+  });
+
+  it("without --reference nothing is added to the body", async () => {
+    const { ctx, calls } = await setup();
+    const name = await file(ctx, "ticket.json", NEW_TICKET);
+    await run(ctx, "ticket", "create", "-f", name);
+    expect(calls[0]?.body).not.toHaveProperty("references");
+  });
+
+  it("an Initiative may reference Projects too", async () => {
+    const { ctx, calls } = await setup();
+    const epic = { title: NEW_TICKET.title, objective: NEW_TICKET.objective };
+    const name = await file(ctx, "epic.json", epic);
+    const { code } = await run(
+      ctx,
+      "ticket",
+      "create",
+      "-f",
+      name,
+      "--domain",
+      "PAY",
+      "--reference",
+      "BETA",
+    );
+    expect(code).toBe(ExitCode.Ok);
+    expect(calls[0]?.body).toMatchObject({ kind: "epic", domain_id: "PAY", references: ["BETA"] });
+  });
+
+  it.each([
+    ["not a list", "BETA", "$.references"],
+    ["an empty Project", [""], "$.references[0]"],
+    ["a Project that is not text", [7], "$.references[0]"],
+  ])("a file whose references is %s exits 2 before any request", async (_, references, path) => {
+    const { ctx, calls } = await setup();
+    const name = await file(ctx, "ticket.json", { ...NEW_TICKET, references });
+    const { code, body } = await run(ctx, "ticket", "create", "-f", name);
+    expect(code).toBe(ExitCode.Usage);
+    expect(body.error?.code).toBe("INPUT_INVALID");
+    const issues = body.error?.details["issues"] as { path: string }[];
+    expect(issues.map((issue) => issue.path)).toContain(path);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("usage: an empty --reference exits 2 and sends nothing", async () => {
+    const { ctx, calls } = await setup();
+    const name = await file(ctx, "ticket.json", NEW_TICKET);
+    const { code, body } = await run(ctx, "ticket", "create", "-f", name, "--reference", " ");
+    expect(code).toBe(ExitCode.Usage);
+    expect(body.error?.code).toBe("CLI_USAGE");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("a REFERENCE_OUTSIDE_DOMAIN refusal names the Project's key and the fix, and exits 2", async () => {
+    const { ctx } = await setup({
+      respond: () =>
+        publicError(
+          422,
+          "REFERENCE_OUTSIDE_DOMAIN",
+          "A reference is outside the ticket's domains.",
+          {
+            project_key: "GAMMA",
+          },
+        ),
+    });
+    const name = await file(ctx, "ticket.json", NEW_TICKET);
+    const { code, body } = await run(ctx, "ticket", "create", "-f", name, "--reference", "GAMMA");
+    expect(code).toBe(ExitCode.Usage);
+    expect(body).toMatchObject({
+      ok: false,
+      data: null,
+      error: {
+        code: "REFERENCE_OUTSIDE_DOMAIN",
+        details: { status: 422, project_key: "GAMMA", request_id: "req_fake_error" },
+      },
+    });
+    expect(body.error?.message).toContain("GAMMA");
+    expect(body.error?.message).toMatch(/reference only Projects in the ticket's own domains/i);
+  });
+
+  it("a REFERENCE_OUTSIDE_DOMAIN refusal on a terminal shows the key and the fix", async () => {
+    const { ctx } = await setup({
+      respond: () =>
+        publicError(
+          422,
+          "REFERENCE_OUTSIDE_DOMAIN",
+          "A reference is outside the ticket's domains.",
+          {
+            project_key: "GAMMA",
+          },
+        ),
+    });
+    const name = await file(ctx, "ticket.json", NEW_TICKET);
+    ctx.out.length = 0;
+    const code = await runCli(
+      ["ticket", "create", "-f", name, "--reference", "GAMMA", "--format", "table"],
+      ctx,
+    );
+    expect(code).toBe(ExitCode.Usage);
+    const text = ctx.out.join("");
+    expect(text).toContain("REFERENCE_OUTSIDE_DOMAIN");
+    expect(text).toContain("GAMMA");
+    expect(text).toMatch(/reference only Projects in the ticket's own domains/i);
+  });
+
+  it("docs/commands.md documents --reference and REFERENCE_OUTSIDE_DOMAIN", async () => {
+    const text = await readFile(new URL("../../docs/commands.md", import.meta.url), "utf8");
+    expect(text).toMatch(/pidgen ticket create -f <file> \[--kind\] \[--domain\] \[--reference/);
+    expect(text).toMatch(/--reference <project>/);
+    expect(text).toMatch(/REFERENCE_OUTSIDE_DOMAIN/);
+  });
+});
+
 describe("pidgen ticket edit", () => {
   it.each(["json", "yaml"])(
     "edit sends readiness fields unchanged beside the fetched version from %s",

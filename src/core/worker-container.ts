@@ -606,6 +606,17 @@ export function containerAdapter(
       return parseDoctorReport(result.stdout);
     },
 
+    dashboard() {
+      return Promise.reject(
+        new CliError(
+          "DASHBOARD_UNSUPPORTED",
+          "The worker dashboard is not available for a container install: its page listens on the container's own loopback address, which this machine's browser cannot reach.",
+          ExitCode.Usage,
+          { form: "container" },
+        ),
+      );
+    },
+
     async uninstall(installRecord, purge) {
       const name = nameOf(installRecord);
       // `worker uninstall` stops a running container first; one that still runs is removed by force.

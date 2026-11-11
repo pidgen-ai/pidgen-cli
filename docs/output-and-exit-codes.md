@@ -20,6 +20,22 @@ $ pidgen ticket list > tickets.json
 JSON payloads, nested values, metadata, error details and exit codes are unchanged by this
 presentation choice. Only the terminal default changes.
 
+## Times in human output
+
+Human output writes times in the machine's time zone, in the form `Sun 25 Oct at 7:03 AM PDT`:
+the weekday, day and month, a 12-hour clock, and the zone's short name (or its offset, such as
+`GMT+4`, where the zone has no abbreviation). The year is added when it is not the current year.
+The zone is the one the system reports; set `TZ` to change it, for example
+`TZ=Europe/London pidgen ticket show PIDGEN-12`.
+
+A value written this way is a full instant: a date, a time, and `Z` or an offset. Calendar dates
+such as `2026-10-15`, and text that merely contains a date, are shown as the server sent them.
+Where the server names a moment inside a sentence (a History entry's summary, an intervention's
+reason, a refusal's message) and lists it in that record's `moments`, the sentence shows the moment
+in the machine's zone and the `moments` list is not shown.
+
+JSON output keeps the API's UTC instants and its `moments` lists exactly as the server sent them.
+
 ## Resource reads in human output
 
 Resource lists name the collection and show how many records are displayed. For example, an empty
@@ -94,9 +110,12 @@ In JSON mode, envelope-producing commands write exactly one JSON document to sta
 }
 ```
 
-Foreground `pidgen worker start` is a subprocess exception: it hands the terminal to `pidgen-worker`, inherits
-all three standard streams, and prints no CLI envelope. Its exit status is the worker's exit status.
-`pidgen worker start --detach` uses the normal envelope.
+Foreground `pidgen worker start` and `pidgen worker dashboard` are subprocess exceptions: each hands the
+terminal to `pidgen-worker`, inherits all three standard streams, and prints no CLI envelope. The exit
+status is the worker's exit status. `pidgen worker start --detach` uses the normal envelope. When
+`pidgen worker dashboard` ends with status 2, it writes one hint line to standard error: a worker release
+that does not know `dashboard` exits 2, and the hint says to update it with `pidgen worker update --restart`.
+No other status adds output.
 
 On failure `ok` is `false`, `data` is `null`, and `error` is filled in:
 
@@ -208,7 +227,7 @@ A preview that succeeds exits 0, even when applying it will need acknowledgement
 A failed `pidgen setup` step keeps the failing command's own code and exit code; `error.details`
 adds `step`, `command`, `error`, `fix`, `steps` and `setup_log` ([Commands](commands.md#setup)).
 
-`pidgen worker start` may also return the worker's exit code, including 128 plus the signal number when
+`pidgen worker start` and `pidgen worker dashboard` may also return the worker's exit code, including 128 plus the signal number when
 the worker exits because of a signal.
 
 ## Exceptions
@@ -219,6 +238,8 @@ These do not print an envelope:
 - `pidgen worker start` without `--detach`, which hands the terminal to the worker: the worker's own
   output passes through and `pidgen` exits with the worker's exit code
   ([Workers](workers.md#run-and-check-a-worker));
+- `pidgen worker dashboard [--no-open]`, which does the same, and adds one hint line on standard error when the
+  worker exits 2 ([Workers](workers.md#open-the-worker-dashboard));
 - `pidgen project doctor --json`, which prints the doctor's report alone, as the server answered
   it, and exits 1 when the setup is the problem; an error under `--json` is the JSON envelope
   ([Commands](commands.md#project-inspect-setup-rehearse-and-doctor)).

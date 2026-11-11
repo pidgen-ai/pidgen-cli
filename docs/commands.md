@@ -10,7 +10,7 @@ local configuration only, and their server-backed parts are marked *planned* bel
 
 Terminal stdout defaults to human-readable output; nonterminal stdout defaults to the JSON envelope.
 `--format json` and `--format table` override this, including errors. JSON fields and exit codes stay
-unchanged. Help/version print text; foreground `pidgen worker start` inherits the worker's streams
+unchanged. Help/version print text; foreground `pidgen worker start` and `pidgen worker dashboard` inherit the worker's streams
 and status. See [Output and exit codes](output-and-exit-codes.md). Commands with side effects follow
 [Preview and apply](preview-and-apply.md).
 
@@ -713,7 +713,7 @@ The server's refusals keep their codes and `error.details`:
 |---|---|---|
 | `pidgen ticket list [--stage] [--project] [--query] [--intervention] [--kind]` | List tickets, every page; `--kind epic` lists Epics; `--epic` is *planned* | `GET /tickets` |
 | `pidgen ticket show <ref> [--kind]` | One ticket with delivery, findings and prerequisites | `GET /tickets/{ref}`, `GET /tickets/{ref}/prerequisites` |
-| `pidgen ticket create -f <file> [--kind] [--domain]` | Create a structured ticket; `--kind epic` files an Epic, `--domain` a Domain Epic | `POST /tickets` |
+| `pidgen ticket create -f <file> [--kind] [--domain] [--reference <project>…]` | Create a structured ticket; `--kind epic` files an Epic, `--domain` a Domain Epic; `--reference` names Projects its refinement may read | `POST /tickets` |
 | `pidgen ticket edit <ref> -f <file> [--kind]` | Edit content (uses the ticket's current version) | `GET /tickets/{ref}`, `PATCH /tickets/{ref}` |
 | `pidgen ticket owner <ref> (--user <user_id> \| --clear) [--reason <text>]` | Set or clear the owner using the current version; requires a server publishing the owner route | `PUT /tickets/{ref}/owner` |
 | `pidgen ticket follow <ref>` | Explicitly follow a ticket; requires a server publishing the following route | `PUT /tickets/{ref}/following` |
@@ -735,10 +735,15 @@ The server's refusals keep their codes and `error.details`:
 | `pidgen ticket contract rm <ref> <contract>` | Remove a ticket's link to a contract | `DELETE /tickets/{ticket_id}/contracts/{contract_id}` |
 | `pidgen ticket move <ref> --epic <key>\|--no-epic` | Move a ticket into or out of an Epic by its `parent_ticket_id` | `GET /tickets/{ref}`, `PATCH /tickets/{ref}` |
 | `pidgen ticket template [-o <file>] [--force]` | Write an annotated ticket file to fill in | — |
-| `pidgen ticket types` | The workflow types registered in the Account: the valid values of a ticket's `workflow_type`, each with its label, workflow and ticket count | `GET /workflow-types` |
+| `pidgen ticket types` | The workflow types registered in the Account: the valid values of a ticket's `workflow_type`, each with its label, workflow, workflow title, ticket count and When to use | `GET /workflow-types` |
 
 `pidgen ticket list`, `pidgen ticket show` and `pidgen ticket types` are read commands like
-`pidgen project list`. `pidgen ticket create`, `pidgen ticket edit`, `pidgen ticket template`,
+`pidgen project list`. `pidgen ticket types` gives each type's `when_to_use`, the text that says
+what work the type is for (`null` when it states none), and `workflow_title`, the display title of
+the workflow it runs. JSON keeps When to use whole; the table shows it as its last column,
+shortened with an ellipsis to fit the terminal, and empty for a type without one. A server that
+does not send the two fields yet is read as sending `null`
+([API compatibility](api-compatibility.md#when-to-use-on-workflow-types)). `pidgen ticket create`, `pidgen ticket edit`, `pidgen ticket template`,
 `pidgen ticket dep add`, `pidgen ticket dep rm`, `pidgen ticket dep list`,
 `pidgen ticket contract implements`, `pidgen ticket contract builds-against`,
 `pidgen ticket contract rm`, `pidgen ticket move`,
@@ -800,6 +805,17 @@ The server's refusals keep their codes and `error.details`:
   `TEAM_MEMBER_NOT_FOUND` exit 4; `PROJECT_REQUIRED`, `UNKNOWN_WORKFLOW_TYPE` and
   `EPIC_PROJECT_MISMATCH` exit 2; `FORBIDDEN` exits 3. No `-f`, or an argument, is `CLI_USAGE`
   (exit code 2).
+
+  `--reference <project>`, repeatable, names another Project the ticket's reading runs
+  (refinement, queries) may read, by id or ticket-key prefix. Each is sent in the body's
+  `references`, after any the file names, once each; a file may name `references` itself, a list
+  of Projects. A reference is only read: implementation never gets a checkout of it, and learns
+  another Project from the ticket, a contract, an attachment or its scope. A Project outside the
+  ticket's own domains is refused with `REFERENCE_OUTSIDE_DOMAIN` (exit code 2): the message names
+  the Project's key and the fix, to reference only Projects in the ticket's own domains, and
+  `error.details` keeps the server's details. A Project in no domain may reference any Project of
+  its Account. An empty `--reference` is `CLI_USAGE` (exit code 2). The server must publish
+  `references`; a server that does not yet refuses the field.
 
   A Story or Task is filed in an Epic by naming the Epic (its key or id) as `parent_ticket_id`.
   `--kind <kind>` sets the body's `kind`; `--kind epic` files an Epic, a ticket of kind `epic`
@@ -2141,6 +2157,11 @@ $ pidgen manifest apply -f ticket-manifest.yaml --apply [--digest sha256:9f…] 
   with the server's code, e.g. `MANIFEST_NOT_COMMITTABLE`, `PROMOTION_GATE_FAILED` or
   `MANIFEST_IDEMPOTENCY_CONFLICT`; an unknown Project is `PROJECT_NOT_FOUND` (exit code 4).
 - `--digest` without `--apply` is `CLI_USAGE` (exit code 2) and sends nothing.
+- The root and each child may name `references`, the other Projects (by id or ticket-key prefix)
+  their refinement may read, as `pidgen ticket create --reference` does; each is checked as a list
+  of Projects before anything is sent. A Project outside the ticket's own domains is refused with
+  `REFERENCE_OUTSIDE_DOMAIN` (exit code 2), reported with the Project's key and the fix: reference
+  only Projects in the ticket's own domains.
 - `promote: true` in the manifest is an explicit promotion: commit it only when the person asked
   for the work to run.
 
@@ -2246,6 +2267,7 @@ See [Workers](workers.md).
 | `pidgen worker restart [--force]` | Stop the detached worker or container as `worker stop` does, then start it detached again with the arguments it was started with (its run record's command, or the container's `ai.pidgen.worker.args` label) and the two-second startup check of `worker start --detach`. `data` is `stopped` (what `worker stop` reports for the old worker), `record` (the new run record) and `running: true`. Nothing running (no record, or a stale one) exits 4 with `WORKER_NOT_RUNNING` and starts nothing; a worker still running after `--timeout` exits 8 with `TIMEOUT` and is left running, unless `--force` kills it and the restart continues; a new worker that exits during the startup check exits 1 with `WORKER_EXITED` and the last 20 log lines in `error.details.log_tail`. It takes no `-- args`: to change them, run `worker stop`, then `worker start --detach -- <args>` |
 | `pidgen worker status [--host <worker>]` | Show the detached worker record and local liveness and, with a credential, the App Service's record of this worker (`GET /workers`), or of the worker `--host` names by its name or id |
 | `pidgen worker doctor [-- args]` | Run `pidgen-worker doctor --json` (with `docker exec` in the container) and return its report |
+| `pidgen worker dashboard [--no-open] [-- args]` | Run `pidgen-worker dashboard` in the foreground, opening the page in your browser by default (the worker's `--open`; `--no-open` only prints the link), as foreground `worker start` does: inherited standard streams, signals forwarded, no envelope, and `pidgen` exits with the worker's exit status. The worker serves a local page, on this machine's loopback address behind a single-use link it prints, for seeing and changing that worker; the worker's flags after `--` are `--port <n>` and `--idle-minutes <n>`. It is a separate process from a running worker, writes no run record, and runs whether or not the worker is running. A worker that exits 2 gets one hint line on standard error, to update it with `pidgen worker update --restart` if it did not recognise `dashboard`. A container install is refused with `DASHBOARD_UNSUPPORTED` (exit 2) and no docker command runs |
 | `pidgen worker login claude\|codex` | Sign the coding agent in to its default home, which the worker reads: run its login with the terminal inherited (`claude auth login`; `codex login --device-auth`), then its status command (`claude auth status`; `codex login status`) |
 | `pidgen worker subscriptions <worker>` | Show a worker's provider subscriptions per harness: primary, active, login, entitlement, quota and pause (`GET /workers/{host_id}/subscriptions`) |
 | `pidgen worker subscriptions use <worker> <harness> <label> [--move-continuing]` | Make one of a worker's subscriptions primary for a harness (`GET /workers/{host_id}/subscriptions`, then `PUT /workers/{host_id}/subscriptions/{harness}/primary`) |

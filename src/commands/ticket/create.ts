@@ -2,8 +2,16 @@ import type { Command } from "commander";
 import { PUBLIC_API_DOCUMENT } from "../api/document.js";
 import type { GlobalOptions, RunContext } from "../../core/context.js";
 import { DOMAIN_EPIC_REFUSED_FIELDS } from "../../core/domain-epics.js";
-import { optionalText } from "../../core/domains.js";
-import { inputInvalid, readInput, validateBody, type InputIssue } from "../../core/input.js";
+import { collect, optionalText } from "../../core/domains.js";
+import { usageError } from "../../core/errors.js";
+import {
+  inputInvalid,
+  readInput,
+  validateBody,
+  type InputIssue,
+  type OpenApiDocument,
+} from "../../core/input.js";
+import { addReferences, reportingReferenceRefusal, withReferences } from "../../core/references.js";
 import type { CommandResult, CommandSpec } from "../../core/registry.js";
 import { renderDetails } from "../../core/resource-human.js";
 import { openSession } from "../../core/session.js";
@@ -16,6 +24,12 @@ type CreatedTicket = components["schemas"]["CreatedTicket"];
 export const CREATE_ROUTE = { method: "post", path: "/tickets" } as const;
 
 /**
+ * The document `ticket create` checks its body against: the public API document, with the
+ * `references` the server has agreed but not yet published (src/core/references.ts).
+ */
+export const TICKET_CREATE_DOCUMENT: OpenApiDocument = withReferences(PUBLIC_API_DOCUMENT);
+
+/**
  * Creates a ticket from the file `source` names (`-` reads standard input) with `POST /tickets`.
  * With `kind`, the body's `kind` is set to it; a file that names another kind is `INPUT_INVALID`.
  *
@@ -26,6 +40,10 @@ export const CREATE_ROUTE = { method: "post", path: "/tickets" } as const;
  * `project_id`, `branch_mode`, `feature_branch`, another kind or another `domain_id`, is
  * `INPUT_INVALID` and nothing is sent. A terminal is told `Initiative <key> created.` Without
  * `domain` nothing changes.
+ *
+ * Each of `references` (the `--reference` Projects) is added to the body's `references` once,
+ * after those the file names. A `REFERENCE_OUTSIDE_DOMAIN` refusal is reported with the Project's
+ * key and the fix.
  */
 export async function createTicket(
   ctx: RunContext,
@@ -33,6 +51,7 @@ export async function createTicket(
   source: string,
   kind?: TicketKind,
   domain?: string,
+  references: readonly string[] = [],
 ): Promise<CommandResult> {
   if (domain !== undefined && kind !== undefined && kind !== "epic") {
     throw inputInvalid(`--domain files an Initiative, which is not a ${kind}.`, {
@@ -55,13 +74,12 @@ export async function createTicket(
     value = { ...value, kind: asked };
   }
   if (domain !== undefined && isRecord(value)) value = domainEpicBody(value, domain);
-  const body = validateBody(PUBLIC_API_DOCUMENT, CREATE_ROUTE.method, CREATE_ROUTE.path, value);
+  value = addReferences(value, references);
+  const body = validateBody(TICKET_CREATE_DOCUMENT, CREATE_ROUTE.method, CREATE_ROUTE.path, value);
   const session = await openSession(ctx, global);
-  const response = await session.client.request<CreatedTicket>({
-    method: "POST",
-    path: CREATE_ROUTE.path,
-    body,
-  });
+  const response = await reportingReferenceRefusal(() =>
+    session.client.request<CreatedTicket>({ method: "POST", path: CREATE_ROUTE.path, body }),
+  );
   const result: CommandResult = { data: response.data, meta: session.meta(response) };
   if (domain !== undefined) result.human = initiativeCreated(response.data, ctx.io.stdoutColumns);
   return result;
@@ -113,6 +131,23 @@ export function givenDomain(options: Record<string, unknown>): string | undefine
   return optionalText(options, "domain");
 }
 
+/** The `--reference <project>` option of `ticket create`: repeatable, each a Project. */
+export const REFERENCE_OPTION = [
+  "--reference <project>",
+  "a Project this ticket's refinement may read, by id or key prefix (repeatable); it must be in one of the ticket's own domains",
+  collect,
+] as const;
+
+/** The `--reference` values a command was given, trimmed; an empty one is a usage error (exit 2). */
+export function givenReferences(options: Record<string, unknown>): string[] {
+  const given = (options["reference"] as string[] | undefined) ?? [];
+  return given.map((value) => {
+    const trimmed = value.trim();
+    if (trimmed === "") throw usageError("--reference needs a Project.", { option: "--reference" });
+    return trimmed;
+  });
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -135,6 +170,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * or a file naming `project_id`, `branch_mode` or `feature_branch`, is `INPUT_INVALID` (exit 2).
  * The server's `DOMAIN_HAS_NO_PROJECTS` exits 5, `DOMAIN_PROJECT_CONFLICT` and
  * `EPIC_FIELD_REFUSED` exit 2, `DOMAIN_NOT_FOUND` exits 4, and a 403 exits 3.
+ *
+ * `--reference <project>`, repeatable, names a Project the ticket's reading runs (refinement,
+ * queries) may read: each is sent in the body's `references`, after those the file names. A
+ * Project outside the ticket's own domains is refused 422 `REFERENCE_OUTSIDE_DOMAIN` (exit 2),
+ * reported with the Project's key and the fix. An empty `--reference` is `CLI_USAGE` (exit 2).
  */
 export const ticketCreate: CommandSpec = {
   path: ["ticket", "create"],
@@ -147,7 +187,8 @@ export const ticketCreate: CommandSpec = {
         "the ticket as JSON or YAML (see pidgen ticket template); - reads standard input",
       )
       .addOption(kindOption("the kind of ticket to create; epic files an Epic"))
-      .option(...DOMAIN_OPTION);
+      .option(...DOMAIN_OPTION)
+      .option(...REFERENCE_OPTION);
   },
   async run(ctx, { options, global }) {
     return createTicket(
@@ -156,6 +197,7 @@ export const ticketCreate: CommandSpec = {
       String(options["file"]),
       givenKind(options),
       givenDomain(options),
+      givenReferences(options),
     );
   },
 };

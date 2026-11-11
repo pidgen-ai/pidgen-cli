@@ -2,6 +2,87 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.7
+
+The seventh alpha, published to npm under `alpha` and `latest`. `pidgen worker dashboard` opens the
+installed worker's local dashboard page. `pidgen ticket types` shows each
+type's When to use and the title of the workflow it runs, and `pidgen-file-ticket` chooses a
+ticket's type from it. `pidgen ticket create --reference` and a manifest's `references` name other
+Projects a ticket's reading runs may read. Human output writes times in the machine's time zone,
+and the run skills read an implement node that runs review rounds.
+
+### `pidgen worker dashboard`
+
+- `pidgen worker dashboard [--no-open] [-- args]` runs the installed worker's `pidgen-worker dashboard` in the
+  foreground, as foreground `worker start` does: inherited standard streams, forwarded signals, no
+  envelope, and `pidgen` exits with the worker's exit status. The worker serves a local page on
+  `127.0.0.1`, behind a single-use link it prints, for seeing and changing that worker; the
+  worker's flags after `--` are `--port <n>` and `--idle-minutes <n>`. By default it opens the page
+  in your browser, by passing the worker's `--open`, which still prints the link (and, on a machine
+  with no display, says no browser was opened); `--no-open` only prints the link. It is a separate
+  process from a running worker, writes no run record, and is not refused while the worker runs.
+- A container install is refused with `DASHBOARD_UNSUPPORTED` (exit code 2) and no docker command
+  runs: the page listens on the container's own loopback address, which a browser on this machine
+  cannot reach.
+- When the worker exits 2, `pidgen` writes one hint line to standard error: a worker release from
+  before the dashboard does not know the subcommand, and the hint says to update it with
+  `pidgen worker update --restart`. No other status adds output.
+
+### Ticket types show When to use
+
+- `pidgen ticket types` shows each type's When to use (`when_to_use`) and the display title of the
+  workflow it runs (`workflow_title`). JSON carries the full When to use, or `null` for a type
+  without one; the table shows both as columns, When to use shortened to fit the terminal with an
+  ellipsis, and empty for a type without one. A server that does not send the two fields yet is
+  read as sending `null`.
+- The two fields are agreed with the App Service and not yet published, so the CLI carries them
+  as a pending fragment, `contracts/pending/workflow-types.json`, and validates each answer
+  against it: one that does not match is `UNEXPECTED_RESPONSE` (exit code 1).
+- `pidgen-file-ticket` chooses a ticket's type from `pidgen ticket types`: the type whose When to
+  use fits the work, saying why in one line. It never chooses a type without When to use, and
+  falls back to the type the person stated, or the Account's default type (the one whose
+  `default` is true), when none fits.
+  Refresh installed copies with `pidgen skills install` after upgrading the CLI.
+
+### Reference Projects on ticket create and in manifests
+
+- `pidgen ticket create --reference <project>`, repeatable, names another Project the ticket's
+  reading runs (refinement, queries) may read, by id or ticket-key prefix. Each is sent in
+  `references` on `POST /tickets`, after any the file names, once each. A ticket manifest's root
+  and each child take `references` too, checked as a list of Projects before anything is sent;
+  `pidgen manifest template` writes it, commented out.
+- A reference to a Project outside the ticket's own domains is refused with
+  `REFERENCE_OUTSIDE_DOMAIN` (exit code 2). The message names the Project's key and the fix:
+  reference only Projects in the ticket's own domains. `error.details` keeps the server's details.
+- The server must publish `references`; until it does, it refuses the field.
+- `pidgen-file-ticket` and `pidgen-decompose-plan` say when to use a reference (reading another
+  Project while refining), a contract or attachment (an interface the work relies on), or a
+  domain-level Request (`pidgen request submit --target domain:<domain>`, for work that spans
+  Projects). Refresh installed copies with `pidgen skills install` after upgrading the CLI.
+
+### Human output writes times in the machine's time zone
+
+- Human output writes every ISO 8601 instant in the machine's time zone, in the form
+  `Sun 25 Oct at 7:03 AM PDT` (the year is added when it is not the current one). Set `TZ` to
+  change the zone. Calendar dates such as `2026-10-15` are shown as sent.
+- A sentence the server sends with `moments` (a History entry's summary, an intervention's reason,
+  a refusal's message) shows each moment in local time, and the `moments` list is not shown.
+- `--format json` is unchanged: it keeps the API's UTC instants and `moments`.
+
+### The run skills read an implement node that runs review rounds
+
+- `pidgen-retry-run` and `pidgen-query-tickets` describe the `implement` node of the
+  `pidgen-implement-reviewed` workflow: `pidgen run node-output <run> implement --format json`
+  returns a loop group whose output is the loop envelope (`exhausted`, `iterations`, `final`),
+  and `final` is the review gate's result: `verdict` (`done` or `issues`), `issues` (each with
+  `reviewer`, `severity`, `path`, `summary` and `evidence`, `blocking` first) and the
+  implementer's own `complete`, `summary`, `remaining`, `criteria` and `handoff` for that round.
+- The skills read `final.remaining` for what the implementer left and `final.issues` for what the
+  reviewers found. `pidgen-retry-run` treats a run that exhausted its review rounds as failed on
+  its merits: unresolved `blocking` issues are fixed first, not retried unchanged.
+- Refresh installed copies with `pidgen skills install` after upgrading the CLI. Commands,
+  envelopes and exit codes are unchanged.
+
 ## 0.1.0-alpha.6
 
 The sixth alpha, published to npm under `alpha` and `latest`. A fresh `pidgen setup` finds the

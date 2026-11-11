@@ -142,6 +142,11 @@ ${pad}open_questions: []
 ${pad}# Capabilities the work needs, e.g. a language or a tool, as plain names.
 ${pad}# Readiness: no points; the score does not count them.
 ${pad}required_capabilities: []
+${pad}# Other Projects this ticket's refinement may read, by id or ticket-key prefix, each in one of
+${pad}# the ticket's own domains; implementation never gets a checkout of them. Carry an interface in
+${pad}# a contract or context_artifacts instead. Readiness: no points.
+${pad}# Uncomment to name them; a Project outside the ticket's domains is REFERENCE_OUTSIDE_DOMAIN.
+${pad}# references: [OTHER]
 ${pad}# ${options.agentNote}
 ${pad}# Uncomment to select an Agent of the Account (an Agent ID, not a model name); null is refused.
 ${pad}# team_member_id: AGENT-EXAMPLE

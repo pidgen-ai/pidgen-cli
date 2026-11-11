@@ -37,6 +37,7 @@ adds `stranded_cause` and the run's `nodes`, each with its `status` and `latest_
 | `repairing` (`recovery_count` below `recovery_limit`) | self-repair in flight | **wait** — a retry now discards it |
 | `stranded` with `cause` `contract_uncovered` | no connected worker can run the next step | fix the workers, not the ticket (§3) |
 | `status` `failed`, `terminal_reason_code` `stranded` | repair was tried and changed nothing | **retry** — the case this skill is for |
+| `status` `failed`, the `implement` node's output has `exhausted` `true` | the review rounds ran out with issues open: failed on its merits | read `final.issues`, fix what they name, then retry (§3) |
 | `status` `failed`, any other reason | the work failed on its merits | read the failing node first, then retry |
 
 Read the failing node's output before deciding; its `error` often says the retry will fail the
@@ -45,6 +46,28 @@ same way:
 ```console
 pidgen run node-output WFR-EXAMPLE-70 implement --format json
 ```
+
+### When the implement node ran review rounds
+
+A ticket that ran the `pidgen-implement-reviewed` workflow implements in review rounds: each
+round the implementer works and reviewers check the result. Its `implement` node is a loop group,
+and the node's `output` is the loop envelope:
+
+- `exhausted`: `true` when the rounds ran out before the reviewers were satisfied.
+- `iterations`: how many rounds ran.
+- `final`: the review gate's result for the last round.
+
+`final.verdict` is `done` (the reviewers found nothing left to fix) or `issues`. `final.issues`
+lists what the reviewers found, `blocking` first, each with `reviewer`, `severity` (`blocking`,
+`major` or `minor`), `path`, `summary` and `evidence`. `final.complete`, `final.summary`,
+`final.remaining`, `final.criteria` and `final.handoff` are the implementer's own final output for
+that round. Read `final.remaining` for what the implementer left undone and `final.issues` for
+what the reviewers found; read both before deciding.
+
+A run failed by exhausting its review rounds is failed on its merits, not stranded: it ends with
+`exhausted` `true` and the last round's issues in `final.issues`. Unresolved `blocking` issues
+after exhaustion are the work's merits, not a reason to retry unchanged: a retry with the same
+input runs the same rounds into the same issues. Fix what they name first (§3), then retry.
 
 ## 2. Ask the server what it offers
 
@@ -85,6 +108,10 @@ each in `recommended_action`; the same decisions appear there.
   run continue with no action at all.
 - **The failure is in the ticket.** If the failing node's output shows the instructions are wrong,
   edit the ticket (`pidgen ticket edit --format json`) or file new work rather than retrying unchanged input.
+- **The review rounds ran out** (`implement`'s output has `exhausted` `true`). The reviewers'
+  `blocking` issues in `final.issues` still stand, and an unchanged retry meets them again. Show
+  them and `final.remaining` to the user; correct the ticket or the inputs the issues point at, or
+  file the work they describe, before any retry.
 - **A step failed and the rest of the run is worth keeping.** Replay that step instead — see
   `pidgen-replay-node`. A retry re-executes everything.
 

@@ -134,6 +134,17 @@ body it sends against it until the server publishes them. `pidgen project inspec
   `propose_fix` cannot open the pull request. Settled here where the stated contract is silent:
   the schema names, the request's fields and that it answers synchronously.
 
+## When to use on workflow types
+
+The App Service has agreed these and not yet published them, so the CLI carries them as a pending
+fragment, `contracts/pending/workflow-types.json`, and validates every answer of
+`pidgen ticket types` against it until the server publishes them:
+
+- `when_to_use` (a string of at most 600 characters, or `null` when the type states none) and
+  `workflow_title` (the display title of the workflow the type is bound to) on each
+  `WorkflowTypeResource` `GET /api/v1/workflow-types` lists. No other field changes. Neither is
+  required: a server from before the fields still matches, and the CLI reads them as `null`.
+
 ## Not yet published
 
 These features wait for the public API to publish what they need, and are marked *planned* where

@@ -1,6 +1,6 @@
 {
   "name": "pidgen",
-  "version": "0.1.0-alpha.6",
+  "version": "0.1.0-alpha.7",
   "description": "Command-line client and agent skills for Pidgen",
   "license": "Apache-2.0",
   "repository": {
@@ -33,7 +33,7 @@
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit",
-    "contract:generate": "openapi-typescript contracts/openapi.json -o src/generated/api.d.ts && openapi-typescript contracts/pending/worker-enrollments.json -o src/generated/worker-enrollments.d.ts && openapi-typescript contracts/pending/project-readiness.json -o src/generated/project-readiness.d.ts",
+    "contract:generate": "openapi-typescript contracts/openapi.json -o src/generated/api.d.ts && openapi-typescript contracts/pending/worker-enrollments.json -o src/generated/worker-enrollments.d.ts && openapi-typescript contracts/pending/project-readiness.json -o src/generated/project-readiness.d.ts && openapi-typescript contracts/pending/workflow-types.json -o src/generated/workflow-types.d.ts",
     "contract:pull": "node scripts/contract-pull.mjs",
     "release:check": "node scripts/release-check.mjs",
     "api:coverage": "node scripts/api-coverage.mjs",

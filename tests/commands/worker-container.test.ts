@@ -494,6 +494,26 @@ describe("pidgen worker start/stop/status/doctor with a container install", () =
   });
 });
 
+describe("pidgen worker dashboard (container)", () => {
+  it("is refused with DASHBOARD_UNSUPPORTED, exit 2, and calls no docker", async () => {
+    const setup = await installed();
+    await runCli(["worker", "start", "--detach"], setup.ctx);
+    setup.ctx.out.length = 0;
+    setup.log.length = 0;
+
+    expect(await runCli(["worker", "dashboard", "--", "--port", "8765"], setup.ctx)).toBe(
+      ExitCode.Usage,
+    );
+    expect(envelope(setup.ctx)).toMatchObject({
+      ok: false,
+      data: null,
+      error: { code: "DASHBOARD_UNSUPPORTED", details: { form: "container" } },
+    });
+    expect(setup.dockerCalls()).toEqual([]);
+    expect(setup.log).toEqual([]);
+  });
+});
+
 describe("pidgen worker restart (container)", () => {
   /** A container started with `--label alpha`; output and the tool log are cleared. */
   async function running(options: ContainerContextOptions = {}) {

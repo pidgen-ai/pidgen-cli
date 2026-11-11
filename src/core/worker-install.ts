@@ -132,6 +132,12 @@ export interface WorkerAdapter {
   stop(force: boolean, timeoutSeconds: number): Promise<{ record: RunRecord; forced: boolean }>;
   status(): Promise<{ record: RunRecord | null; running: boolean }>;
   doctor(args: readonly string[]): Promise<Record<string, unknown>>;
+  /**
+   * Runs `pidgen-worker dashboard` in the foreground and resolves with its exit status. The
+   * container form refuses with `DASHBOARD_UNSUPPORTED` (exit 2): the page listens on the
+   * container's own loopback address, which the host's browser cannot reach.
+   */
+  dashboard(args: readonly string[]): Promise<number>;
 }
 
 /**
@@ -947,6 +953,7 @@ export function wheelAdapter(ctx: RunContext): WorkerAdapter {
     stop: (force, timeoutSeconds) => stopWorker(ctx, { force, timeoutSeconds }, ctx.workerRuntime),
     status: () => workerStatus(ctx, ctx.workerRuntime),
     doctor: (args) => runWorkerDoctor(ctx, args, ctx.workerRuntime),
+    dashboard: (args) => runWorkerForeground(ctx, ["dashboard", ...args], ctx.workerRuntime),
   };
 }
 

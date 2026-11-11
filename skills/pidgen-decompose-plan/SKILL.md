@@ -58,6 +58,56 @@ cohorts, children, shared files and blocked-by cohorts in the user's plan. Inclu
 from other Projects, their provider tickets and any external QA or release sequencing. Inspect
 merge policies with `pidgen project show --format json` and `pidgen ticket show <epic> --kind epic --format json` before filing into auto merge workflows.
 
+### Reference another Project, carry its interface, or file a domain Request
+
+A child or a root may need another Project in one of three ways; choose by what that Project is
+to the work:
+
+- A **reference** when the ticket's refinement must be reading another Project, its code, docs or
+  conventions, to plan the slice. Name it in the root's or the child's `references`, a list of
+  Projects by id or ticket-key prefix. Only the reading runs read it (refinement, queries and a
+  domain Request's decomposition); implementation never gets a checkout of it. Reference only
+  Projects in the ticket's own domains: a Project outside them is refused with
+  `REFERENCE_OUTSIDE_DOMAIN`, whose message names the Project's key, and nothing is committed.
+  Remove it from `references` and preview again. A Project in no domain may reference any
+  Project of its Account.
+- A **contract or attachment** when the slice relies on another Project's interface: attach the
+  spec file as a `context_artifacts` item (a child's brief), state the interface in its scope, or
+  link a contract with the `pidgen-manage-contracts` skill (see "Work that spans Projects"). That
+  is what the implementer builds against; a reference alone never reaches it.
+- A **domain-level Request** when the work spans Projects and is not yet split: file it in the
+  domain, and its decomposition reads the domain's Projects and proposes the work for each:
+
+```console
+pidgen request submit --kind feature --title "Show payment status everywhere" --body "The web app and the mobile app both show a payment's status." --target domain:PAY --format json
+```
+
+For example, a cohort whose root reads the client library while refining:
+
+```yaml
+schema_version: pidgen.ticket-manifest.v1
+project_id: EXAMPLE
+epic_id: null
+promote: false
+root:
+  ref: root
+  title: Reuse the shared retry policy in the export job
+  objective: The export job retries with the same backoff as the shared client library.
+  workflow_type: implementation
+  references: [CLIENT]
+  acceptance_criteria:
+    - statement: An export retried after a timeout waits as the shared policy does.
+children:
+  - ref: backoff
+    title: Export job backs off like the shared policy
+    objective: The export job waits between retries as the shared client library does.
+    workflow_type: implementation
+    references: [CLIENT]
+    acceptance_criteria:
+      - statement: Two retries wait one and then two seconds.
+edges: []
+```
+
 ### Work that spans Projects
 
 A ticket's workspace contains its own Project's base. It cannot deliver another Project's

@@ -4,11 +4,21 @@ A worker runs Pidgen work on a machine you control. Install it on the machine th
 the work; you can use the CLI from other machines without installing a worker on each one.
 The worker is the separate `pidgen-worker` program, with its own licence and credential.
 
+There are two ways to install a worker:
+
+- **With the Pidgen CLI** (recommended). `pidgen setup` checks the machine, installs the worker
+  and the coding agents you choose, signs them in, sizes their sessions, and enrolls and starts
+  the worker, one question at a time. Start at [Before you start](#before-you-start).
+- **With the install script, without the CLI.** One `curl … | sh` line from the Pidgen web app
+  checks the machine, then installs, enrolls and starts the worker. Use it on a machine where you
+  don't use the CLI, such as a server. See [Install without the CLI](#install-without-the-cli).
+
 ## Before you start
 
 You need:
 
-- The [Pidgen CLI](getting-started.md#1-install-the-cli), which needs Node.js and npm.
+- The [Pidgen CLI](getting-started.md#1-install-the-cli), which needs Node.js and npm. The
+  [install script](#install-without-the-cli) doesn't need it.
 - Linux on x86_64 or aarch64, or macOS on Intel or Apple silicon.
 - `git` 2.38 or later. `pidgen doctor` and setup name the command for your system when it is
   missing or older:
@@ -566,6 +576,113 @@ the name the server suggests in `error.details.suggested_name`: enroll again und
 checks that the process stays alive for two seconds; it does not wait for the server connection.
 Check status again until the server reports it connected. See [Worker reference](workers.md)
 for enrollment failures, lifecycle behavior, and automation details.
+
+## Install without the CLI
+
+The install script installs, enrolls and starts a worker on a machine that does not have the
+Pidgen CLI: a server, or any machine other than the one you use the CLI on. It needs only `curl`
+and a POSIX shell, on Linux or macOS.
+
+Don't run it on a machine where you already ran `pidgen setup`. That machine already has its
+worker, and the script stops without using the token rather than enroll a second one.
+
+### Prepare the machine
+
+The machine needs the system and `git` that [Before you start](#before-you-start) lists, and at
+least one coding agent, installed and signed in. The script installs `uv` when it is missing, but
+never installs or signs in a coding agent, so do that first:
+
+| Coding agent | Install | Sign in |
+|---|---|---|
+| Claude Code | `npm install -g @anthropic-ai/claude-code` | `claude auth login` |
+| Codex | `npm install -g @openai/codex` | `codex login --device-auth` |
+| Pi | `npm install -g @earendil-works/pi-coding-agent` | run `pi`, then type `/login` |
+
+### Get the install command
+
+1. In the Pidgen web app, open **Setup** and go to its worker step
+   (`/setup/worker` on your Pidgen server).
+2. Under **Install the worker on another machine**, give the worker a name and choose **Create
+   install command**.
+3. Choose **Copy command**. The command carries a one-time enrollment token: it works once and
+   expires after 24 hours, so copy it when you are ready to run it.
+
+The command looks like this:
+
+```sh
+curl -fsSL https://pidgen.ai/install.sh | sh -s -- --server https://pidgen.example.com --token pidgen_enroll_…
+```
+
+`pidgen.example.com` stands for your Pidgen server's address; the command you copy has the real
+one.
+
+To read the script before you run it, open <https://pidgen.ai/install.sh> in a browser, or choose
+**Read the script** on the same page. The script is the same for everyone and contains no secret:
+the server address and the token are the arguments you pass it. You can give the token in the
+`PIDGEN_ENROLLMENT_TOKEN` environment variable instead of `--token`; the script never puts it on
+any command's command line.
+
+### Run it
+
+Paste the command into a terminal on the machine. The script prints one line per check, `ok`,
+`warn`, `fail` or `skip`, with what it found and, for a problem, the fix:
+
+```text
+pidgen-worker install: checking this machine before changing it
+ok   platform: Linux x86_64
+ok   curl: /usr/bin/curl
+ok   git: git 2.43.0
+ok   enrollment: no worker is enrolled in ~/.pidgen
+…
+ok   server: https://pidgen.example.com/api/v1/health answers as Pidgen
+```
+
+It works in seven phases and stops at the end of any phase in which a check failed:
+
+| Phase | What it checks or does |
+|---|---|
+| 1. Local | The system is Linux or macOS, `curl` and `git` are present, and this machine's worker home (`~/.pidgen`, or `$PIDGEN_HOME`) is not already enrolled with the same server |
+| 2. uv | Installs `uv` with [uv's own installer](https://docs.astral.sh/uv/) when it is missing, and checks that it can run Python 3.12 |
+| 3. Remote | The server answers as Pidgen, it names the worker release to install, the token is unused and unexpired, and at least one coding agent is on `PATH` |
+| 4. Install | Downloads this machine's `pidgen-worker` wheel from PyPI, verifies its signature against the worker's release workflow, and installs it in its own environment under `~/.pidgen/worker`. A wheel that does not verify is not installed. Running the command accepts the worker's licence: [Pidgen Worker End-User Licence Agreement](https://pidgen.ai/legal/eula) |
+| 5. Sign-in | At least one coding agent is signed in |
+| 6. Enroll | Enrolls the worker with the token and starts it in the background |
+| 7. Prove | Waits up to 60 seconds for the worker to connect, then runs `pidgen-worker doctor --check-service` |
+
+The token is used only in phase 6. When a check in phases 1 to 5 fails, fix what it names and run
+the same command again. Once the last line says `done`, the setup page shows the worker and its
+checks turn green.
+
+Two options change what the script does:
+
+- `--check` runs phases 1 to 3 only. It installs nothing but `uv` and doesn't use the token.
+- `--replace` enrolls a new worker in place of one this worker home already holds for the same
+  server. The earlier credential is moved aside to `~/.pidgen/worker.env.replaced`.
+
+Add an option after the token, for example `… --token pidgen_enroll_… --check`.
+
+### Manage a worker installed by the script
+
+The script puts `pidgen-worker` in `~/.pidgen/worker/bin`, which is not on `PATH`. Run it by that
+path, or add the directory to `PATH`:
+
+```sh
+export PATH="$HOME/.pidgen/worker/bin:$PATH"
+```
+
+| Task | Command |
+|---|---|
+| Check the worker and its connection | `pidgen-worker doctor --check-service` |
+| Stop the worker | `pidgen-worker node stop` |
+| Start it again, for example after a reboot | `pidgen-worker node start` |
+| Restart it | `pidgen-worker node restart` |
+| Change how many sessions a coding agent runs | `pidgen-worker capacity set claude --max 2` (see [Plans and session caps](#plans-and-session-caps)) |
+
+The script installs a worker but does not update one: running it again keeps a worker that is
+already on the current release series.
+
+The worker's log is `~/.pidgen/logs/worker-manager.log`. To keep the worker running across
+reboots, see [Run as a service](https://docs.pidgen.ai/worker/run-as-a-service/).
 
 ## Restrict the models this machine runs
 

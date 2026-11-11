@@ -31,6 +31,10 @@ const CONFIG: Config = {
   },
 };
 
+/** A When to use longer than any table gives it, so the table shortens it. */
+const BUG_WHEN_TO_USE =
+  "Something that worked, or was specified, no longer does. Name the steps, the expected result and the actual result, so the fix can be proved by a test that fails before it.";
+
 const TYPES = [
   {
     key: "bug",
@@ -40,6 +44,8 @@ const TYPES = [
     default: true,
     ticket_count: 3,
     version: 1,
+    when_to_use: BUG_WHEN_TO_USE,
+    workflow_title: "Implementation",
   },
   {
     key: "research",
@@ -49,19 +55,31 @@ const TYPES = [
     default: false,
     ticket_count: 0,
     version: 2,
+    when_to_use: null,
+    workflow_title: "Research and report",
   },
 ];
 
+/** The same types as a server from before When to use answers them: without the two fields. */
+const LEGACY_TYPES = TYPES.map((type) => {
+  const legacy: Record<string, unknown> = { ...type };
+  delete legacy["when_to_use"];
+  delete legacy["workflow_title"];
+  return legacy;
+});
+
+function answer(data: unknown) {
+  return () =>
+    jsonResponse(
+      200,
+      { status: "ok", data, meta: null },
+      { "x-request-id": "req_fake_types", "pidgen-api-version": "1.0" },
+    );
+}
+
 async function setup(options: { respond?: (call: Call) => Response; config?: Config | null } = {}) {
   const calls: Call[] = [];
-  const respond =
-    options.respond ??
-    (() =>
-      jsonResponse(
-        200,
-        { status: "ok", data: TYPES, meta: null },
-        { "x-request-id": "req_fake_types", "pidgen-api-version": "1.0" },
-      ));
+  const respond = options.respond ?? answer(TYPES);
   const ctx = await testContext({
     fetch: (input, init) => {
       const call: Call = {
@@ -108,10 +126,17 @@ describe("pidgen ticket types", () => {
           key: expect.any(String),
           label: expect.any(String),
           workflow_name: expect.any(String),
+          workflow_title: expect.any(String),
           ticket_count: expect.any(Number),
         }),
       );
+      expect(type).toHaveProperty("when_to_use");
     }
+    // The full When to use, untruncated, and null for a type without one.
+    expect((body.data as Record<string, unknown>[]).map((type) => type["when_to_use"])).toEqual([
+      BUG_WHEN_TO_USE,
+      null,
+    ]);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ method: "GET", url: `${SERVER}/api/v1/workflow-types` });
     expect(calls[0]?.headers).toMatchObject({
@@ -129,6 +154,70 @@ describe("pidgen ticket types", () => {
     for (const label of ["Key", "Label", "Workflow name", "Ticket count"])
       expect(table).toContain(label);
     expect(table).toContain("research");
+  });
+
+  it("types shows each type's When to use and workflow title in the table, When to use shortened", async () => {
+    const { ctx } = await setup();
+    ctx.io.stdoutColumns = 160;
+    expect(await runCli(["--format", "table", "ticket", "types"], ctx)).toBe(ExitCode.Ok);
+    const table = ctx.out.join("");
+    const lines = table.split("\n");
+    const header = lines.find((line) => line.startsWith("Key"))!;
+    expect(header).toContain("Workflow title");
+    expect(header).toMatch(/When to use$/);
+    for (const line of lines) expect(line.length).toBeLessThanOrEqual(160);
+    const bug = lines.find((line) => line.startsWith("bug"))!;
+    expect(bug).toContain("Implementation");
+    // When to use is cut on the table's line, and ends with an ellipsis; JSON keeps it whole.
+    expect(bug).toContain(BUG_WHEN_TO_USE.slice(0, 20));
+    expect(bug).toMatch(/…$/);
+    expect(table).not.toContain(BUG_WHEN_TO_USE);
+    // A type without When to use shows nothing there, not "null".
+    const research = lines.find((line) => line.startsWith("research"))!;
+    expect(research).toContain("Research and report");
+    expect(research).not.toContain("null");
+    expect(research.trimEnd()).toBe(research);
+    expect(research.length).toBeLessThan(header.length);
+  });
+
+  it("types at a narrow terminal lists each type with its When to use shortened", async () => {
+    const { ctx } = await setup();
+    ctx.io.stdoutColumns = 60;
+    expect(await runCli(["--format", "table", "ticket", "types"], ctx)).toBe(ExitCode.Ok);
+    const text = ctx.out.join("");
+    expect(text).toContain("When to use:");
+    expect(text).toContain("Workflow title: Research and report");
+    expect(text).not.toContain(BUG_WHEN_TO_USE);
+    expect(text).toContain("…");
+    expect(text).not.toContain("null");
+  });
+
+  it("types from a server that does not send when_to_use or workflow_title reads them as null", async () => {
+    const { ctx } = await setup({ respond: answer(LEGACY_TYPES) });
+    const { code, body } = await run(ctx, "ticket", "types");
+    expect(code).toBe(ExitCode.Ok);
+    expect(body.data).toEqual(
+      LEGACY_TYPES.map((type) => ({ ...type, when_to_use: null, workflow_title: null })),
+    );
+    ctx.out.length = 0;
+    ctx.io.stdoutColumns = 160;
+    expect(await runCli(["--format", "table", "ticket", "types"], ctx)).toBe(ExitCode.Ok);
+    const table = ctx.out.join("");
+    expect(table).toContain("When to use");
+    expect(table).not.toContain("null");
+  });
+
+  it("types whose answer does not match the contract exits 1 with UNEXPECTED_RESPONSE", async () => {
+    const { ctx } = await setup({
+      respond: answer([{ ...TYPES[0], when_to_use: "x".repeat(601) }]),
+    });
+    const { code, body } = await run(ctx, "ticket", "types");
+    expect(code).toBe(ExitCode.Unexpected);
+    expect(body).toMatchObject({
+      ok: false,
+      data: null,
+      error: { code: "UNEXPECTED_RESPONSE", details: { route: "GET /api/v1/workflow-types" } },
+    });
   });
 
   it("types refused by the server (503 SERVICE_UNAVAILABLE) keeps the code and exits 1", async () => {

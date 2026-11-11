@@ -741,3 +741,25 @@ describe("pidgen ticket show explains a failed step", () => {
     expect((body.data as Record<string, unknown>)["workflow_attention"]).toEqual(FAILED_ATTENTION);
   });
 });
+
+// z5-instants / z5-json: human output writes instants in the machine's zone
+// (TZ=America/Los_Angeles for every test, vitest.config.ts); calendar dates and JSON stay as sent.
+describe("pidgen ticket show writes times in the machine's time zone", () => {
+  const extra = { created_at: "2026-10-25T14:03:00Z", target_date: "2026-10-15" };
+
+  it("human output formats created_at and leaves the target date", async () => {
+    const { ctx } = await setup({ respond: detailServer(extra) });
+    ctx.now = () => Date.parse("2026-10-25T00:00:00Z");
+    const output = await table(ctx);
+    expect(output).toContain("Sun 25 Oct at 7:03 AM PDT");
+    expect(output).not.toContain("2026-10-25T14:03:00Z");
+    expect(output).toContain("2026-10-15");
+  });
+
+  it("--format json keeps the ISO instant", async () => {
+    const { ctx } = await setup({ respond: detailServer(extra) });
+    const { code, body } = await run(ctx, "ticket", "show", "ALPHA-12", "--format", "json");
+    expect(code).toBe(ExitCode.Ok);
+    expect(body.data).toMatchObject(extra);
+  });
+});
