@@ -292,8 +292,9 @@ async function writeWorkerEnv(home: string, lines: string[]): Promise<void> {
  * gets that far logs `["exchange", "done"]` or `["exchange", "skipped"]` to
  * FAKE_WORKER_LOG.exchanges. An exchange for a host id in FAKE_TAKEN_HOSTS (comma-separated) is
  * refused as the server refuses a taken host id: the worker prints its refusal line and exits 1,
- * writing nothing. FAKE_FAIL_ENROLL_RUN=<n> makes the n-th `enroll` (counted from 1) fail for
- * another reason, exit 1.
+ * writing nothing. FAKE_FAIL_ENROLL_RUN=<n>[,<n>…] makes the n-th `enroll` (counted from 1) fail for
+ * another reason, exit 1, printing FAKE_FAIL_ENROLL_OUTPUT_<n> when set, else FAKE_FAIL_ENROLL_OUTPUT
+ * when set.
  */
 const WORKER_SCRIPT = `#!${process.execPath}
 const fs = require("node:fs");
@@ -343,8 +344,8 @@ if (args[0] === "enroll" && saved !== null) {
 }
 if (args[0] === "enroll" && !keep) {
   const runs = fs.readFileSync(process.env.FAKE_WORKER_LOG, "utf8").split("\\n").filter((line) => line.startsWith('["enroll"')).length;
-  if (String(runs) === process.env.FAKE_FAIL_ENROLL_RUN) {
-    process.stderr.write("enrollment token not accepted (HTTP 401 ENROLLMENT_INVALID).\\n");
+  if ((process.env.FAKE_FAIL_ENROLL_RUN ?? "").split(",").includes(String(runs))) {
+    process.stderr.write(process.env["FAKE_FAIL_ENROLL_OUTPUT_" + runs] ?? process.env.FAKE_FAIL_ENROLL_OUTPUT ?? "enrollment token not accepted (HTTP 401 ENROLLMENT_INVALID).\\n");
     process.exit(1);
   }
   const hostId = value("--host-id") ?? process.env.FAKE_HOSTNAME;
@@ -1498,13 +1499,13 @@ describe("pidgen setup", () => {
       "pidgen worker install --runtime wheel --version 1.0.0 && pidgen worker verify",
     );
     expect(step(body, "enroll").command).toBe(
-      "pidgen worker enroll --label 'build box' -- --host-id 'build box' && pidgen worker start --detach",
+      "pidgen worker enroll --label build-box -- --host-id build-box && pidgen worker start --detach",
     );
-    expect(enrollments(h)[0]!.body).toEqual({ label: "build box", install_id: ANY_INSTALL_ID });
+    expect(enrollments(h)[0]!.body).toEqual({ label: "build-box", install_id: ANY_INSTALL_ID });
     // --label is the worker's host id too: pidgen-worker enroll gets it as --host-id.
     const enroll = (await h.workerLog()).find((args) => args[0] === "enroll")!;
-    expect(enroll.slice(-2)).toEqual(["--host-id", "build box"]);
-    expect(step(body, "enroll")).toMatchObject({ host_id: "build box", connected: true });
+    expect(enroll.slice(-2)).toEqual(["--host-id", "build-box"]);
+    expect(step(body, "enroll")).toMatchObject({ host_id: "build-box", connected: true });
     expect(stderr).toContain("(from --accept-licence)");
     expect(stderr).not.toContain(releaseList().eula.notice);
   });
@@ -1523,7 +1524,7 @@ describe("pidgen setup", () => {
       `pidgen auth login ${SERVER}`,
       "pidgen worker install",
       "pidgen worker verify",
-      "pidgen worker enroll --label 'build box' -- --host-id 'build box'",
+      "pidgen worker enroll --label build-box -- --host-id build-box",
       "pidgen worker start --detach",
       "pidgen worker status",
       "pidgen worker doctor",
@@ -2183,10 +2184,10 @@ describe("pidgen setup enrollment state", () => {
     });
   });
 
-  it("the name question refuses an empty name, one over 100 characters and a live worker's name in any case", async () => {
+  it("the name question refuses an empty name, one over 93 characters and a live worker's name in any case", async () => {
     const h = await harness({
       hostName: LAPTOP,
-      answers: [...ANSWERS, "   ", "x".repeat(101), "BUILD-BOX", "studio"],
+      answers: [...ANSWERS, "   ", "x".repeat(94), "BUILD-BOX", "studio"],
       state: { others: [otherInstall("build-box")] },
     });
 
@@ -2195,7 +2196,7 @@ describe("pidgen setup enrollment state", () => {
     expect(code).toBe(ExitCode.Ok);
     expect(h.questions).toHaveLength(8);
     expect(h.questions[5]).toContain("▲  Enter a name for this worker.");
-    expect(h.questions[6]).toContain("at most 100 characters");
+    expect(h.questions[6]).toContain("at most 93 characters");
     expect(h.questions[7]).toContain("▲  BUILD-BOX is taken");
     expect(enrollments(h)[0]!.body).toEqual({ label: "studio", install_id: ANY_INSTALL_ID });
   });
@@ -2525,6 +2526,270 @@ describe("pidgen setup withdraws an enrollment it cannot use", () => {
 
     expect(code).toBe(ExitCode.Ok);
     expect(withdrawals(h)).toEqual([]);
+  });
+});
+
+// A worker name follows one rule (spaces become "-"; letters, numbers, ".",
+// "_" and "-", starting with a letter or a number, at most 93), and a failed enroll says what to do.
+describe("pidgen setup worker names and enroll failures", () => {
+  const ANSWERS = ["", "", "", ""];
+  const RULE =
+    'A worker\'s name starts with a letter or a number and uses only letters, numbers, ".", "_" and "-", at most 93 characters.';
+  const enrollArgs = async (h: Harness) =>
+    (await h.workerLog()).filter((args) => args[0] === "enroll");
+  const listed = (name: string) =>
+    workerResource(true, { host_id: name, created_at: "2026-09-20T09:00:00Z" });
+
+  // spaces-become-hyphens, setup-says-the-name-changed
+  it("a typed name with spaces is enrolled with '-': the answer line, the step, the label and --host-id", async () => {
+    const h = await harness({ hostName: "sams-laptop", answers: [...ANSWERS, "  Mad-Max   1 "] });
+
+    const { code, body, stderr, log } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(stderr).toContain("◇  Worker name · Mad-Max-1\n");
+    expect(stderr).toContain("Enrolled as Mad-Max-1 in Example");
+    expect(enrollments(h)[0]!.body).toEqual({ label: "Mad-Max-1", install_id: ANY_INSTALL_ID });
+    expect((await enrollArgs(h))[0]!.slice(-2)).toEqual(["--host-id", "Mad-Max-1"]);
+    expect(log).toContain("$ pidgen worker enroll --label Mad-Max-1 -- --host-id Mad-Max-1");
+    expect(log).toContain("Mad-Max   1 becomes Mad-Max-1");
+    expect(step(body, "enroll")).toMatchObject({
+      host_id: "Mad-Max-1",
+      command:
+        "pidgen worker enroll --label Mad-Max-1 -- --host-id Mad-Max-1 && pidgen worker start --detach",
+    });
+  });
+
+  it("the name-taken check is made against the name with '-': a listed Mad-Max-1 keeps the question open", async () => {
+    const h = await harness({
+      hostName: "sams-laptop",
+      answers: [...ANSWERS, "Mad-Max 1", "studio"],
+      state: { others: [listed("Mad-Max-1")] },
+    });
+
+    const { code } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.questions).toHaveLength(6);
+    expect(h.questions[5]).toContain("▲  Mad-Max-1 is taken");
+    expect(enrollments(h)[0]!.body).toEqual({ label: "studio", install_id: ANY_INSTALL_ID });
+  });
+
+  it("--label with spaces is enrolled with '-', and the equivalent commands show it", async () => {
+    const h = await harness({ answers: ANSWERS });
+    const { code, body } = await h.run("setup", "--url", SERVER, "--label", "Mad-Max 1");
+    expect(code).toBe(ExitCode.Ok);
+    expect(enrollments(h)[0]!.body).toEqual({ label: "Mad-Max-1", install_id: ANY_INSTALL_ID });
+    expect((await enrollArgs(h))[0]!.slice(-2)).toEqual(["--host-id", "Mad-Max-1"]);
+    expect(step(body, "enroll")).toMatchObject({ host_id: "Mad-Max-1" });
+
+    const none = await harness({ noTerminal: true });
+    const refused = await none.run("setup", "--url", SERVER, "--label", " Mad-Max 1 ");
+    expect(refused.body.error!.code).toBe("TERMINAL_REQUIRED");
+    expect(refused.body.error!.details.commands).toContain(
+      "pidgen worker enroll --label Mad-Max-1 -- --host-id Mad-Max-1",
+    );
+  });
+
+  // invalid-name-at-the-question
+  it("the name question stays open on a name the rule refuses, saying how to change it", async () => {
+    const h = await harness({
+      hostName: "sams-laptop",
+      answers: [...ANSWERS, "max@home!", "-box", "y".repeat(94), "studio"],
+    });
+
+    const { code } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.questions).toHaveLength(8);
+    const [chars, leading, long] = [h.questions[5]!, h.questions[6]!, h.questions[7]!].map((text) =>
+      text.replace(/\s*\n[│ ]*/g, " "),
+    );
+    expect(chars).toContain('"@" and "!" are not allowed');
+    expect(chars).toContain(RULE);
+    expect(chars).toContain("For example: max-home");
+    expect(leading).toContain('starts with "-", not a letter or a number');
+    expect(leading).toContain("For example: box");
+    expect(long).toContain("94 characters long");
+    expect(long).toContain("at most 93 characters");
+    expect(enrollments(h)).toHaveLength(1);
+    expect(enrollments(h)[0]!.body).toEqual({ label: "studio", install_id: ANY_INSTALL_ID });
+  });
+
+  // invalid-name-on-the-command-line
+  it("--label the rule refuses exits 2 before anything is sent, with the rule and an example", async () => {
+    const h = await harness({ noTerminal: true });
+
+    const { code, body } = await h.run("setup", "--url", SERVER, "--label", "max@home");
+
+    expect(code).toBe(ExitCode.Usage);
+    expect(body.error!.code).toBe("CLI_USAGE");
+    expect(body.error!.message).toContain('"@" is not allowed');
+    expect(body.error!.message).toContain(RULE);
+    expect(body.error!.message).toContain("For example: max-home");
+    expect(h.requests).toEqual([]);
+    expect(await h.workerLog()).toEqual([]);
+  });
+
+  // suggested-names-are-valid
+  it("suggests a name the rule accepts when this host's name holds spaces or refused characters", async () => {
+    const h = await harness({ hostName: "Sam's  MacBook Pro", answers: [...ANSWERS, ""] });
+
+    const { code } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.questions[4]).toContain("│  Sam-s-MacBook-Pro\n");
+    expect(enrollments(h)[0]!.body).toEqual({
+      label: "Sam-s-MacBook-Pro",
+      install_id: ANY_INSTALL_ID,
+    });
+  });
+
+  it("a long host name is cut to 93 characters, and its -2 suggestion stays within 93", async () => {
+    const host = `_${"a".repeat(120)}`;
+    const cut = "a".repeat(93);
+    const h = await harness({
+      hostName: host,
+      answers: [...ANSWERS, ""],
+      state: { others: [listed(cut)] },
+    });
+
+    const { code } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Ok);
+    const suggested = `${"a".repeat(91)}-2`;
+    expect(h.questions[4]).toContain(`│  ${suggested}\n`);
+    expect(enrollments(h)[0]!.body).toEqual({ label: suggested, install_id: ANY_INSTALL_ID });
+  });
+
+  /** What pidgen-worker enroll prints when the server refuses its request as sent (it exits 1). */
+  const REFUSED_422 = "pidgen-worker enroll: the enrollment was refused: HTTP 422.\n";
+
+  // asks-again-on-422, same-enrollment: the name was asked, so a 422 asks it again, and the same
+  // enrollment is offered under the answer.
+  it("a 422 refusal asks Worker name again, refusing the refused name, and enrolls the answer with the same enrollment", async () => {
+    const h = await harness({
+      answers: [...ANSWERS, "", HOST, "studio"],
+      env: { FAKE_FAIL_ENROLL_RUN: "1", FAKE_FAIL_ENROLL_OUTPUT: REFUSED_422 },
+    });
+
+    const { code, body, stderr } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(stderr).toContain("Pidgen did not accept the enrollment as sent");
+    expect(stderr).toContain("another name may work");
+    // The question again, then once more after the refused name was not accepted as an answer.
+    expect(h.prompts[5]).toMatchObject({ kind: "text", message: "Worker name" });
+    expect(h.questions).toHaveLength(7);
+    expect(h.questions[6]).toContain(`▲  ${HOST} was not accepted by Pidgen`);
+    expect((await enrollArgs(h)).map((args) => args.slice(-2))).toEqual([
+      ["--host-id", HOST],
+      ["--host-id", "studio"],
+    ]);
+    // One enrollment, offered again under the new name, and none withdrawn.
+    expect(enrollments(h)).toHaveLength(1);
+    expect(withdrawals(h)).toEqual([]);
+    expect(step(body, "enroll")).toMatchObject({ host_id: "studio", connected: true });
+    expect(stderr).toContain("Enrolled as studio in Example");
+    expect(stderr).not.toContain("422");
+    expect(stderr).not.toContain("Fix the error");
+  });
+
+  // same-enrollment: when the same enrollment cannot carry the new name, one new enrollment, at most.
+  it("when the same enrollment fails under the name asked after a 422, it is withdrawn and one new enrollment is made", async () => {
+    const h = await harness({
+      answers: [...ANSWERS, "", ""],
+      env: {
+        FAKE_FAIL_ENROLL_RUN: "1,2",
+        FAKE_FAIL_ENROLL_OUTPUT_1: REFUSED_422,
+      },
+    });
+
+    const { code, body, stderr, log } = await h.run("setup", "--url", SERVER);
+
+    expect(body.error, stderr).toBeNull();
+    expect(code).toBe(ExitCode.Ok);
+    expect(h.questions).toHaveLength(6);
+    expect(enrollments(h)).toHaveLength(2);
+    expect(enrollments(h)[1]!.body).toEqual({ label: `${HOST}-2`, install_id: ANY_INSTALL_ID });
+    expect((await enrollArgs(h)).map((args) => args.at(-1))).toEqual([
+      HOST,
+      `${HOST}-2`,
+      `${HOST}-2`,
+    ]);
+    expect(withdrawals(h)).toEqual(["/api/v1/workers/enrollments/enr-example-1"]);
+    expect(log).toMatch(/enrollment enr-example-1 .*unused.*It was withdrawn\./i);
+    expect(step(body, "enroll")).toMatchObject({ host_id: `${HOST}-2`, connected: true });
+  });
+
+  // never-asks-when-it-cannot: --label answered the name in advance, so a 422 stops setup.
+  it("--label refused with 422 stops with ENROLL_FAILED, exit 1, and asks no question", async () => {
+    const h = await harness({
+      answers: ANSWERS,
+      env: { FAKE_FAIL_ENROLL_RUN: "1", FAKE_FAIL_ENROLL_OUTPUT: REFUSED_422 },
+    });
+
+    const { code, body } = await h.run("setup", "--url", SERVER, "--label", "build-box");
+
+    expect(code).toBe(ExitCode.Unexpected);
+    expect(body.error).toMatchObject({ code: "ENROLL_FAILED", details: { withdrawn: true } });
+    expect(h.questions).toHaveLength(4);
+    expect(await enrollArgs(h)).toHaveLength(1);
+    expect(enrollments(h)).toHaveLength(1);
+    expect(withdrawals(h)).toEqual(["/api/v1/workers/enrollments/enr-example-1"]);
+  });
+
+  // stops-after-second-refusal, setup-fix-line-is-specific
+  it("a second 422 refusal stops with ENROLL_FAILED: the fix is the next step, then that the enrollment was withdrawn", async () => {
+    const h = await harness({
+      answers: [...ANSWERS, "", ""],
+      env: {
+        FAKE_FAIL_ENROLL_RUN: "1,2",
+        FAKE_FAIL_ENROLL_OUTPUT: REFUSED_422,
+      },
+    });
+
+    const { code, body, stderr } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Unexpected);
+    expect(body.error!.code).toBe("ENROLL_FAILED");
+    expect(body.error!.details["withdrawn"]).toBe(true);
+    // The name was asked once more only, under the same enrollment, and no third time.
+    expect(h.questions).toHaveLength(6);
+    expect((await enrollArgs(h)).map((args) => args.at(-1))).toEqual([HOST, `${HOST}-2`]);
+    expect(enrollments(h)).toHaveLength(1);
+    expect(withdrawals(h)).toEqual(["/api/v1/workers/enrollments/enr-example-1"]);
+    const fix = String(body.error!.details["fix"]);
+    expect(
+      fix.startsWith(
+        "Update the worker with `pidgen worker update` and enroll again; if it still fails, report it with `pidgen feedback --kind not-working`. The enrollment setup created was withdrawn, so nothing is left waiting.",
+      ),
+    ).toBe(true);
+    expect(body.error!.message).not.toContain("422");
+    // The line under the failed step is the same fix (the screen drops the backticks).
+    expect(stderr).toContain(
+      "│  Update the worker with pidgen worker update and enroll again; if it still fails, report it with pidgen feedback --kind not-working. The enrollment setup created was withdrawn, so nothing is left waiting.\n",
+    );
+    expect(stderr).not.toContain("Fix the error");
+  });
+
+  it("a failure with no reason line points at the worker's output, then that the enrollment expires", async () => {
+    const h = await harness({
+      answers: ANSWERS,
+      env: { FAKE_FAIL_ENROLL_RUN: "1" },
+      state: { withdrawRefusal: () => refusal(500, "INTERNAL_ERROR", "Something went wrong.") },
+    });
+
+    const { code, body, stderr } = await h.run("setup", "--url", SERVER);
+
+    expect(code).toBe(ExitCode.Unexpected);
+    const fix = String(body.error!.details["fix"]);
+    expect(fix).toContain("pidgen-worker's output");
+    expect(fix).toMatch(/pidgen-worker's output.*\. The unused enrollment expires on its own\./);
+    expect(fix).not.toContain("Fix the error");
+    expect(stderr).not.toContain("Fix the error");
   });
 });
 

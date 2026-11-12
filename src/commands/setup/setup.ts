@@ -98,7 +98,15 @@ import {
 } from "../auth/login.js";
 import { doctorChecks } from "../doctor/doctor.js";
 import { workerDoctor } from "../worker/doctor.js";
-import { enrollWorker, NAME_TAKEN, workerEnroll } from "../worker/enroll.js";
+import {
+  enrollWorker,
+  NAME_TAKEN,
+  normalizeWorkerName,
+  numberedWorkerName,
+  suggestWorkerName,
+  workerEnroll,
+  workerNameProblem,
+} from "../worker/enroll.js";
 import { workerLogin } from "../worker/login.js";
 import { workerStart } from "../worker/start.js";
 import { workerUpdate } from "../worker/update.js";
@@ -111,8 +119,6 @@ export const HOSTED_SERVICE_URL = DEFAULT_SERVER_URL;
 
 /** How often setup reads `GET /workers` while waiting for the worker to connect. */
 const CONNECT_POLL_MS = 2_000;
-/** The longest enrollment label the public API document accepts. */
-const LABEL_MAX = 100;
 /** The most sessions at a time `--sessions` and the Custom answer take (the worker's own limit). */
 const SESSIONS_MAX = 64;
 /** What setup says when the person presses Ctrl-C at a prompt, or during a task. */
@@ -465,9 +471,12 @@ async function readAnswers(
   if (label !== undefined && (typeof label !== "string" || label.trim() === "")) {
     throw usageError("--label needs a name for the worker.");
   }
-  const name = typeof label === "string" ? label.trim() : ctx.hostName;
-  if (name.length > LABEL_MAX) {
-    throw usageError(`--label must be at most ${LABEL_MAX} characters.`);
+  // The worker's name, spaces replaced by "-": a name the rule refuses is never sent.
+  const name =
+    typeof label === "string" ? normalizeWorkerName(label) : suggestWorkerName(ctx.hostName);
+  const problem = typeof label === "string" ? workerNameProblem(name) : null;
+  if (problem !== null) {
+    throw usageError(`--label: ${problem}`, { name, example: suggestWorkerName(name) });
   }
   const given = options["url"];
   const url =
@@ -760,7 +769,7 @@ function liveWorker(list: WorkerList, name: string): WorkerList["workers"][numbe
 /**
  * The first of `<base>-2`, `<base>-3`, … no worker the Account lists is named (revoked ones
  * included; a worker's `display_name`, or its `host_id` for one enrolled before names) and the
- * server did not refuse in this run (`refused`, lower case), within the label limit. Names are
+ * server did not refuse in this run (`refused`, lower case), within a name's limit. Names are
  * compared case-insensitively.
  */
 function nextFreeName(
@@ -770,8 +779,7 @@ function nextFreeName(
 ): string {
   const listed = new Set(list?.workers.map((worker) => workerName(worker).toLowerCase()) ?? []);
   for (let number = 2; ; number++) {
-    const suffix = `-${number}`;
-    const name = `${base.slice(0, LABEL_MAX - suffix.length)}${suffix}`;
+    const name = numberedWorkerName(base, number);
     const key = name.toLowerCase();
     if (!listed.has(key) && !refused.has(key)) return name;
   }
@@ -3008,7 +3016,8 @@ class SetupRun {
       return name;
     }
 
-    const host = this.ctx.hostName;
+    // This host's name as a name the rule accepts: spaces and refused characters become "-".
+    const host = suggestWorkerName(this.ctx.hostName);
     const reclaim =
       preferred !== null &&
       list !== null &&
@@ -3031,7 +3040,11 @@ class SetupRun {
     }
     const other = list === null ? undefined : liveWorker(list, host);
     if (other === undefined) {
-      this.note(`Suggested worker name ${host}: this host's name.`);
+      this.note(
+        host === this.ctx.hostName
+          ? `Suggested worker name ${host}: this host's name.`
+          : `Suggested worker name ${host}: this host's name, ${this.ctx.hostName}, made into a name a worker may have.`,
+      );
       return this.askName(list, host);
     }
     const account = this.accountName();
@@ -3062,7 +3075,15 @@ class SetupRun {
    *   leaves its token unspent on that refusal). Should the same enrollment then fail under the new
    *   name, one new enrollment is made for it, and the log names the one left unused.
    *
-   * With `--label` either refusal stops setup instead, naming a name to run it again with.
+   * A third refusal is not about a taken name: pidgen-worker's request is refused as sent (HTTP 422),
+   * and the worker's name is the only part of it the person chose. Setup says so and asks the name
+   * question once more, defaulting to the next free name, then has the same enrollment offered again
+   * under the answer (the server leaves its token unspent on that refusal), as for a taken host id.
+   * A second such refusal in the same run means the name is not the cause: setup stops with
+   * `ENROLL_FAILED` and its fix, and the enrollment is withdrawn.
+   *
+   * With `--label` any of these refusals stops setup instead (a taken name, naming a name to run it
+   * again with).
    */
   private async enrollUnderFreeName(
     ctx: RunContext,
@@ -3076,6 +3097,31 @@ class SetupRun {
     let base: string | null = null;
     let name = first;
     let renamed = false;
+    // Names Pidgen refused as sent (HTTP 422) in this run, in lower case; one is asked again for.
+    const declined = new Set<string>();
+    let reasked = false;
+    const requestRefused = async (hostId: string | null): Promise<string | null> => {
+      const sent = hostId ?? name;
+      this.note(
+        `Pidgen did not accept the enrollment of ${sent} as sent (HTTP 422): the worker name is the only part of it this setup chose.`,
+      );
+      // The name was answered in advance, or a second name was refused the same way: the name is
+      // not the cause, and the refusal stops setup.
+      if (this.answers.labelGiven || reasked) return null;
+      reasked = true;
+      declined.add(sent.toLowerCase());
+      base ??= sent;
+      this.dropTask();
+      this.warn(
+        `Pidgen did not accept the enrollment as sent. The worker name is the only part of it you chose, so another name may work.`,
+      );
+      const skip = new Set([...refused, ...declined]);
+      name = await this.askName(list, nextFreeName(list, base, skip), refused, declined);
+      this.note(`Enrolling as ${name} with the same enrollment.`);
+      this.begin(`Enrolling as ${name}…`, `Couldn't enroll ${name}`);
+      renamed = true;
+      return name;
+    };
     const rename = async (taken: string): Promise<string | null> => {
       refused.add(taken.toLowerCase());
       base ??= taken;
@@ -3085,7 +3131,12 @@ class SetupRun {
       if (this.answers.labelGiven) return null;
       this.dropTask();
       this.warn(`${taken} is taken in Pidgen, so this worker needs another name.`);
-      name = await this.askName(list, nextFreeName(list, base, refused), refused);
+      name = await this.askName(
+        list,
+        nextFreeName(list, base, new Set([...refused, ...declined])),
+        refused,
+        declined,
+      );
       this.note(`Enrolling as ${name} with the same enrollment.`);
       this.begin(`Enrolling as ${name}…`, `Couldn't enroll ${name}`);
       renamed = true;
@@ -3093,7 +3144,7 @@ class SetupRun {
     };
     const spec: CommandSpec = {
       ...workerEnroll,
-      run: (context, input) => enrollWorker(context, input, { rename }),
+      run: (context, input) => enrollWorker(context, input, { rename, requestRefused }),
     };
     const run = async () =>
       (await this.runCommand(
@@ -3111,7 +3162,11 @@ class SetupRun {
         return await run();
       } catch (error) {
         // The same enrollment could not be used under the new name: one new enrollment, at most.
-        if (!(renamed && error instanceof StepFailure && error.error.code === "ENROLL_FAILED")) {
+        // A second refusal as sent (HTTP 422) is not the enrollment's doing: it stops setup.
+        if (
+          !(renamed && error instanceof StepFailure && error.error.code === "ENROLL_FAILED") ||
+          refusedAsSentFailure(error.error)
+        ) {
           throw error;
         }
         renamed = false;
@@ -3144,10 +3199,10 @@ class SetupRun {
         const taken = name;
         refused.add(taken.toLowerCase());
         const given = error.error.details["suggested_name"];
-        const suggested = typeof given === "string" && given.trim() !== "" ? given.trim() : null;
+        const suggested =
+          typeof given === "string" && given.trim() !== "" ? suggestWorkerName(given) : null;
         const usable =
           suggested !== null &&
-          suggested.length <= LABEL_MAX &&
           !refused.has(suggested.toLowerCase()) &&
           !(list !== null && nameTaken(list, suggested));
         const fallback = usable ? suggested : nextFreeName(list, taken, refused);
@@ -3166,7 +3221,7 @@ class SetupRun {
         }
         this.dropTask();
         this.warn(`${taken} is taken in Pidgen, so this worker needs another name.`);
-        name = await this.askName(list, fallback, refused);
+        name = await this.askName(list, fallback, refused, declined);
         this.note(`Enrolling as ${name}.`);
         this.begin(`Enrolling as ${name}…`, `Couldn't enroll ${name}`);
       }
@@ -3238,34 +3293,46 @@ class SetupRun {
   }
 
   /**
-   * The name question, `Worker name`, defaulting to `fallback`: an empty name, one over the label
-   * limit, one the Account lists unrevoked or one the server refused in this run (`refused`, lower
+   * The name question, `Worker name`, defaulting to `fallback`. The answer, each run of spaces
+   * replaced by "-", is the worker's name: an empty one, one the name rule refuses (the message says
+   * how to change it), one the Account lists unrevoked or one the server refused in this run
+   * (`refused`, lower case) or that Pidgen did not accept as sent in this run (`declined`, lower
    * case) keeps it open. Names are compared case-insensitively.
    */
   private async askName(
     list: WorkerList | null,
     fallback: string,
     refused: ReadonlySet<string> = new Set(),
+    declined: ReadonlySet<string> = new Set(),
   ): Promise<string> {
     const account = this.accountName();
     const name = await this.prompter.text({
       message: "Worker name",
       defaultValue: fallback,
       validate: (value) => {
-        const answer = value.trim();
+        // The name the worker will have: spaces become "-" without asking, then the rule applies.
+        const answer = normalizeWorkerName(value);
         if (answer === "") return "Enter a name for this worker.";
-        if (answer.length > LABEL_MAX) return `A worker's name is at most ${LABEL_MAX} characters.`;
+        const problem = workerNameProblem(answer);
+        if (problem !== null) return problem;
         if (refused.has(answer.toLowerCase())) {
           return `${answer} is taken in Pidgen: choose another name.`;
+        }
+        if (declined.has(answer.toLowerCase())) {
+          return `${answer} was not accepted by Pidgen: choose another name.`;
         }
         if (list !== null && nameTaken(list, answer)) {
           return `${answer} is taken: ${account} already has a worker by that name.`;
         }
         return undefined;
       },
-      collapse: (value) => `Worker name · ${value.trim()}`,
+      collapse: (value) => `Worker name · ${normalizeWorkerName(value)}`,
     });
-    return name.trim();
+    const chosen = normalizeWorkerName(name);
+    if (chosen !== name.trim()) {
+      this.note(`${name.trim()} becomes ${chosen}: a worker's name has "-" where spaces were.`);
+    }
+    return chosen;
   }
 
   /** Stops setup before `pidgen worker start` when the worker home holds no credential. */
@@ -3524,6 +3591,12 @@ function installFix(error: CliError): string {
   }
 }
 
+/** Whether `error` is `ENROLL_FAILED` for pidgen-worker's request refused as sent (HTTP 422). */
+function refusedAsSentFailure(error: CliError): boolean {
+  const refusal = error.details["refusal"] as { http_status?: unknown } | null | undefined;
+  return error.code === "ENROLL_FAILED" && refusal?.http_status === 422;
+}
+
 /** The fix for a failed `pidgen worker enroll`. */
 function enrollFix(error: CliError): string {
   if (error.exitCode === ExitCode.Auth) {
@@ -3532,8 +3605,15 @@ function enrollFix(error: CliError): string {
   if (error.code === "ENTITLEMENT_LIMIT_REACHED") {
     return "The Account has enrolled all the workers it may; revoke one in the web app.";
   }
+  // The next step for that failure (`pidgen worker enroll` names it for a failed pidgen-worker
+  // enroll), then what became of the enrollment.
+  const hint = error.details["hint"];
+  const next =
+    typeof hint === "string" && hint !== ""
+      ? hint
+      : "Run `pidgen setup` again; if it fails the same way, report it with `pidgen feedback --kind not-working`.";
   if (error.details["withdrawn"] === true) {
-    return "Fix the error. The enrollment setup created was withdrawn, so nothing is left waiting.";
+    return `${next} The enrollment setup created was withdrawn, so nothing is left waiting.`;
   }
-  return "Fix the error. The unused enrollment expires on its own.";
+  return `${next} The unused enrollment expires on its own.`;
 }

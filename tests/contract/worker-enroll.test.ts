@@ -92,7 +92,8 @@ describe("pidgen worker enroll against the Prism mock of the pending worker enro
       {
         method: "POST",
         url: `${server().url}/api/v1/workers/enrollments`,
-        body: { label: "build box", install_id: id },
+        // The label is sent under the worker name rule: each run of spaces becomes one "-".
+        body: { label: "build-box", install_id: id },
         status: 201,
       },
     ]);

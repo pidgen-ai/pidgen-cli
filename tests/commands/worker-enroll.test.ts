@@ -4,7 +4,9 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { runCli } from "../../src/cli.js";
 import { saveConfig, type Config } from "../../src/core/config.js";
+import { CliError } from "../../src/core/errors.js";
 import { ExitCode } from "../../src/core/exit-codes.js";
+import { enrollWorker } from "../../src/commands/worker/enroll.js";
 import type { Prompter } from "../../src/core/prompter.js";
 import { defaultWorkerRuntime } from "../../src/core/worker.js";
 import {
@@ -301,7 +303,7 @@ describe("pidgen worker enroll", () => {
 
     expect(code).toBe(ExitCode.Ok);
     expect(calls[0]?.body).toEqual({
-      label: "build box",
+      label: "build-box",
       install_id: expect.stringMatching(/^[0-9a-f]{32}$/),
     });
   });
@@ -1090,7 +1092,7 @@ describe("pidgen worker enroll and this install's id", () => {
     const { code } = await run(ctx, "worker", "enroll", "--label", "build box", "--no-install");
 
     expect(code).toBe(ExitCode.Ok);
-    expect(created(calls)).toEqual([{ label: "build box", install_id: id }]);
+    expect(created(calls)).toEqual([{ label: "build-box", install_id: id }]);
     expect(await readFile(join(home, ".pidgen", "install-id"), "utf8")).toBe(`${id}\n`);
   });
 
@@ -1183,7 +1185,7 @@ describe("pidgen worker enroll withdraws an enrollment it cannot use", () => {
         },
       },
     });
-    expect(body.error!.message).toContain("pidgen-worker enroll exited with status 9.");
+    expect(body.error!.message).toContain("pidgen-worker enroll exited with status 9");
     expect(body.error!.message).toContain("The enrollment enr-example-1 was withdrawn.");
     expect(ctx.out.join("") + ctx.err.join("")).not.toContain(ENROLL_TOKEN);
   });
@@ -1371,5 +1373,289 @@ describe("pidgen worker enroll documentation", () => {
     expect(output).not.toContain("INSTALL_UNAVAILABLE");
     expect(output).not.toContain("INSTALL_DECLINED");
     expect(output).not.toContain("worker's install step");
+  });
+});
+
+// A worker name follows one rule wherever the CLI takes one, and a failed
+// pidgen-worker enroll says what happened and what to do next.
+describe("pidgen worker enroll: worker names and enroll failures", () => {
+  const RULE =
+    'A worker\'s name starts with a letter or a number and uses only letters, numbers, ".", "_" and "-", at most 93 characters.';
+
+  // spaces-become-hyphens
+  it("--label and --host-id with spaces: each run of spaces becomes one '-', ends trimmed", async () => {
+    const { ctx, calls, workerCall } = await setup({ installed: true });
+
+    const { code } = await run(
+      ctx,
+      "worker",
+      "enroll",
+      "--label",
+      "Mad-Max 1",
+      "--no-install",
+      "--",
+      "--host-id",
+      "  Mad-Max   1 ",
+    );
+
+    expect(code).toBe(ExitCode.Ok);
+    expect(created(calls)).toEqual([
+      { label: "Mad-Max-1", install_id: expect.stringMatching(/^[0-9a-f]{32}$/) },
+    ]);
+    expect((await workerCall())!.args.slice(-2)).toEqual(["--host-id", "Mad-Max-1"]);
+  });
+
+  it("--host-id=<name> with spaces is replaced in place", async () => {
+    const { ctx, workerCall } = await setup({ installed: true });
+
+    const { code } = await run(
+      ctx,
+      "worker",
+      "enroll",
+      "--no-install",
+      "--",
+      "--host-id=Mad Max 1",
+    );
+
+    expect(code).toBe(ExitCode.Ok);
+    expect((await workerCall())!.args.at(-1)).toBe("--host-id=Mad-Max-1");
+  });
+
+  // invalid-name-on-the-command-line
+  it.each([
+    [["--label", "max@home"]],
+    [["--", "--host-id", "max@home"]],
+    [["--", "--host-id=max@home"]],
+  ])(
+    "refuses %j before anything is created: exit 2 with the rule and an example",
+    async (given) => {
+      const { ctx, calls, workerCall } = await setup({ installed: true });
+
+      const { code, body } = await run(ctx, "worker", "enroll", "--no-install", ...given);
+
+      expect(code).toBe(ExitCode.Usage);
+      expect(body.error).toMatchObject({ code: "CLI_USAGE" });
+      const message = body.error!.message;
+      expect(message).toContain('"@" is not allowed');
+      expect(message).toContain(RULE);
+      expect(message).toContain("For example: max-home");
+      expect(calls).toEqual([]);
+      expect(await workerCall()).toBeNull();
+    },
+  );
+
+  it("names the part of the rule a leading '-' and a name over 93 characters break", async () => {
+    const leading = await setup({ installed: true });
+    const first = await run(leading.ctx, "worker", "enroll", "--label", "-box", "--no-install");
+    expect(first.code).toBe(ExitCode.Usage);
+    expect(first.body.error!.message).toContain('starts with "-"');
+    expect(first.body.error!.message).toContain("For example: box");
+    expect(leading.calls).toEqual([]);
+
+    const long = await setup({ installed: true });
+    const second = await run(
+      long.ctx,
+      "worker",
+      "enroll",
+      "--no-install",
+      "--",
+      "--host-id",
+      "x".repeat(94),
+    );
+    expect(second.code).toBe(ExitCode.Usage);
+    expect(second.body.error!.message).toContain("94 characters long");
+    expect(second.body.error!.message).toContain(`For example: ${"x".repeat(93)}`);
+    expect(long.calls).toEqual([]);
+  });
+
+  // failure-says-what-happened
+  async function failWith(stderr: string, exit = "1") {
+    const h = await setup({
+      installed: true,
+      env: { FAKE_WORKER_EXIT: exit, FAKE_WORKER_STDERR: stderr },
+    });
+    const result = await run(h.ctx, "worker", "enroll", "--no-install");
+    expect(result.code).toBe(ExitCode.Unexpected);
+    expect(result.body.error!.code).toBe("ENROLL_FAILED");
+    expect(JSON.stringify(result.body)).not.toContain(ENROLL_TOKEN);
+    return { ...h, body: result.body, error: result.body.error! };
+  }
+
+  it("a bare HTTP 422 refusal: Pidgen did not accept the request, not your input, update and report", async () => {
+    const { error } = await failWith(
+      "pidgen-worker enroll: the enrollment was refused: HTTP 422.\n",
+    );
+
+    expect(error.message).toContain("Pidgen did not accept the enrollment request");
+    expect(error.message).toContain("not caused by anything you entered");
+    expect(error.message).toContain("`pidgen worker update`");
+    expect(error.message).toContain("`pidgen feedback --kind not-working`");
+    expect(error.message).not.toContain("422");
+    expect(error.details["hint"]).toEqual(expect.stringContaining("`pidgen worker update`"));
+    expect(error.details["hint"]).not.toContain("422");
+    expect(error.details["refusal"]).toEqual({
+      reason: "the enrollment was refused: HTTP 422.",
+      http_status: 422,
+      code: null,
+      service_message: null,
+    });
+    expect(error.details["exit_code"]).toBe(1);
+  });
+
+  it("the refusal's code and the service's message are carried in details", async () => {
+    const { error } = await failWith(
+      "pidgen-worker enroll: the enrollment was refused: HTTP 422 INPUT_INVALID.\n  The service said: host_id is not valid\n",
+    );
+
+    expect(error.details["refusal"]).toEqual({
+      reason: "the enrollment was refused: HTTP 422 INPUT_INVALID.",
+      http_status: 422,
+      code: "INPUT_INVALID",
+      service_message: "host_id is not valid",
+    });
+    expect(error.message).not.toContain("422");
+  });
+
+  it("a bare HTTP 503 refusal: the server had a problem, try again in a few minutes", async () => {
+    const { error } = await failWith(
+      "pidgen-worker enroll: the enrollment was refused: HTTP 503.\n",
+    );
+
+    expect(error.message).toContain("server had a problem");
+    expect(error.message).toContain("Try again in a few minutes");
+    expect(error.message).not.toContain("503");
+    expect(error.details["hint"]).toEqual(expect.stringContaining("Try again in a few minutes"));
+    expect(error.details["refusal"]).toMatchObject({ http_status: 503 });
+  });
+
+  it("a line the worker already explains is repeated", async () => {
+    const line =
+      "the enrollment token was not accepted: it has expired or was already used (HTTP 401 ENROLLMENT_INVALID).";
+    const { error } = await failWith(`pidgen-worker enroll: ${line}\n`);
+
+    expect(error.message).toContain(line);
+    expect(error.details["refusal"]).toMatchObject({
+      reason: line,
+      http_status: 401,
+      code: "ENROLLMENT_INVALID",
+    });
+    expect(typeof error.details["hint"]).toBe("string");
+  });
+
+  it("no reason line: names the exit status and points at the worker's output", async () => {
+    const { error } = await failWith("", "9");
+
+    expect(error.message).toContain("pidgen-worker enroll exited with status 9");
+    expect(error.message).toContain("output");
+    expect(error.details["refusal"]).toBeNull();
+    expect(error.details["hint"]).toEqual(expect.stringContaining("output"));
+    expect(error.details["exit_code"]).toBe(9);
+  });
+
+  // never-asks-when-it-cannot: on its own command line, a 422 is ENROLL_FAILED and nothing asks.
+  it("on the command line a 422 refusal is ENROLL_FAILED and nothing asks, on a terminal too", async () => {
+    const h = await setup({
+      installed: true,
+      ask: () => Promise.resolve("other-name"),
+      env: {
+        FAKE_WORKER_EXIT: "1",
+        FAKE_WORKER_STDERR: "pidgen-worker enroll: the enrollment was refused: HTTP 422.\n",
+      },
+    });
+
+    const { code, body } = await run(h.ctx, "worker", "enroll", "--", "--host-id", "build-box");
+
+    expect(code).toBe(ExitCode.Unexpected);
+    expect(body.error).toMatchObject({ code: "ENROLL_FAILED", details: { withdrawn: true } });
+    expect(h.questions).toEqual([]);
+    expect(h.calls.map((call) => call.method)).toEqual(["POST", "DELETE"]);
+  });
+});
+
+describe("pidgen worker enroll's hooks for an in-process caller", () => {
+  const GLOBAL = { format: "json" as const, timeoutSeconds: 30 };
+
+  /** Runs `enrollWorker` in process, as `pidgen setup` does, returning its result or its error. */
+  async function enrollInProcess(
+    ctx: TestContext,
+    hooks: Parameters<typeof enrollWorker>[2],
+    args: string[] = ["--host-id", "build-box"],
+  ): Promise<{ data: unknown } | CliError> {
+    try {
+      return await enrollWorker(ctx, { args, options: { install: false }, global: GLOBAL }, hooks);
+    } catch (error) {
+      if (error instanceof CliError) return error;
+      throw error;
+    }
+  }
+
+  // asks-again-on-422, same-enrollment: the hook names another host id, and pidgen-worker is run
+  // again with it under the same enrollment; `null` stops with ENROLL_FAILED and withdraws it.
+  it("a 422 refusal calls requestRefused with the refused host id and runs again under the same enrollment", async () => {
+    const h = await setup({
+      installed: true,
+      env: {
+        FAKE_WORKER_EXIT: "1",
+        FAKE_WORKER_STDERR:
+          "pidgen-worker enroll: Pidgen could not accept the request (HTTP 422 INPUT_INVALID).\n",
+      },
+    });
+    const asked: (string | null)[] = [];
+    const renamed: string[] = [];
+
+    const outcome = await enrollInProcess(h.ctx, {
+      rename: (taken) => {
+        renamed.push(taken);
+        return Promise.resolve(null);
+      },
+      requestRefused: (hostId) => {
+        asked.push(hostId);
+        return Promise.resolve(asked.length === 1 ? "other-name" : null);
+      },
+    });
+
+    expect(outcome).toBeInstanceOf(CliError);
+    const error = outcome as CliError;
+    expect(error.code).toBe("ENROLL_FAILED");
+    expect(error.details["withdrawn"]).toBe(true);
+    expect(asked).toEqual(["build-box", "other-name"]);
+    expect(renamed).toEqual([]);
+    // One enrollment, run again under the new host id, then withdrawn once.
+    expect(h.calls.map((call) => call.method)).toEqual(["POST", "DELETE"]);
+    expect((await h.workerCall())!.args.slice(-2)).toEqual(["--host-id", "other-name"]);
+  });
+
+  // other-refusals-unchanged: only a 422 reaches requestRefused.
+  it.each([
+    [
+      "a 401",
+      "pidgen-worker enroll: the enrollment token was not accepted (HTTP 401 ENROLLMENT_INVALID).\n",
+      "ENROLL_FAILED",
+    ],
+    ["a 503", "pidgen-worker enroll: the enrollment was refused: HTTP 503.\n", "ENROLL_FAILED"],
+    ["a reason-less failure", "", "ENROLL_FAILED"],
+    [
+      "a host-taken refusal",
+      "pidgen-worker enroll: host id 'build-box' is already enrolled in this Account (HTTP 409 WORKER_HOST_TAKEN).\n",
+      "WORKER_HOST_TAKEN",
+    ],
+  ])("%s never calls requestRefused", async (_, stderr, code) => {
+    const h = await setup({
+      installed: true,
+      env: { FAKE_WORKER_EXIT: "1", FAKE_WORKER_STDERR: stderr },
+    });
+    const asked: (string | null)[] = [];
+
+    const outcome = await enrollInProcess(h.ctx, {
+      requestRefused: (hostId) => {
+        asked.push(hostId);
+        return Promise.resolve("other-name");
+      },
+    });
+
+    expect(outcome).toBeInstanceOf(CliError);
+    expect((outcome as CliError).code).toBe(code);
+    expect(asked).toEqual([]);
+    expect(h.calls.map((call) => call.method)).toEqual(["POST", "DELETE"]);
   });
 });

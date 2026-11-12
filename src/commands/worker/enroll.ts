@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import type { GlobalOptions, RunContext } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
+import { CliError, usageError } from "../../core/errors.js";
 import { ExitCode } from "../../core/exit-codes.js";
 import { validateBody } from "../../core/input.js";
 import { ensureInstallId, invalidInstallIdNote } from "../../core/install-id.js";
@@ -9,6 +9,7 @@ import { openSession } from "../../core/session.js";
 import {
   findWorker,
   moveWorkerCredentialAside,
+  type WorkerEnrollResult,
   readWorkerCredential,
   restoreWorkerCredential,
   runWorkerEnroll,
@@ -106,6 +107,20 @@ export const workerEnroll: CommandSpec = {
  */
 export interface EnrollHooks {
   rename?: (taken: string) => Promise<string | null>;
+  /**
+   * The server refused `pidgen-worker enroll`'s request as sent (HTTP 422, read from the worker's
+   * reason line whatever its words). The host id is the only part of that request a person chose,
+   * and the server leaves the enrollment's token unspent on that refusal: `requestRefused(hostId)`
+   * (the host id refused, or `null` when the arguments named none) returns another host id to run
+   * `pidgen-worker enroll` again with, under the same enrollment, or `null` to stop with
+   * `ENROLL_FAILED`.
+   */
+  requestRefused?: (hostId: string | null) => Promise<string | null>;
+}
+
+/** Whether a failed `pidgen-worker enroll` run was the server's refusal of its request (HTTP 422). */
+export function refusedAsSent(run: WorkerEnrollResult): boolean {
+  return run.status !== ExitCode.Ok && !run.hostTaken && run.refusal?.http_status === 422;
 }
 
 /** `pidgen worker enroll`, with the hooks an in-process caller may give. */
@@ -114,13 +129,19 @@ export async function enrollWorker(
   { args: given, options, global }: CommandInput,
   hooks: EnrollHooks = {},
 ): Promise<CommandResult> {
-  let args = [...given];
   const install = typeof options["install"] === "boolean" ? options["install"] : undefined;
-  const label = typeof options["label"] === "string" ? options["label"] : undefined;
+  const typedLabel = typeof options["label"] === "string" ? options["label"] : undefined;
+  // A name is the worker's name only once its spaces are replaced: the label and the host id alike.
+  const label = typedLabel === undefined ? undefined : normalizeWorkerName(typedLabel);
   const replace = options["replaceCredential"] === true;
   const body = label === undefined ? {} : { label };
   // A label the contract refuses is refused before anything is installed or created.
   validateBody(WORKER_ENROLLMENTS_DOCUMENT, ENROLL_ROUTE.method, ENROLL_ROUTE.path, body);
+  // So is a name the server would refuse as a host id: it is never sent.
+  if (label !== undefined) requireWorkerName("--label", label);
+  let args = withNormalizedHostId(given);
+  const hostId = hostIdOf(args);
+  if (hostId !== null) requireWorkerName("--host-id", hostId);
 
   // pidgen-worker skips the exchange when worker.env holds a credential, so an enrollment created
   // now would never be used: refuse before anything is installed or an enrollment is created.
@@ -184,14 +205,14 @@ export async function enrollWorker(
     for (;;) {
       const run = await runWorkerEnroll(ctx, worker, token, server, args, ctx.workerRuntime);
       if (run.status === ExitCode.Ok) break;
-      if (!run.hostTaken) {
-        throw new CliError(
-          "ENROLL_FAILED",
-          `pidgen-worker enroll exited with status ${run.status}.`,
-          ExitCode.Unexpected,
-          { ...report, exit_code: run.status, worker },
-        );
+      if (refusedAsSent(run) && hooks.requestRefused) {
+        const next = await hooks.requestRefused(hostIdOf(args));
+        if (next === null) throw enrollFailed(run, { ...report, exit_code: run.status, worker });
+        // The same enrollment, under another host id: the refused token was not spent.
+        args = withHostId(args, next);
+        continue;
       }
+      if (!run.hostTaken) throw enrollFailed(run, { ...report, exit_code: run.status, worker });
       const taken = run.refusedHostId ?? hostIdOf(args);
       const next = taken !== null && hooks.rename ? await hooks.rename(taken) : null;
       if (next === null) throw hostTaken(taken, { ...report, exit_code: run.status, worker });
@@ -259,7 +280,11 @@ function nameTaken(refusal: CliError, label: string | undefined): CliError {
   const given = refusal.details["display_name"];
   const suggestion = refusal.details["suggested_name"];
   const name = typeof given === "string" && given !== "" ? given : (label ?? null);
-  const suggested = typeof suggestion === "string" && suggestion.trim() !== "" ? suggestion : null;
+  // The server's suggestion, made into a name the rule accepts, so the command it names works.
+  const suggested =
+    typeof suggestion === "string" && suggestion.trim() !== ""
+      ? suggestWorkerName(suggestion)
+      : null;
   const other = displayArgument(suggested ?? "<name>");
   return new CliError(
     NAME_TAKEN,
@@ -275,13 +300,147 @@ function nameTaken(refusal: CliError, label: string | undefined): CliError {
  */
 function hostTaken(hostId: string | null, details: Record<string, unknown>): CliError {
   const name = hostId ?? "this worker's host id";
-  const other = hostId === null ? "<name>" : displayArgument(`${hostId}-2`);
+  const other =
+    hostId === null ? "<name>" : displayArgument(numberedWorkerName(suggestWorkerName(hostId), 2));
   return new CliError(
     "WORKER_HOST_TAKEN",
     `Pidgen refused to enroll ${hostId === null ? name : `host id ${hostId}`}: it is taken by another worker, in this Account or another (HTTP 409 WORKER_HOST_TAKEN). Enroll under another name: \`pidgen worker enroll --label ${other} -- --host-id ${other}\`, or run \`pidgen setup\`, which picks a free one.`,
     ExitCode.Refused,
     { ...details, host_id: hostId },
   );
+}
+
+/** The longest name a worker may have: the server refuses a longer host id. */
+export const WORKER_NAME_MAX = 93;
+
+/** The rule a worker's name, its enrollment's label and host id, must match (the server's). */
+const WORKER_NAME_RULE = new RegExp(`^[A-Za-z0-9][A-Za-z0-9._-]{0,${WORKER_NAME_MAX - 1}}$`);
+
+/** The rule in plain words. */
+export const WORKER_NAME_RULE_TEXT = `A worker's name starts with a letter or a number and uses only letters, numbers, ".", "_" and "-", at most ${WORKER_NAME_MAX} characters.`;
+
+/**
+ * A name as the worker will have it: ends trimmed, and each run of spaces replaced by one "-".
+ * Every place the CLI takes a worker's name (`pidgen setup`'s question and `--label`,
+ * `pidgen worker enroll --label` and `--host-id`) normalizes it with this, then checks it with
+ * `workerNameProblem`, so the three cannot drift.
+ */
+export function normalizeWorkerName(name: string): string {
+  return name.trim().replace(/\s+/g, "-");
+}
+
+/**
+ * Why `name`, normalized, cannot be a worker's name, in words that say how to change it (the
+ * characters not allowed, the part of the rule it breaks, the rule and a name that would work), or
+ * `null` when the rule accepts it.
+ */
+export function workerNameProblem(name: string): string | null {
+  if (WORKER_NAME_RULE.test(name)) return null;
+  const example = suggestWorkerName(name);
+  const characters = [...name];
+  if (characters.length === 0) {
+    return `A worker needs a name. ${WORKER_NAME_RULE_TEXT} For example: ${example}.`;
+  }
+  const breaks: string[] = [];
+  const refused = [...new Set(characters.filter((character) => !/[A-Za-z0-9._-]/.test(character)))];
+  if (refused.length > 0) {
+    const listed = refused.map((character) => `"${character}"`);
+    const list =
+      listed.length === 1
+        ? listed[0]!
+        : `${listed.slice(0, -1).join(", ")} and ${listed[listed.length - 1]!}`;
+    breaks.push(`${list} ${refused.length === 1 ? "is" : "are"} not allowed`);
+  }
+  if (/^[._-]/.test(name)) breaks.push(`it starts with "${name[0]!}", not a letter or a number`);
+  if (characters.length > WORKER_NAME_MAX) {
+    breaks.push(`it is ${characters.length} characters long`);
+  }
+  return `${name} can't be a worker's name: ${breaks.join("; ")}. ${WORKER_NAME_RULE_TEXT} For example: ${example}.`;
+}
+
+/**
+ * A name the rule accepts, made from `name` (a host name, or a name the rule refuses): spaces and
+ * each run of other refused characters become one "-", a leading ".", "_" or "-" is dropped, and it
+ * is cut to the limit. A name the rule accepts is returned as it is; one with nothing left is
+ * `worker`.
+ */
+export function suggestWorkerName(name: string): string {
+  const normalized = normalizeWorkerName(name);
+  if (WORKER_NAME_RULE.test(normalized)) return normalized;
+  const made = normalized
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^[^A-Za-z0-9]+/, "")
+    .slice(0, WORKER_NAME_MAX)
+    .replace(/-+$/, "");
+  return made === "" ? "worker" : made;
+}
+
+/** `<name>-<number>`, `name` cut so the result stays within the limit. */
+export function numberedWorkerName(name: string, number: number): string {
+  const suffix = `-${number}`;
+  return `${name.slice(0, WORKER_NAME_MAX - suffix.length)}${suffix}`;
+}
+
+/** Refuses a name given on the command line that the rule refuses, before anything is done. */
+function requireWorkerName(flag: string, name: string): void {
+  const problem = workerNameProblem(name);
+  if (problem !== null) {
+    throw usageError(`${flag}: ${problem}`, { name, example: suggestWorkerName(name) });
+  }
+}
+
+/** `args` with the host id they give pidgen-worker, each one, normalized as a worker's name. */
+function withNormalizedHostId(args: readonly string[]): string[] {
+  return args.map((arg, index) => {
+    if (index > 0 && args[index - 1] === "--host-id") return normalizeWorkerName(arg);
+    if (arg.startsWith("--host-id=")) {
+      return `--host-id=${normalizeWorkerName(arg.slice("--host-id=".length))}`;
+    }
+    return arg;
+  });
+}
+
+/** What to do after a refusal Pidgen should not have made: update the worker, then report it. */
+const UPDATE_HINT =
+  "Update the worker with `pidgen worker update` and enroll again; if it still fails, report it with `pidgen feedback --kind not-working`.";
+
+/** The worker's fallback sentence, which names only an HTTP status (and code). */
+const BARE_REFUSAL = /^the enrollment was refused: HTTP \d{3}(?: [A-Z][A-Z0-9_]*)?\.?$/;
+
+/**
+ * `ENROLL_FAILED` for a `pidgen-worker enroll` run that failed for a reason other than a taken
+ * host id: the message says what happened and what to do next, never a bare HTTP status.
+ * `details.hint` is the next step and `details.refusal` the worker's reason as it printed it.
+ */
+function enrollFailed(run: WorkerEnrollResult, details: Record<string, unknown>): CliError {
+  const refusal = run.refusal;
+  let message: string;
+  let hint: string;
+  if (refusal === null) {
+    hint =
+      "Read pidgen-worker's output above (`pidgen setup` keeps all of it in its log) for what went wrong; if it does not say, report it with `pidgen feedback --kind not-working`.";
+    message = `pidgen-worker enroll exited with status ${run.status} without saying why. ${hint}`;
+  } else if (BARE_REFUSAL.test(refusal.reason)) {
+    const status = refusal.http_status ?? 0;
+    if (status >= 500) {
+      hint = "Try again in a few minutes.";
+      message = `Pidgen's server had a problem and could not finish the enrollment. ${hint}`;
+    } else {
+      hint = UPDATE_HINT;
+      message = `Pidgen did not accept the enrollment request pidgen-worker sent. This is not caused by anything you entered: this worker may be too old for the server. ${hint}`;
+    }
+  } else {
+    hint =
+      "Enroll again; if it fails the same way, report it with `pidgen feedback --kind not-working`.";
+    // The worker's own sentence already says what happened: it is repeated as the worker said it.
+    const said = refusal.service_message === null ? "" : ` Pidgen said: ${refusal.service_message}`;
+    message = `pidgen-worker enroll: ${refusal.reason}${said} ${hint}`;
+  }
+  return new CliError("ENROLL_FAILED", message, ExitCode.Unexpected, {
+    ...details,
+    hint,
+    refusal,
+  });
 }
 
 /** The host id `args` give pidgen-worker (`--host-id <id>` or `--host-id=<id>`, the last wins). */

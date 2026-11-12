@@ -400,6 +400,53 @@ export interface WorkerEnrollResult {
   hostTaken: boolean;
   /** The host id the refusal names, when it names one. */
   refusedHostId: string | null;
+  /** The reason the worker printed for a failed run, or `null` when it printed none. */
+  refusal: WorkerEnrollRefusal | null;
+}
+
+/**
+ * The reason `pidgen-worker enroll` gives for a failed run, as it prints it today: one line
+ * `pidgen-worker enroll: <sentence>`, then any lines indented by two spaces, among them
+ * `  The service said: <message>`. When it has no better words it prints
+ * `the enrollment was refused: HTTP <status>[ <CODE>].`
+ */
+export interface WorkerEnrollRefusal {
+  /** The worker's sentence, after `pidgen-worker enroll: `. */
+  reason: string;
+  /** The HTTP status the sentence names, if any. */
+  http_status: number | null;
+  /** The error code the sentence names after the status, if any. */
+  code: string | null;
+  /** What the service said, from the indented `The service said:` line, if any. */
+  service_message: string | null;
+}
+
+/** The start of the line `pidgen-worker enroll` gives its reason on. */
+const REFUSAL_PREFIX = "pidgen-worker enroll: ";
+
+/** Reads the last reason line `pidgen-worker enroll` printed in `output`, or `null`. */
+export function readEnrollRefusal(output: string): WorkerEnrollRefusal | null {
+  const lines = output.split(/\r?\n/);
+  let at = -1;
+  lines.forEach((line, index) => {
+    if (line.startsWith(REFUSAL_PREFIX)) at = index;
+  });
+  if (at < 0) return null;
+  const reason = lines[at]!.slice(REFUSAL_PREFIX.length).trim();
+  if (reason === "") return null;
+  let serviceMessage: string | null = null;
+  for (const line of lines.slice(at + 1)) {
+    if (!line.startsWith("  ")) break;
+    const said = /^\s+The service said:\s*(.*)$/.exec(line);
+    if (said !== null && said[1]!.trim() !== "") serviceMessage = said[1]!.trim();
+  }
+  const status = /\bHTTP (\d{3})(?: ([A-Z][A-Z0-9_]*))?/.exec(reason);
+  return {
+    reason,
+    http_status: status === null ? null : Number(status[1]),
+    code: status?.[2] ?? null,
+    service_message: serviceMessage,
+  };
 }
 
 /**
@@ -447,7 +494,8 @@ export async function runWorkerEnroll(
   output.end();
   const hostTaken = status === 1 && seen.includes(HOST_TAKEN_MARK);
   const named = hostTaken ? /host id '([^']+)'/.exec(seen) : null;
-  return { status, hostTaken, refusedHostId: named?.[1] ?? null };
+  const refusal = status === 0 ? null : readEnrollRefusal(seen);
+  return { status, hostTaken, refusedHostId: named?.[1] ?? null, refusal };
 }
 
 /** How much of `pidgen-worker enroll`'s last output is kept to find its refusal line. */

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.8
+
+The eighth alpha, published to npm under `alpha` and `latest`. A worker's name follows one rule
+wherever the CLI takes one, a failed enrollment says what happened and what to do next, and
+`pidgen setup` asks for another worker name when Pidgen refuses the enrollment as sent.
+
+- A worker's name follows one rule wherever the CLI takes one (`pidgen setup`'s name question and
+  `--label`, `pidgen worker enroll --label` and `--host-id` after `--`): each run of spaces becomes
+  one `-`, and the result is both the enrollment's label and the worker's host id, so
+  `Mad-Max 1` enrolls as `Mad-Max-1`. A name that still breaks the server's rule (letters, numbers,
+  `.`, `_` and `-`, starting with a letter or a number, at most 93 characters) is never sent: the
+  question stays open, and on the command line it exits 2 with `CLI_USAGE`, naming the characters
+  not allowed and a name that would work. Setup suggests only names the rule accepts.
+- `ENROLL_FAILED` says what happened and what to do next instead of a bare HTTP status, with
+  `error.details.hint` and `error.details.refusal`; setup's enroll step shows that hint, then what
+  became of the enrollment, instead of `Fix the error.`
+- When `pidgen-worker enroll` is refused with HTTP 422 in a `pidgen setup` that asked for the
+  worker's name, setup says Pidgen did not accept the enrollment as sent and that another name may
+  work, asks `Worker name` again and enrolls under the answer with the same enrollment, instead of
+  failing. A second 422 in the same run stops with `ENROLL_FAILED` and withdraws the enrollment;
+  with `--label` setup never asks. `enrollWorker`'s in-process hooks gain `requestRefused`.
+
 ## 0.1.0-alpha.7
 
 The seventh alpha, published to npm under `alpha` and `latest`. `pidgen worker dashboard` opens the

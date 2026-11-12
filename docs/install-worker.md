@@ -456,6 +456,15 @@ there; it never prints or stores it.
   `pidgen setup --label my-host-2`; nothing is started. A removed worker is still offered its own
   name first, since the App Service accepts re-enrolling it; setup falls back only when the server
   refuses it.
+- **Pidgen does not accept the enrollment as sent.** When `pidgen-worker enroll` is refused with
+  `HTTP 422` (the CLI's name rule and the server's differ), the worker's name is the only part of
+  the request you chose, and the server leaves the enrollment unspent. Setup says Pidgen did not
+  accept the enrollment as sent and that another name may work, asks `Worker name` again (the
+  refused name is not accepted as an answer), and enrolls under your answer with the same
+  enrollment, one new enrollment only if that fails. A second such refusal in the same run means
+  the name is not the cause: setup stops with `ENROLL_FAILED`, its fix saying to update the worker
+  and report it, and withdraws the enrollment. With `--label` it stops at the first refusal and
+  asks nothing.
 - **The credential is for another server.** When `worker.env` holds a credential for another
   Pidgen server (or names none), setup stops at the enroll step before creating any enrollment,
   with `WORKER_CREDENTIAL_PRESENT` naming the file and that server. Move the file aside and run
