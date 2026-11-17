@@ -3,7 +3,13 @@ import type { RunContext } from "./context.js";
 import { CliError } from "./errors.js";
 import { ExitCode } from "./exit-codes.js";
 import type { WorkerRuntime } from "./worker.js";
-import { compareVersions, seriesOf, type WorkerRelease } from "./worker-releases.js";
+import {
+  compareVersions,
+  selectSeries,
+  seriesOf,
+  type WorkerRelease,
+  type WorkerReleaseList,
+} from "./worker-releases.js";
 
 /**
  * Where a worker release comes from: the package index, read directly.
@@ -177,13 +183,85 @@ export async function resolveUpdate(
   return choose(ctx, series, index, { installed });
 }
 
+/** What `resolveAccepted` chose, and whether it had to look past the current series. */
+export interface AcceptedChoice {
+  /** The series the release was chosen from. */
+  series: WorkerRelease;
+  /** The release, or `null` when `installed` is already the newest on its track. */
+  release: ResolvedRelease | null;
+  /** The server's current series when the index publishes no release of it yet; else `null`. */
+  fellBackFrom: string | null;
+}
+
+/**
+ * The release to install (or, with `installed`, to update to) when no `--version` is given: the
+ * newest release of the server's current series, as `resolveRelease` and `resolveUpdate` choose it.
+ *
+ * The server names the series of the protocol it speaks as `current`, and it can speak a protocol
+ * before the worker's first release of it is on the index. While the index publishes no release
+ * of the current series on the track, the next series the server accepts is tried, in the list's
+ * order (newest first), and `fellBackFrom` names the current series. A series the list does not
+ * name is never chosen. When no accepted series has a release, the current series' refusal stands.
+ */
+export async function resolveAccepted(
+  ctx: Pick<RunContext, "fetch"> & { workerRuntime: Pick<WorkerRuntime, "platform" | "arch"> },
+  list: WorkerReleaseList,
+  index: PackageIndex,
+  installed?: string,
+): Promise<AcceptedChoice> {
+  const project = await readIndexProject(ctx, index);
+  const current = selectSeries(list);
+  const ordered = [
+    current,
+    ...list.releases.filter((release) => release.series !== current.series),
+  ];
+  const choice: Choice = installed === undefined ? {} : { installed };
+  let refusal: CliError | null = null;
+  for (const series of ordered) {
+    try {
+      const release = pick(ctx, project, series, index, choice);
+      return {
+        series,
+        release,
+        fellBackFrom: series.series === current.series ? null : current.series,
+      };
+    } catch (error) {
+      if (!(error instanceof CliError) || error.code !== "RELEASE_UNSUPPORTED") throw error;
+      refusal ??= error;
+    }
+  }
+  throw refusal!;
+}
+
+/**
+ * What to tell a person when `choice` fell back: the current series is not published yet, which
+ * series' release is used instead, and that the server accepts it. `null` when it did not.
+ */
+export function fallbackNote(choice: AcceptedChoice, index: PackageIndex): string | null {
+  if (choice.fellBackFrom === null) return null;
+  const used =
+    choice.release === null
+      ? `the installed worker stays on series ${choice.series.series}`
+      : `using ${WORKER_PROJECT} ${choice.release.version}, the newest release of series ${choice.series.series}`;
+  return `${index.url} publishes no ${WORKER_PROJECT} release of the server's current series ${choice.fellBackFrom} yet; ${used}, which the server also accepts. Run \`pidgen worker update\` once ${choice.fellBackFrom} is published.`;
+}
+
 async function choose(
   ctx: Pick<RunContext, "fetch"> & { workerRuntime: Pick<WorkerRuntime, "platform" | "arch"> },
   series: WorkerRelease,
   index: PackageIndex,
-  { version, installed }: Choice,
+  choice: Choice,
 ): Promise<ResolvedRelease | null> {
-  const project = await readIndexProject(ctx, index);
+  return pick(ctx, await readIndexProject(ctx, index), series, index, choice);
+}
+
+function pick(
+  ctx: { workerRuntime: Pick<WorkerRuntime, "platform" | "arch"> },
+  project: z.infer<typeof IndexProjectSchema>,
+  series: WorkerRelease,
+  index: PackageIndex,
+  { version, installed }: Choice,
+): ResolvedRelease | null {
   const published = Object.entries(project.releases)
     .filter(
       ([candidate, files]) =>

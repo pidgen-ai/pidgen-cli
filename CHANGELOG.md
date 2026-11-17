@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.9
+
+The ninth alpha, published to npm under `alpha` and `latest`. Installing and updating a worker keep
+working while the server already speaks a worker protocol whose first release is not published yet.
+
+- `pidgen worker install`, `pidgen worker update` and `pidgen setup` no longer fail when the
+  server's `current` worker series has no release on the package index yet. The server can speak a
+  new worker protocol before the worker's first release of it is published. Until then they take
+  the newest release of the next series the server accepts and say so on standard error, and
+  `pidgen worker update` moves to the current series once it is published. A series the server
+  does not list is never taken. `RELEASE_UNSUPPORTED` now means that no accepted series has a
+  release, and still names the current series.
+
 ## 0.1.0-alpha.8
 
 The eighth alpha, published to npm under `alpha` and `latest`. A worker's name follows one rule

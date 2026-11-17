@@ -18,7 +18,13 @@ import {
   type WorkerAdapter,
 } from "../../core/worker-install.js";
 import { renderLifecycle } from "../../core/lifecycle-human.js";
-import { packageIndex, resolveRelease, resolveUpdate, trackOf } from "../../core/worker-index.js";
+import {
+  fallbackNote,
+  packageIndex,
+  resolveAccepted,
+  resolveRelease,
+  trackOf,
+} from "../../core/worker-index.js";
 import { readWorkerReleases, selectSeries } from "../../core/worker-releases.js";
 import { optionalVersion } from "./install.js";
 
@@ -26,7 +32,9 @@ import { optionalVersion } from "./install.js";
  * `pidgen worker update [--version <version>] [--restart] [--test]`: installs `--version`, or else
  * the newest release of the server's `current` series on the installed version's track when it is
  * newer than the installed one (`resolveUpdate`: final releases, and pre-releases too while a
- * pre-release is installed; never an older release), in the recorded form with the same
+ * pre-release is installed; never an older release). While the index publishes no release of the
+ * current series yet, the newest accepted series that it does publish stands in for it, and a note
+ * says so (`resolveAccepted`). It installs in the recorded form with the same
  * verification as `worker install`, and updates the install record. `--test`, or an install that
  * came from TestPyPI, looks there for rehearsals. Nothing updates on its own. When nothing is
  * newer it installs nothing and, in a terminal, says the installed version is the newest on its
@@ -60,13 +68,15 @@ export const workerUpdate: CommandSpec = {
     if (previous === null) throw noInstallRecord();
 
     const { list, meta } = await readWorkerReleases(ctx, global);
-    const series = selectSeries(list, version);
     const index = packageIndex(options["test"] === true || previous.index === "testpypi");
     // Without --version, only a newer release on the installed version's track: never backwards.
+    const choice =
+      version !== undefined ? null : await resolveAccepted(ctx, list, index, previous.version);
+    const series = choice?.series ?? selectSeries(list, version);
     const release =
-      version !== undefined
-        ? await resolveRelease(ctx, series, index, version)
-        : await resolveUpdate(ctx, series, index, previous.version);
+      choice !== null ? choice.release : await resolveRelease(ctx, series, index, version);
+    const note = choice === null ? null : fallbackNote(choice, index);
+    if (note !== null) ctx.io.stderr(`${note}\n`);
     const adapter = adapterFor(ctx, previous.form);
     if (release === null || previous.version === release.version) {
       const { running } = await adapter.status();

@@ -53,8 +53,8 @@ import {
 import type { CommandInput, CommandResult, CommandSpec } from "../../core/registry.js";
 import { openSession, responseMeta } from "../../core/session.js";
 import { skillsStatus } from "../../core/skills.js";
-import { packageIndex, resolveUpdate } from "../../core/worker-index.js";
-import { readWorkerReleases, selectSeries } from "../../core/worker-releases.js";
+import { packageIndex, resolveAccepted } from "../../core/worker-index.js";
+import { readWorkerReleases } from "../../core/worker-releases.js";
 import { CLI_VERSION } from "../../core/version.js";
 import {
   assertSupportedPlatform,
@@ -1989,13 +1989,14 @@ class SetupRun {
 
   /**
    * The release `pidgen worker update` would install: the newest of the server's current series on
-   * `record`'s track when it is newer (`resolveUpdate`, the rule update itself follows).
+   * `record`'s track when it is newer, or of the newest accepted series the index publishes while
+   * the current one is not published yet (`resolveAccepted`, the rule update itself follows).
    */
   private async newerRelease(record: InstallRecord): Promise<string | null> {
     try {
       const { list } = await readWorkerReleases(this.ctx, this.global);
       const index = packageIndex(this.answers.test || record.index === "testpypi");
-      const release = await resolveUpdate(this.ctx, selectSeries(list), index, record.version);
+      const { release } = await resolveAccepted(this.ctx, list, index, record.version);
       this.updateLicence = list.eula.name;
       return release?.version ?? null;
     } catch (error) {

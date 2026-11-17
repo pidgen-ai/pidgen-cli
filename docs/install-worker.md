@@ -195,7 +195,8 @@ installs nothing. *Change coding agents or sessions* asks those questions again 
 caps. *Update the worker* is offered only when `pidgen worker update` would install a newer release: the
 newest of the server's current series on the installed version's track (final releases, and
 pre-releases too while a pre-release is installed), so a machine on `2.11.1b1` is offered `2.11.1b2`
-and never `2.11.0`. It runs `pidgen worker update --restart`. `--agent`, `--sessions` and `--plan`
+and never `2.11.0`. While the current series has no release on the package index yet, the newest
+accepted series it does publish stands in. It runs `pidgen worker update --restart`. `--agent`, `--sessions` and `--plan`
 answer the question in advance: change them.
 
 On a machine where only part is done, setup collapses what is done into one line, such as

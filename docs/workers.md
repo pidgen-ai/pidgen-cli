@@ -110,9 +110,14 @@ else the hosted server, `https://api.pidgen.ai`.
    or Intel. Only final releases are taken by default. A pre-release (an alpha, beta or release
    candidate: `X.Y.ZaN`, `X.Y.ZbN`, `X.Y.ZrcN`) is installed only when `--version` names it
    exactly, for example `--version 2.11.0b1`. Development builds (`X.Y.Z.devN`) are candidates
-   only on TestPyPI. A series the index has no release of exits 5 with `RELEASE_UNSUPPORTED`;
-   when the series has only pre-releases, `error.details.pre_release` names the newest, the one
-   `--version` would install.
+   only on TestPyPI. Without `--version`, while the index has no final release of the `current`
+   series yet (the server can speak a new protocol before the worker's first release of it is
+   published), it takes the newest release of the next series the server accepts, newest first,
+   and says so on standard error; `pidgen worker update` moves to the current series once it is
+   published. A series the server does not list is never taken. When no accepted series has a
+   release, it exits 5 with `RELEASE_UNSUPPORTED` naming the current series; when that series has
+   only pre-releases, `error.details.pre_release` names the newest, the one `--version` would
+   install. A series named by `--version` that the index has no release of exits the same way.
 4. When the install record already names that version, it does nothing and exits 0 with
    `installed: false`. `--force` reinstalls it.
 5. It prints the worker's licence notice to standard error, ending with the link to the licence's
@@ -218,7 +223,9 @@ $ pidgen worker update [--version <version>] [--restart] [--test]
 ```
 
 Installs `--version`, or else the newest release of the server's `current` series that is newer
-than the installed one, in the recorded form with the same verification as `worker install`
+than the installed one (while the index publishes no release of the current series yet, the
+newest accepted series it does publish stands in, as for `worker install`, and a note on standard
+error says so), in the recorded form with the same verification as `worker install`
 (steps 1–3 and 5–7 [above](#install-the-worker); for a container, the cosign signature before
 `docker pull`), and updates the install record. It looks on TestPyPI with `--test`, or when the
 installed worker came from there. It needs an install record; without one it exits 4 with

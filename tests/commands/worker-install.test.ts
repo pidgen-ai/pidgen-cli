@@ -16,6 +16,7 @@ import {
   RECORDED_WHEEL,
   RELEASES_URL,
   releaseList,
+  seriesEntry,
   TEST_PROVENANCE_URL,
   TEST_PYPI_JSON_URL,
   TEST_IDENTITY,
@@ -391,8 +392,27 @@ describe("pidgen worker install (wheel)", () => {
     expect(setup.fetchCalls.map((call) => call.url)).toContain(PYPI_JSON_URL);
   });
 
-  it("exits 5 with RELEASE_UNSUPPORTED when the index has no release of the series", async () => {
-    const setup = await installContext({ index: { "0.9.9": [indexWheel("0.9.9")] } });
+  it("installs the newest accepted series while the index publishes no current release yet", async () => {
+    // The server speaks 1.1 before the worker's first 1.1 release is on the index.
+    const setup = await installContext({
+      releases: {
+        ...releaseList(),
+        service_protocol: "1.1",
+        accepted_protocols: ["1.1", "1.0"],
+        current: "1.1",
+        releases: [seriesEntry("1.1", "current"), seriesEntry("1.0", "supported")],
+      },
+    });
+
+    expect(await runCli(["worker", "install"], setup.ctx)).toBe(ExitCode.Ok);
+    expect(envelope(setup.ctx)).toMatchObject({ ok: true, data: { version: "1.0.0" } });
+    const stderr = setup.ctx.err.join("");
+    expect(stderr).toContain("current series 1.1");
+    expect(stderr).toContain("pidgen-worker 1.0.0");
+  });
+
+  it("exits 5 with RELEASE_UNSUPPORTED when no series the server accepts has a release", async () => {
+    const setup = await installContext({ index: { "0.8.1": [indexWheel("0.8.1")] } });
 
     expect(await runCli(["worker", "install"], setup.ctx)).toBe(ExitCode.Refused);
     expect(envelope(setup.ctx)).toMatchObject({

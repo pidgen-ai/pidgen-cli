@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   chooseWheel,
+  fallbackNote,
   packageIndex,
   PYPI,
+  resolveAccepted,
   resolveRelease,
   resolveUpdate,
   TEST_PYPI,
@@ -12,7 +14,12 @@ import {
   WORKER_REHEARSAL_IDENTITIES,
   WORKER_RELEASE_IDENTITIES,
 } from "../../src/core/worker-release-identities.js";
-import { compareVersions, seriesOf, type WorkerRelease } from "../../src/core/worker-releases.js";
+import {
+  compareVersions,
+  seriesOf,
+  type WorkerRelease,
+  type WorkerReleaseList,
+} from "../../src/core/worker-releases.js";
 
 const VERSION = "2.10.0";
 const TAGS = [
@@ -254,6 +261,85 @@ describe("choosing an update for the installed version", () => {
     const ctx = ctxFor(["2.11.0", "2.11.1a1", "2.11.1b1", "2.11.1b2"]);
     expect((await resolveRelease(ctx, SERIES, PYPI, "2.11.0")).version).toBe("2.11.0");
     expect((await resolveRelease(ctx, SERIES, PYPI, "2.11.1a1")).version).toBe("2.11.1a1");
+  });
+});
+
+describe("falling back while the current series is not published yet", () => {
+  const release = (series: string, status: "current" | "supported"): WorkerRelease => ({
+    series,
+    protocol: series,
+    status,
+    wheel: { project: "pidgen-worker", requirement: `pidgen-worker~=${series}.0` },
+    container: { reference: `ghcr.io/example-org/worker:${series}` },
+  });
+  // The server speaks 2.12 and still accepts 2.11.
+  const LIST = {
+    service_protocol: "2.12",
+    accepted_protocols: ["2.12", "2.11"],
+    current: "2.12",
+    releases: [release("2.12", "current"), release("2.11", "supported")],
+    eula: { name: "Example licence", location: "In the wheel.", notice: "Installing accepts it." },
+    harnesses: [],
+  } as WorkerReleaseList;
+  const ctxFor = (versions: string[]) => ({
+    workerRuntime: { platform: "linux", arch: "x64" } as const,
+    fetch: async () =>
+      new Response(
+        JSON.stringify({
+          releases: Object.fromEntries(
+            versions.map((version) => [
+              version,
+              [
+                {
+                  filename: `pidgen_worker-${version}-py3-none-any.whl`,
+                  url: `https://files.pythonhosted.org/${version}.whl`,
+                  digests: { sha256: "e".repeat(64) },
+                },
+              ],
+            ]),
+          ),
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+  });
+
+  it("installs the current series once it is published, without a note", async () => {
+    const choice = await resolveAccepted(ctxFor(["2.11.3", "2.12.0"]), LIST, PYPI);
+    expect(choice.release?.version).toBe("2.12.0");
+    expect(choice.fellBackFrom).toBeNull();
+    expect(fallbackNote(choice, PYPI)).toBeNull();
+  });
+
+  it("installs the newest accepted series the index publishes, and says so", async () => {
+    // A beta of the current series is not a final release, so it does not count as published.
+    const choice = await resolveAccepted(ctxFor(["2.11.2", "2.11.3", "2.12.0b1"]), LIST, PYPI);
+    expect(choice.release?.version).toBe("2.11.3");
+    expect(choice.release?.status).toBe("supported");
+    expect(choice.series.series).toBe("2.11");
+    expect(choice.fellBackFrom).toBe("2.12");
+    const note = fallbackNote(choice, PYPI)!;
+    expect(note).toContain("current series 2.12");
+    expect(note).toContain("pidgen-worker 2.11.3");
+    expect(note).toContain("pidgen worker update");
+  });
+
+  it("updates within the accepted series while the current one is not published", async () => {
+    const published = ["2.11.2", "2.11.3"];
+    const newer = await resolveAccepted(ctxFor(published), LIST, PYPI, "2.11.2");
+    expect(newer.release?.version).toBe("2.11.3");
+    const newest = await resolveAccepted(ctxFor(published), LIST, PYPI, "2.11.3");
+    expect(newest.release).toBeNull();
+    expect(newest.fellBackFrom).toBe("2.12");
+    expect(fallbackNote(newest, PYPI)).toContain("stays on series 2.11");
+    const moved = await resolveAccepted(ctxFor([...published, "2.12.0"]), LIST, PYPI, "2.11.3");
+    expect(moved.release?.version).toBe("2.12.0");
+  });
+
+  it("never falls back to a series the server does not accept", async () => {
+    await expect(resolveAccepted(ctxFor(["2.10.9"]), LIST, PYPI)).rejects.toMatchObject({
+      code: "RELEASE_UNSUPPORTED",
+      details: { series: "2.12" },
+    });
   });
 });
 

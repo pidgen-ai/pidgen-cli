@@ -21,7 +21,9 @@ import {
   type ContainerRecord,
 } from "./worker-container.js";
 import {
+  fallbackNote,
   packageIndex,
+  resolveAccepted,
   resolveRelease,
   WORKER_PROJECT,
   WORKER_PYTHON,
@@ -289,9 +291,22 @@ export async function installWorker(
   const form = await chooseForm(ctx, options.runtime, record?.form, options.detect ?? ["wheel"]);
 
   const { list, meta } = await readWorkerReleases(ctx, global);
-  const series = selectSeries(list, options.version);
   const index = packageIndex(options.test === true);
-  const release = await resolveRelease(ctx, series, index, options.version);
+  let release: ResolvedRelease;
+  if (options.version !== undefined) {
+    release = await resolveRelease(
+      ctx,
+      selectSeries(list, options.version),
+      index,
+      options.version,
+    );
+  } else {
+    // The current series, or the newest accepted series published while it is not yet.
+    const choice = await resolveAccepted(ctx, list, index);
+    release = choice.release!;
+    const note = fallbackNote(choice, index);
+    if (note !== null) ctx.io.stderr(`${note}\n`);
+  }
   if (!options.force && record?.form === form && record.version === release.version) {
     return { record, installed: false, meta };
   }
